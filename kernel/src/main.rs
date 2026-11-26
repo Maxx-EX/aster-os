@@ -192,6 +192,7 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
         boot_trusted: info.trusted == 1,
     });
 
+    fb::cache_wall(&ex3::EX3_TAG[..13]);
     shell::render_dashboard();
     shell::run()
 }

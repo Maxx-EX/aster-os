@@ -864,6 +864,22 @@ static mut FRAME: u32 = 0;
 static mut WIN_X: i32 = 140;
 static mut WIN_Y: i32 = 58;
 
+/// 拖拽专用：只擦窗口挪动扫过的并集区域，再在新位置画窗口
+pub fn move_window_to(nx: i32, ny: i32) {
+    let (ox, oy) = win_pos();
+    if nx == ox && ny == oy {
+        return;
+    }
+    let ux = ox.min(nx).max(0) as u32;
+    let uy = oy.min(ny).max(0) as u32;
+    let uw = WIN_W + (nx - ox).unsigned_abs();
+    let uh = WIN_H + (ny - oy).unsigned_abs();
+    restore_wall(ux, uy, uw, uh);
+    set_win_pos(nx, ny);
+    draw_window(nx, ny);
+    crate::cursor::invalidate();
+}
+
 pub fn frame() -> u32 {
     unsafe { FRAME }
 }
@@ -879,12 +895,36 @@ pub fn set_win_pos(x: i32, y: i32) {
     }
 }
 
-pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks: u32, kernel_kb: u64) {
+static mut WALL: [u32; 1024 * 768] = [0; 1024 * 768];
+
+fn wall_addr() -> u64 {
+    unsafe { core::ptr::addr_of!(WALL) as u64 }
+}
+
+const WIN_W: u32 = 848;
+const WIN_H: u32 = 602;
+
+fn set_base(b: u64) -> u64 {
+    unsafe {
+        match FB.as_mut() {
+            Some(f) => {
+                let old = f.base;
+                f.base = b;
+                old
+            }
+            None => 0,
+        }
+    }
+}
+
+/// 静态层：壁纸、顶栏、图标、底栏底板。开机画一次存到 0x4700_0000，
+/// 之后每次重绘只是把它拷回屏幕，不再逐像素算渐变
+pub fn cache_wall(ex3_short: &str) {
     if !available() {
         return;
     }
+    let saved = set_base(wall_addr());
 
-    // ---- 壁纸：非线性竖直渐变 + 两团柔光 ----
     let bands = 128u32;
     let band_h = H / bands + 1;
     let span = (bands - 1) * (bands - 1);
@@ -895,7 +935,6 @@ pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks:
     glow_rect(690, 40, 380, 260, 0x2f6f96, 24);
     glow_rect(90, 460, 340, 260, 0x1f4a6b, 18);
 
-    // ---- 顶栏 ----
     vgrad(0, 0, W, 30, 0x111c28, 0x0a121b);
     fill_rect(0, 30, W, 1, 0x2c4056);
     draw_text(14, 7, "ASTER", 0x5cc8f5, 1);
@@ -905,7 +944,6 @@ pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks:
     draw_text(W - right - 14, 7, "EX3 ", 0x71889f, 1);
     draw_text(W - text_len(ex3_short, 1) - 14, 7, ex3_short, 0x7ee787, 1);
 
-    // ---- 左侧图标 ----
     draw_text(26, 50, "桌面", 0x8ea6bd, 1);
     let ix = 24u32;
     icon_tile(ix, 74, 0x1b3a52, 0x5cc8f5, '>', "终端", false);
@@ -913,16 +951,54 @@ pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks:
     icon_tile(ix, 298, 0x1e3a2f, 0x7ee787, 'N', "网络", false);
     icon_tile(ix, 410, 0x392a45, 0xc792ea, 'i', "关于", false);
 
-    // ---- 主窗口 ----
-    let win_x = unsafe { WIN_X };
-    let win_y = unsafe { WIN_Y };
-    let win_w = 848u32;
-    let win_h = 602u32;
+    let bar_y = H - 50;
+    fill_rect(0, bar_y, W, 50, 0x0b1420);
+    fill_rect(0, bar_y, W, 1, 0x2a3d52);
+    rounded_rect(10, bar_y as i32 + 9, 94, 32, 9, 0x1e3145);
+    fill_rect(24, bar_y + 10, 66, 1, lighten(0x1e3145, 44));
+    draw_char(22, bar_y + 16, 'A', 0x5cc8f5, 2);
+    draw_text(48, bar_y + 17, "开始", 0xe4eef7, 1);
+    rounded_rect(114, bar_y as i32 + 9, 100, 32, 9, 0x162637);
+    fill_rect(124, bar_y + 36, 80, 2, 0x5cc8f5);
+    draw_text(128, bar_y + 17, "终端", 0xcfe0f0, 1);
+    draw_text(W - 216, bar_y + 17, "键盘", 0x71889f, 1);
+    draw_text(W - 154, bar_y + 17, "网络", 0x71889f, 1);
+
+    set_base(saved);
+}
+
+/// 把静态层的一段拷回屏幕。拖拽时只拷两块矩形，不用整屏重算
+pub fn restore_wall(x: u32, y: u32, w: u32, h: u32) {
+    if !available() {
+        return;
+    }
+    let f = fb();
+    if x >= f.w || y >= f.h {
+        return;
+    }
+    let x1 = (x + w).min(f.w);
+    let y1 = (y + h).min(f.h);
+    for yy in y..y1 {
+        let row = (yy * f.stride) as u64;
+        for xx in x..x1 {
+            let off = row + (xx * 4) as u64;
+            let src = unsafe { core::ptr::read_volatile((wall_addr() + off) as *const u32) };
+            unsafe { core::ptr::write_volatile((f.base + off) as *mut u32, src) };
+        }
+    }
+}
+
+static mut LAST_TASKS: u32 = 0;
+static mut LAST_KB: u64 = 0;
+
+/// 窗口整块：阴影、圆角、标题栏、内容底板、底部状态行
+pub fn draw_window(win_x: i32, win_y: i32) {
+    let win_w = WIN_W;
+    let win_h = WIN_H;
 
     drop_shadow(win_x, win_y, win_w, win_h, 16);
     rounded_rect(win_x, win_y, win_w, win_h, 16, 0x121d29);
 
-    // 标题栏：同上圆角，下边补成直边
     let tx = win_x + 1;
     let ty = win_y + 1;
     let tw = win_w - 2;
@@ -934,43 +1010,15 @@ pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks:
     draw_text(tx as u32 + 14, ty as u32 + 11, "终端", 0xe4eef7, 1);
     draw_text(tx as u32 + 50, ty as u32 + 11, "TERMINAL", 0x71889f, 1);
 
-    // 三个圆点按钮
     let by = ty + 15;
     let bx = tx + tw as i32 - 76;
     circle(bx, by, 6, 0xff5f57, 255);
     circle(bx + 22, by, 6, 0xfebc2e, 255);
     circle(bx + 44, by, 6, 0x28c840, 255);
 
-    // ---- 终端面板 ----
     term_guard(tx as u32 + 12, ty as u32 + 50, 88 * 8 + 8);
 
-    // ---- 底栏 ----
-    let bar_y = H - 50;
-    fill_rect(0, bar_y, W, 50, 0x0b1420);
-    fill_rect(0, bar_y, W, 1, 0x2a3d52);
-
-    rounded_rect(10, bar_y as i32 + 9, 94, 32, 9, 0x1e3145);
-    fill_rect(24, bar_y + 10, 66, 1, lighten(0x1e3145, 44));
-    draw_char(22, bar_y + 16, 'A', 0x5cc8f5, 2);
-    draw_text(48, bar_y + 17, "开始", 0xe4eef7, 1);
-
-    rounded_rect(114, bar_y as i32 + 9, 100, 32, 9, 0x162637);
-    fill_rect(124, bar_y + 36, 80, 2, 0x5cc8f5);
-    draw_text(128, bar_y + 17, "终端", 0xcfe0f0, 1);
-
-    let now = clock_str(uptime_ms);
-    let tstr = core::str::from_utf8(&now.0[..now.1]).unwrap_or("00:00");
-    draw_text(W - 76, bar_y + 17, tstr, 0xe4eef7, 1);
-
-    let kx = W - 216;
-    draw_text(kx, bar_y + 17, "键盘", 0x71889f, 1);
-    circle(kx as i32 + 40, bar_y as i32 + 26, 4, if kb { 0x7ee787 } else { 0x4a5a6b }, 255);
-
-    let nx = W - 154;
-    draw_text(nx, bar_y + 17, "网络", 0x71889f, 1);
-    circle(nx as i32 + 40, bar_y as i32 + 26, 4, if net { 0x7ee787 } else { 0x4a5a6b }, 255);
-
-    // 窗口底部状态行
+    let (tasks, kernel_kb) = unsafe { (LAST_TASKS, LAST_KB) };
     let sy = (win_y + win_h as i32 - 30) as u32;
     draw_text(tx as u32 + 14, sy, "任务 ", 0x71889f, 1);
     draw_num(tx as u32 + 56, sy, tasks as u64);
@@ -982,11 +1030,38 @@ pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks:
     draw_num(tx as u32 + 230, sy, used_pages as u64);
     draw_text(tx as u32 + 246, sy, "/ 32768", 0x71889f, 1);
     draw_text(tx as u32 + 320, sy, "键盘输入 · EX3 已校验 · AVP L1/L2/L3 全通过", 0x5a7391, 1);
+}
+
+pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks: u32, kernel_kb: u64) {
+    if !available() {
+        return;
+    }
+
+    // 底图整块从缓存拷回，省掉渐变和图标的重算
+    restore_wall(0, 0, W, H);
+
+    // 底栏上会变的两样：时钟、键盘/网络指示灯
+    let bar_y = H - 50;
+    let now = clock_str(uptime_ms);
+    let tstr = core::str::from_utf8(&now.0[..now.1]).unwrap_or("00:00");
+    draw_text(W - 76, bar_y + 17, tstr, 0xe4eef7, 1);
+    circle((W - 216) as i32 + 40, bar_y as i32 + 26, 4, if kb { 0x7ee787 } else { 0x4a5a6b }, 255);
+    circle((W - 154) as i32 + 40, bar_y as i32 + 26, 4, if net { 0x7ee787 } else { 0x4a5a6b }, 255);
+
+    unsafe {
+        LAST_TASKS = tasks;
+        LAST_KB = kernel_kb;
+    }
+    let (win_x, win_y) = (unsafe { WIN_X }, unsafe { WIN_Y });
+    draw_window(win_x, win_y);
+
+    // 窗口外的顶栏文字是缓存里的，ex3_short 变了才需要重画，这里不管
 
     unsafe {
         FRAME = FRAME.wrapping_add(1);
     }
 }
+
 
 fn term_guard(x: u32, y: u32, w: u32) {
     let ph = 26 * 16 + 8;

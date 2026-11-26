@@ -67,8 +67,8 @@ fn handle_mouse() -> bool {
         let nx = (mx - unsafe { OFF_X }).clamp(-560, 980);
         let ny = (my - unsafe { OFF_Y }).clamp(34, 660);
         if nx != wx || ny != wy {
-            fb::set_win_pos(nx, ny);
-            want = true;
+            // 只重绘窗口扫过的那块，不整屏重画
+            fb::move_window_to(nx, ny);
         }
     }
     want
