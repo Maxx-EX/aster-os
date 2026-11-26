@@ -318,6 +318,11 @@ pub extern "C" fn svc_handler(esr: u64, frame: *mut u64) -> u64 {
                 set_return_code(a0);
                 return kill_current(frame);
             }
+            124 => {
+                // sched_yield：主动让出，帧可能已经被换成别的任务
+                sched::yield_current(frame);
+                0
+            }
             172 => sched::current_id() as i64,
             _ => {
                 println!("[SVC] 未知系统调用号 {} → ENOSYS", nr);

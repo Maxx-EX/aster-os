@@ -123,3 +123,19 @@ pub fn run_wx() -> Result<u64, &'static str> {
     let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
     Ok(code)
 }
+
+
+/// sched_yield 验证：两个任务每打印一行就让出，输出应严格交替
+pub fn run_yield() -> Result<u64, &'static str> {
+    sched::reset();
+    let sa = make_space(USER_YIELD, USER_YIELD_SIZE)?;
+    let sb = make_space(USER_YIELD, USER_YIELD_SIZE)?;
+    if sched::spawn(sa).is_none() || sched::spawn(sb).is_none() {
+        return Err("任务表已满");
+    }
+    crate::println!("[YIELD] 两个任务各打印 8 行、每行后 sched_yield，期望 Y1 Y2 严格交替");
+    timer::arm();
+    mmu::activate(&sa);
+    let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
+    Ok(code)
+}

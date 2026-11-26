@@ -186,6 +186,10 @@ pub fn run() -> ! {
                 println!("  MMU: {}", if crate::mmu::enabled() { "已开启" } else { "关闭" });
                 crate::mmu::dump();
             }
+            "yield" => match crate::task::run_yield() {
+                Ok(code) => println!("[YIELD] 任务结束，退出码 {}", code),
+                Err(e) => println!("[TASK] 无法运行: {}", e),
+            },
             "wx" => match crate::task::run_wx() {
                 Ok(code) => println!("[WX] 任务结束，退出码 {}", code),
                 Err(e) => println!("[TASK] 无法运行: {}", e),

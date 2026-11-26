@@ -42,10 +42,11 @@ USER_BIN  := $(B)/user/hello.bin
 ISO_BIN   := $(B)/user/iso.bin
 FP_BIN    := $(B)/user/fp.bin
 WX_BIN    := $(B)/user/wx.bin
+YL_BIN    := $(B)/user/yield.bin
 FAULT_BIN := $(B)/user/fault.bin
 BUSY_BIN  := $(B)/user/busy.bin
 
-user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN)
+user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN)
 
 $(B)/user/%.o: user/%.S
 	@mkdir -p $(B)/user
@@ -67,6 +68,10 @@ $(WX_BIN): $(B)/user/wx.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 wx: $$(stat -c%s $@) bytes"
 
+$(YL_BIN): $(B)/user/yield.elf
+	$(CROSS)-objcopy -O binary $< $@
+	@echo "[BUILD] 用户程序 yield: $$(stat -c%s $@) bytes"
+
 $(USER_BIN): $(B)/user/hello.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 hello: $$(stat -c%s $@) bytes"
@@ -82,7 +87,7 @@ $(BUSY_BIN): $(B)/user/busy.elf
 # ---------- 1. 内核（Rust + C） ----------
 kernel: $(KBIN)
 
-$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN)
+$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN)
 	@mkdir -p $(B)
 	@test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
 	@python3 tools/aster-sign.py --build-id "aster-$(BOARD)" gen-ex3
@@ -94,6 +99,7 @@ $(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BI
 	    ASTER_USER_ISO_BIN="$(CURDIR)/$(ISO_BIN)" \
 	    ASTER_USER_FP_BIN="$(CURDIR)/$(FP_BIN)" \
 	    ASTER_USER_WX_BIN="$(CURDIR)/$(WX_BIN)" \
+	    ASTER_USER_YIELD_BIN="$(CURDIR)/$(YL_BIN)" \
 	    cargo build --release $(CARGO_FEAT)
 	$(CROSS)-objcopy -O binary $(KREL)/aster-kernel $@
 	@echo "[BUILD] kernel .ast: $$(stat -c%s $@) bytes"
@@ -204,6 +210,16 @@ test: image
 	# 页帧分配器：两个任务各 5 页，加内核页表共 10 页
 	@grep -q "页帧池 10 / 32768 页已用" $(B)/test.log && \
 	    echo "[TEST] PASS 页帧分配器" || (echo "[TEST] FAIL 页帧计数不对" && exit 1)
+
+	# sched_yield：两个任务各 8 行，必须严格交替
+	@(sleep 9; printf 'yield\n'; sleep 3; printf 'halt\n') | timeout 50 \
+	    qemu-system-aarch64 -M virt -cpu cortex-a72 -m 512M -nographic \
+	    -kernel $(B)/aster-boot.elf 2>&1 | tr -d '\r' > $(B)/test-yield.log || true
+	@python3 -c "import re,sys; t=open('$(B)/test-yield.log').read(); \
+seq=[m for m in re.findall(r'Z\\d|Y[12]', t)]; \
+ok = seq[:16]==['Y1','Y2']*8; \
+print('[TEST] PASS sched_yield 主动让出（严格交替）' if ok else '[TEST] FAIL yield 未交替: '+str(seq[:16])); \
+sys.exit(0 if ok else 1)"
 
 # ---------- 5. 树莓派 ----------
 rpi4:

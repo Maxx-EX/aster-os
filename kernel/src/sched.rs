@@ -150,6 +150,23 @@ pub fn tick(frame: *mut u64) {
     }
 }
 
+/// 当前任务主动让出 CPU（sched_yield）。帧换人后返回 true。
+pub fn yield_current(frame: *mut u64) -> bool {
+    unsafe {
+        let mut f = core::slice::from_raw_parts_mut(frame, FRAME_WORDS);
+        if CURRENT < NTASKS && TASKS[CURRENT].state == State::Ready {
+            TASKS[CURRENT].ctx.copy_from_slice(&f);
+        }
+        match pick_next() {
+            Some(n) => {
+                load_into(&mut f, n);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 /// 当前任务调用 exit：标记 Dead 并把 CPU 交给下一个任务。
 /// 返回 true = 还有任务在跑（帧已换人）；false = 全跑完了，该回内核。
 pub fn exit_current(frame: *mut u64) -> bool {
