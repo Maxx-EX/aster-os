@@ -39,10 +39,11 @@ info:
 
 # ---------- 0. 用户态程序（独立扁平二进制，链接到 0x44400000） ----------
 USER_BIN  := $(B)/user/hello.bin
+ISO_BIN   := $(B)/user/iso.bin
 FAULT_BIN := $(B)/user/fault.bin
 BUSY_BIN  := $(B)/user/busy.bin
 
-user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN)
+user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN)
 
 $(B)/user/%.o: user/%.S
 	@mkdir -p $(B)/user
@@ -51,6 +52,10 @@ $(B)/user/%.o: user/%.S
 
 $(B)/user/%.elf: $(B)/user/%.o user/hello.ld
 	$(CROSS)-ld -T user/hello.ld -o $@ $<
+
+$(ISO_BIN): $(B)/user/iso.elf
+	$(CROSS)-objcopy -O binary $< $@
+	@echo "[BUILD] 用户程序 iso: $$(stat -c%s $@) bytes"
 
 $(USER_BIN): $(B)/user/hello.elf
 	$(CROSS)-objcopy -O binary $< $@
@@ -67,7 +72,7 @@ $(BUSY_BIN): $(B)/user/busy.elf
 # ---------- 1. 内核（Rust + C） ----------
 kernel: $(KBIN)
 
-$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN)
+$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN)
 	@mkdir -p $(B)
 	@test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
 	@python3 tools/aster-sign.py --build-id "aster-$(BOARD)" gen-ex3
@@ -76,6 +81,7 @@ $(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN)
 	    ASTER_USER_BIN="$(CURDIR)/$(USER_BIN)" \
 	    ASTER_USER_FAULT_BIN="$(CURDIR)/$(FAULT_BIN)" \
 	    ASTER_USER_BUSY_BIN="$(CURDIR)/$(BUSY_BIN)" \
+	    ASTER_USER_ISO_BIN="$(CURDIR)/$(ISO_BIN)" \
 	    cargo build --release $(CARGO_FEAT)
 	$(CROSS)-objcopy -O binary $(KREL)/aster-kernel $@
 	@echo "[BUILD] kernel .ast: $$(stat -c%s $@) bytes"
@@ -157,7 +163,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\nrun\nrunp\nrunf\nsched\nhash\nhalt\n' | timeout 45 \
+	@printf '\nhelp\nex3\nrun\nrunp\nrunf\nsched\nhash\niso\nhalt\n' | timeout 45 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -167,6 +173,12 @@ test: image
 	@grep -q "数据中止(低 EL)" $(B)/test.log && echo "[TEST] PASS 用户越权被 MMU 拦下" || (echo "[TEST] FAIL 隔离失效" && exit 1)
 	@grep -q "TASK 2" $(B)/test.log && echo "[TEST] PASS 双任务轮转" || (echo "[TEST] FAIL 无多任务输出" && exit 1)
 	@awk '/BUSY start/{s=NR} /TASK 2/{t=NR} /BUSY end/{e=NR} END{if (s>0 && t>s && e>t) print "[TEST] PASS 抢占：纯计算期间另一任务仍在跑"; else {print "[TEST] FAIL 抢占未生效"; exit 1}}' $(B)/test.log
+	# 隔离：两个任务写同一 VA，各自读回自己写的值（打印 '.'，不是 'X'）
+	@grep -q "ISO 1: ." $(B)/test.log && grep -q "ISO 2: ." $(B)/test.log && \
+	    echo "[TEST] PASS 地址空间隔离（同 VA 不串）" || (echo "[TEST] FAIL 地址空间串了" && exit 1)
+	# 页帧分配器：两个任务各 5 页，加内核页表共 10 页
+	@grep -q "页帧池 10 / 32768 页已用" $(B)/test.log && \
+	    echo "[TEST] PASS 页帧分配器" || (echo "[TEST] FAIL 页帧计数不对" && exit 1)
 
 # ---------- 5. 树莓派 ----------
 rpi4:

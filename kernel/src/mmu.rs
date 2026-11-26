@@ -49,6 +49,15 @@ pub mod slot_b {
 }
 
 /// 兼容旧名字（第一个槽）
+/// 每任务统一使用的用户虚拟地址布局（VA 固定、PA 各自独立）
+/// 这样用户程序链接地址不用变，任务之间却互不可见 —— 切换页表就够了。
+pub mod user_va {
+    pub const CODE: u64 = 0x4440_0000;
+    pub const GUARD: u64 = 0x4440_1000;
+    pub const STACK_BASE: u64 = 0x4440_2000;
+    pub const STACK_TOP: u64 = 0x4440_3000;
+}
+
 pub const USER_CODE: u64 = slot_a::CODE;
 pub const USER_STACK_BASE: u64 = slot_a::STACK_BASE;
 pub const USER_STACK_TOP: u64 = slot_a::STACK_TOP;
@@ -164,6 +173,138 @@ pub fn user_ptr_ok(ptr: u64, len: u64) -> bool {
         }
     }
     false
+}
+
+// ---------------- 每任务地址空间 ----------------
+//
+// 一个地址空间 = 5 页物理内存：
+//   L1（512 项，复制内核 + 自己的 L1[1] 指向自己的 L2）
+//   L2（512 个 2 MiB 项，复制内核，只有覆盖用户段的那一项改指自己的 L3）
+//   L3（code / guard / stack 三项）
+//   code 页、stack 页
+//
+// 所有任务用同一段 VA（0x4440_0000），但 L3 指向各自的物理页。切换任务时
+// 换 TTBR0 就是换地址空间，硬件保证任务 A 的指针在任务 B 里打不开。
+
+#[derive(Clone, Copy)]
+pub struct Space {
+    pub l1: u64,
+    pub l2: u64,
+    pub l3: u64,
+    pub code: u64,
+    pub stack: u64,
+}
+
+impl Space {
+    pub const EMPTY: Space = Space {
+        l1: 0,
+        l2: 0,
+        l3: 0,
+        code: 0,
+        stack: 0,
+    };
+
+    pub fn valid(&self) -> bool {
+        self.l1 != 0
+    }
+}
+
+fn pt_at(pa: u64) -> &'static mut [u64; 512] {
+    unsafe { &mut *(pa as *mut [u64; 512]) }
+}
+
+/// 新建一个地址空间（从页帧分配器拿 5 页）。池空返回 None。
+pub fn new_space() -> Option<Space> {
+    let l1 = crate::frame::alloc()?;
+    let l2 = crate::frame::alloc()?;
+    let l3 = crate::frame::alloc()?;
+    let code = crate::frame::alloc()?;
+    let stack = crate::frame::alloc()?;
+
+    // 内核页表的镜像：内核代码在 0x4020_0000 必须在新页表里也可见，
+    // 否则切完 TTBR0 执行的下一行指令就取不到了。
+    let kl1 = unsafe { &L1_TABLE.0 };
+    let kl2 = unsafe { &L2_RAM.0 };
+    let nl1 = pt_at(l1);
+    let nl2 = pt_at(l2);
+    let nl3 = pt_at(l3);
+
+    for i in 0..512 {
+        nl1[i] = kl1[i];
+        nl2[i] = kl2[i];
+    }
+    nl1[1] = table_desc(l2);
+
+    let idx = ((user_va::CODE - (1u64 << 30)) / (2 << 20)) as usize; // 34
+    nl2[idx] = table_desc(l3);
+
+    nl3[0] = desc(code, 0b11, ATTR_NORMAL, AP_ALL_RW, 1, 0); // 代码：EL0 可执行
+    nl3[1] = 0; // guard：不映射，越界立刻 fault
+    nl3[2] = desc(stack, 0b11, ATTR_NORMAL, AP_ALL_RW, 1, 1); // 栈：可写不可执行
+
+    Some(Space {
+        l1,
+        l2,
+        l3,
+        code,
+        stack,
+    })
+}
+
+/// 释放一个地址空间的所有页
+pub fn drop_space(sp: &Space) {
+    for pa in [sp.l1, sp.l2, sp.l3, sp.code, sp.stack] {
+        if pa != 0 {
+            crate::frame::free(pa);
+        }
+    }
+}
+
+/// 把扁平用户程序装进该空间的代码页
+pub fn load_image(sp: &Space, bytes: &[u8]) -> Result<(), &'static str> {
+    if !sp.valid() {
+        return Err("地址空间无效");
+    }
+    if bytes.is_empty() {
+        return Err("内核构建时没有内嵌该用户程序（先 make user）");
+    }
+    if bytes.len() > 0x1000 {
+        return Err("用户程序大于一页（4 KiB），拒绝装载");
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), sp.code as *mut u8, bytes.len());
+        asm!("dc cvau, {}", in(reg) sp.code);
+        asm!("dsb ish");
+        asm!("ic ivau, {}", in(reg) sp.code);
+        asm!("dsb ish");
+        asm!("isb");
+    }
+    Ok(())
+}
+
+/// 切到某个地址空间（不启用 ASID，直接刷全 TLB；任务数少，够用）
+pub fn activate(sp: &Space) {
+    if !sp.valid() {
+        return;
+    }
+    unsafe {
+        asm!("msr ttbr0_el1, {}", in(reg) sp.l1);
+        asm!("dsb sy");
+        asm!("tlbi vmalle1is");
+        asm!("dsb sy");
+        asm!("isb");
+    }
+}
+
+/// 切回内核自己的页表
+pub fn activate_kernel() {
+    unsafe {
+        asm!("msr ttbr0_el1, {}", in(reg) L1_TABLE.0.as_ptr() as u64);
+        asm!("dsb sy");
+        asm!("tlbi vmalle1is");
+        asm!("dsb sy");
+        asm!("isb");
+    }
 }
 
 /// 把用户程序（扁平二进制）拷进指定槽的代码页，并清掉对应 I-cache

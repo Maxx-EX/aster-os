@@ -31,6 +31,8 @@ pub struct Task {
     pub state: State,
     pub id: u32,
     pub switches: u32,
+    /// 该任务自己的地址空间（L1/L2/L3 + 代码页 + 栈页），切任务时换 TTBR0
+    pub space: crate::mmu::Space,
 }
 
 const MAX_TASKS: usize = 4;
@@ -41,6 +43,7 @@ impl Task {
         state: State::Dead,
         id: 0,
         switches: 0,
+        space: crate::mmu::Space::EMPTY,
     };
 }
 
@@ -49,20 +52,26 @@ static mut NTASKS: usize = 0;
 static mut CURRENT: usize = 0;
 static mut TOTAL_SWITCHES: u32 = 0;
 
-/// 登记一个任务：入口地址 + 用户栈顶，返回任务号（同时作为 getpid 的返回值）
-pub fn spawn(entry: u64, sp_el0: u64) -> Option<u32> {
+/// 登记一个任务：给它一个地址空间，返回任务号（同时作为 getpid 的返回值）
+pub fn spawn(space: crate::mmu::Space) -> Option<u32> {
+    if !space.valid() {
+        return None;
+    }
     unsafe {
         if NTASKS >= MAX_TASKS {
             return None;
         }
         let i = NTASKS;
         let id = (i + 1) as u32;
-        TASKS[i] = Task::EMPTY;
-        TASKS[i].state = State::Ready;
-        TASKS[i].id = id;
-        TASKS[i].ctx[IX_SP_EL0] = sp_el0;
-        TASKS[i].ctx[IX_ELR] = entry;
-        TASKS[i].ctx[IX_SPSR] = 0; // EL0t、DAIF 全开
+        let mut t = Task::EMPTY;
+        t.state = State::Ready;
+        t.id = id;
+        t.space = space;
+        // 所有任务的 VA 布局一致，只是背后的物理页各自独立
+        t.ctx[IX_SP_EL0] = crate::mmu::user_va::STACK_TOP;
+        t.ctx[IX_ELR] = crate::mmu::user_va::CODE;
+        t.ctx[IX_SPSR] = 0; // EL0t、DAIF 全开
+        TASKS[i] = t;
         NTASKS += 1;
         Some(id)
     }
@@ -112,6 +121,8 @@ unsafe fn pick_next() -> Option<usize> {
 }
 
 unsafe fn load_into(frame: &mut [u64], idx: usize) {
+    // 先换地址空间：下一行返回用户态的指令就只能看到新任务的页
+    crate::mmu::activate(&TASKS[idx].space);
     frame.copy_from_slice(&TASKS[idx].ctx);
     TASKS[idx].switches = TASKS[idx].switches.saturating_add(1);
     CURRENT = idx;
@@ -152,8 +163,25 @@ pub fn exit_current(frame: *mut u64) -> bool {
                 load_into(&mut f, n);
                 true
             }
-            None => false,
+            None => {
+                // 所有任务都结束了：切回内核自己的页表再回 shell
+                crate::exceptions::activate_kernel_space();
+                false
+            }
         }
+    }
+}
+
+/// 当前每个任务占的物理页数（调试用）
+pub fn space_count() -> usize {
+    unsafe {
+        let mut n = 0;
+        for i in 0..NTASKS {
+            if TASKS[i].space.valid() {
+                n += 1;
+            }
+        }
+        n
     }
 }
 

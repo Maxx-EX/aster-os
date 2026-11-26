@@ -301,6 +301,11 @@ fn set_return_code(code: u64) {
     }
 }
 
+/// 切回内核页表（任务全部退出、或从用户态被异常赶回来时用）
+pub fn activate_kernel_space() {
+    crate::mmu::activate_kernel();
+}
+
 pub fn enter_user_state(entry: u64, user_sp: u64) -> u64 {
     unsafe { aster_enter_user(entry, user_sp) }
 }

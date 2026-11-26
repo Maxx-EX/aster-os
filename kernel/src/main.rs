@@ -8,6 +8,7 @@
 mod exceptions;
 mod ex3;
 mod fb;
+mod frame;
 mod font;
 mod gic;
 mod input;
@@ -166,6 +167,7 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
         // virtio::dump_slots();
     }
 
+    frame::init();
     timer::mark_boot();
 
     if fb::init() {

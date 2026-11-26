@@ -186,6 +186,10 @@ pub fn run() -> ! {
                 println!("  MMU: {}", if crate::mmu::enabled() { "已开启" } else { "关闭" });
                 crate::mmu::dump();
             }
+            "iso" => match crate::task::run_iso() {
+                Ok(code) => println!("[ISO] 任务结束，最后退出码 {}", code),
+                Err(e) => println!("[TASK] 无法运行: {}", e),
+            },
             "run" => match crate::task::run_two() {
                 Ok(code) => println!("[TASK] 全部任务结束，最后退出码 = {}", code),
                 Err(e) => println!("[TASK] 无法运行: {}", e),
