@@ -130,6 +130,54 @@ fn cmd_poke(a: &str) {
     }
 }
 
+fn cmd_disk() {
+    if !crate::blk::available() {
+        println!("  没有 virtio-blk 设备");
+        return;
+    }
+    println!("  设备   : virtio-blk（{} 扇区，{} MiB）",
+        crate::blk::sectors(),
+        crate::blk::sectors() * 512 / (1024 * 1024));
+    println!("  请求数 : {}", crate::blk::requests());
+    match crate::disk::probe() {
+        Some(info) => {
+            println!("  卷名   : {}", crate::disk::name_str(&info.name));
+            println!("  格式   : AsterDisk v{}   {} 扇区", info.version, info.total);
+            let mut any = false;
+            for i in 0..crate::disk::MAX_PARTS {
+                if let Some(p) = &info.parts[i] {
+                    any = true;
+                    let nm = core::str::from_utf8(&p.name).unwrap_or("?").trim_end_matches('\0');
+                    println!(
+                        "  分区 {} : {}  LBA {}+{}  类型 {}",
+                        i, nm, p.start, p.sectors, p.kind
+                    );
+                }
+            }
+            if !any {
+                println!("  分区   : 空");
+            }
+        }
+        None => println!("  状态   : 未格式化（magic 不是 ADSK 或 CRC 不符）"),
+    }
+}
+
+fn cmd_fmt() {
+    if !unsafe { EXTREME } {
+        println!("  格式化会清掉整盘，需要 Extreme 权限：先输入 ex");
+        return;
+    }
+    if !crate::blk::available() {
+        println!("  没有 virtio-blk 设备");
+        return;
+    }
+    let ok = crate::disk::format("aster");
+    println!("  [EX] AsterDisk 格式化：{}", if ok { "完成" } else { "失败" });
+    if ok {
+        cmd_disk();
+    }
+}
+
 fn cmd_help() {
     println!("可得命令:");
     println!("  help      显示帮助");
@@ -145,6 +193,8 @@ fn cmd_help() {
     println!("  net       网络状态（virtio-net / IP / 收发计数）");
     println!("  uptime    运行时长");
     println!("  mem       内存布局");
+    println!("  disk      磁盘信息（virtio-blk + AsterDisk 头/分区表）");
+    println!("  fmt       格式化磁盘（需 Extreme）");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
     println!("  ex off    关闭 Extreme 权限");
     println!("  peek A    读 8 字节（仅 Extreme）");
@@ -256,6 +306,8 @@ pub fn run() -> ! {
 
         match line {
             "help" | "?" => cmd_help(),
+            "disk" => cmd_disk(),
+            "fmt" => cmd_fmt(),
             "info" => cmd_info(),
             "ex3" => cmd_ex3(),
             "hash" => cmd_hash(),

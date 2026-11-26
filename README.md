@@ -36,6 +36,8 @@
 | **寄存器清零**：进 EL0 前不留内核残留 | 通过 | `enter_user` 里 `x0..x30` 全清 |
 | **定时器抢占调度**：2 ms 时间片、双任务轮转 | 通过 | `run` 两个任务交替输出；`runp` 纯计算任务期间另一任务照常跑完 |
 | **GICv2 + PPI 30** 中断通路 | 通过 | `run` 的切换计数随运行时长增长 |
+| **Extreme 权限**（等同安卓 root：`ex` 开启，`peek/poke` 读写内核 RAM） | 通过 | 提示符 `$`→`#`，`peek 0x40200000` 读到内核首条指令 |
+| **AsterDisk 磁盘格式** + virtio-blk 驱动 | 通过 | `make run-disk` 后 `fmt` 格式化，重启 `disk` 回读 CRC 一致 |
 | **ramfb framebuffer**（fw_cfg DMA 配置 1024×768 XRGB8888） | 通过 | `make test-gfx` 三项断言 |
 | **图形界面**：卡片面板、中英文点阵混排、实时状态 | 通过 | `make shot` 生成 `build/screen.png` |
 | **VNC 远程画面** | 通过 | `make run-gfx`，远端握手返回 `RFB 003.008` |

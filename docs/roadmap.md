@@ -109,8 +109,8 @@
 
 | # | 任务 | 要点 |
 |---|---|---|
-| AF-1 | 磁盘镜像格式 `AsterDisk` | 512 B 扇区；扇区 0 放磁盘头（magic `ADSK` + 版本 + 分区数 + CRC32），扇区 1 放分区表（4 项，每项 起始 LBA / 扇区数 / 类型 / 名字 16 B）。分区 0 固定为 AsterFS。生成工具 `tools/mkdisk.py` |
-| AF-2 | virtio-blk 驱动（Rust） | DeviceID 2，复用 `virtio.rs` 的 modern 队列；一次请求三段：请求头（16 B：类型/保留/sector/数据长度）+ 数据 + 状态字节。读走只读请求（类型 0），写走类型 1 |
+| AF-1 ✅ | 磁盘镜像格式 `AsterDisk` | 512 B 扇区；扇区 0 放磁盘头（magic `ADSK` + 版本 + 分区数 + CRC32），扇区 1 放分区表（4 项，每项 起始 LBA / 扇区数 / 类型 / 名字 16 B）。分区 0 固定为 AsterFS。生成工具 `tools/mkdisk.py` |
+| AF-2 ✅ | virtio-blk 驱动（Rust） | DeviceID 2，复用 `virtio.rs` 的 modern 队列；一次请求三段：请求头（16 B：类型/保留/sector/数据长度）+ 数据 + 状态字节。读走只读请求（类型 0），写走类型 1 |
 | AF-3 | **AsterFS v0** | 4 KiB 块；块 0 超级块（`AFS1` magic + 块大小 + 块数 + inode 数 + 根 inode + CRC32）；块 1..N inode 表（每 inode 64 B：类型/大小/直接块指针 12 个/时间）；位图块；数据块。**目录项就是 inode 里的 `名字→inode` 列表**，不做 B 树 |
 | AF-4 | 块缓存 | 32 个 4 KiB 缓冲 + LRU，读命中直接返回，写标脏，`sync` 刷盘。内存从页帧池要（`alloc_pages`） |
 | AF-5 | VFS 薄层 | `mount / lookup / open / read / write / close / readdir / stat`，fd 表每任务一份（放在 `Space` 旁边），路径解析最多 8 层 |
@@ -125,7 +125,7 @@
 | AF-9 | boot 的 virtio-blk（C） | `boot/` 里独立实现一遍 MMIO 探测 + modern 队列（不复用内核代码，引导器必须自足），只读 |
 | AF-10 | boot 的 AsterFS 只读解析（C） | 与内核同一磁盘布局，按名字找 `kernel.ast`，读进 `0x40200000` |
 | AF-11 | 信任根演进 | 原来 hash 编译期内嵌（`manifest.h`）；改成构建时 `aster-sign.py` 把 `{hash, build_id, nonce, EX3}` 写进镜像的元数据区。引导器读盘算 SHA-256 比对，再用内置 K 验 EX3；内核启动后自己复算一遍 EX3 —— 链路一环不少，只是数据来源从 `.rodata` 变成磁盘 |
-| AF-12 | `make run-disk` | `-drive if=none,file=build/aster.img,format=raw,id=d0 -device virtio-blk-device,drive=d0`，去掉 `-kernel`，用 `-device loader,file=...` 只装引导器 |
+| AF-12 ✅ | `make run-disk` | `-drive if=none,file=build/aster.img,format=raw,id=d0 -device virtio-blk-device,drive=d0`，去掉 `-kernel`，用 `-device loader,file=...` 只装引导器 |
 | AF-13 | 挂载校验与只读修复 | 超级块 CRC 不符 → 只读模式 + 打印差异，不自动"修复"（先保证不写坏） |
 
 **验收**

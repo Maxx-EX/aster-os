@@ -14,6 +14,8 @@ mod font;
 mod gic;
 mod input;
 mod mmu;
+mod blk;
+mod disk;
 mod net;
 mod rtc;
 mod sched;
@@ -168,6 +170,16 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
         println!("[NET] 未找到 virtio-net 设备（启动时是否带了 -device virtio-net-device？）");
         // 诊断槽位表放到 `net` 命令里按需查看，启动时不要刷屏
         // virtio::dump_slots();
+    }
+
+    if blk::init() {
+        println!(
+            "[BLK] virtio-blk 已就绪  {} 扇区 / {} MiB",
+            blk::sectors(),
+            blk::sectors() * 512 / (1024 * 1024)
+        );
+    } else {
+        println!("[BLK] 未找到 virtio-blk 设备（需要 -device virtio-blk-device）");
     }
 
     frame::init();

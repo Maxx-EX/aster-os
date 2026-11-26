@@ -9,6 +9,8 @@ KREL      := kernel/target/aarch64-unknown-none/release
 KBIN      := $(B)/aster-kernel.ast
 BOOT_ELF  := $(B)/aster-boot.elf
 QEMU      := qemu-system-aarch64
+IMG       := build/aster.img
+IMG_MB    := 8
 
 ifeq ($(BOARD),rpi4)
   BDEF      := -DASTER_BOARD_RPI4
@@ -30,7 +32,7 @@ BOOT_C   := boot/main.c boot/uart.c boot/sha256.c boot/verify.c boot/timer.c \
             boot/image.c boot/flash.c boot/shell.c boot/mem.c
 BOOT_OBJ := $(patsubst boot/%.c,$(B)/obj/%.o,$(BOOT_C)) $(B)/obj/start.o
 
-.PHONY: all image kernel sign boot run run-sock test clean rpi4 info user
+.PHONY: all image kernel sign boot run run-sock run-disk img test clean rpi4 info user
 
 all: image
 
@@ -134,6 +136,21 @@ run: image
 	$(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF)
 
 # 图形 + 远程：画面走 VNC（默认 5901），命令行走 TCP（默认 4444）
+img:
+	@mkdir -p build
+	@dd if=/dev/zero of=$(IMG) bs=1M count=$(IMG_MB) status=none
+	@echo "[IMG] $(IMG) $(IMG_MB) MiB"
+
+run-disk: image img
+	@echo "  磁盘: $(IMG) ($(IMG_MB) MiB)   控制台: nc 0.0.0.0 4455"
+	$(QEMU) -M virt -cpu cortex-a72 -m 512M -device ramfb \
+	    -device virtio-keyboard-device -device virtio-mouse-device \
+	    -global virtio-mmio.force-legacy=false \
+	    -drive if=none,file=$(IMG),format=raw,id=d0,file.locking=off,cache=writethrough \
+	    -device virtio-blk-device,drive=d0 \
+	    -display vnc=0.0.0.0:2 -serial tcp:0.0.0.0:4455,server,nowait \
+	    -monitor unix:/tmp/aster-mon.sock,server,nowait -kernel $(BOOT_ELF)
+
 run-gfx: image
 	@echo "  画面: VNC  vnc://<本机IP>:5901"
 	@echo "  终端: TCP  nc <本机IP> 4444"

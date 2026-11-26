@@ -234,6 +234,14 @@ impl Device {
         unsafe { core::ptr::read_volatile((self.base + 0x100 + off) as *const u8) }
     }
 
+    pub fn read_config_u32(&self, off: u64) -> u32 {
+        unsafe { core::ptr::read_volatile((self.base + 0x100 + off) as *const u32) }
+    }
+
+    pub fn read_config_u64(&self, off: u64) -> u64 {
+        unsafe { core::ptr::read_volatile((self.base + 0x100 + off) as *const u64) }
+    }
+
     pub fn read_config_u16(&self, off: u64) -> u16 {
         unsafe { core::ptr::read_volatile((self.base + 0x100 + off) as *const u16) }
     }
