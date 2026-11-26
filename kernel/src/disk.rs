@@ -12,6 +12,7 @@ pub const MAGIC: [u8; 4] = *b"ADSK";
 pub const VERSION: u32 = 1;
 pub const MAX_PARTS: usize = 4;
 
+#[derive(Clone, Copy)]
 pub struct Part {
     pub name: [u8; 16],
     pub start: u64,
@@ -19,6 +20,7 @@ pub struct Part {
     pub kind: u32,
 }
 
+#[derive(Clone, Copy)]
 pub struct Info {
     pub version: u32,
     pub total: u64,

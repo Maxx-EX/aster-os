@@ -16,6 +16,7 @@ mod input;
 mod mmu;
 mod blk;
 mod disk;
+mod afs;
 mod net;
 mod rtc;
 mod sched;

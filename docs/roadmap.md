@@ -111,7 +111,7 @@
 |---|---|---|
 | AF-1 ✅ | 磁盘镜像格式 `AsterDisk` | 512 B 扇区；扇区 0 放磁盘头（magic `ADSK` + 版本 + 分区数 + CRC32），扇区 1 放分区表（4 项，每项 起始 LBA / 扇区数 / 类型 / 名字 16 B）。分区 0 固定为 AsterFS。生成工具 `tools/mkdisk.py` |
 | AF-2 ✅ | virtio-blk 驱动（Rust） | DeviceID 2，复用 `virtio.rs` 的 modern 队列；一次请求三段：请求头（16 B：类型/保留/sector/数据长度）+ 数据 + 状态字节。读走只读请求（类型 0），写走类型 1 |
-| AF-3 | **AsterFS v0** | 4 KiB 块；块 0 超级块（`AFS1` magic + 块大小 + 块数 + inode 数 + 根 inode + CRC32）；块 1..N inode 表（每 inode 64 B：类型/大小/直接块指针 12 个/时间）；位图块；数据块。**目录项就是 inode 里的 `名字→inode` 列表**，不做 B 树 |
+| AF-3 ✅ | **AsterFS v0** | 4 KiB 块；块 0 超级块（`AFS1` magic + 块大小 + 块数 + inode 数 + 根 inode + CRC32）；块 1..N inode 表（每 inode 64 B：类型/大小/直接块指针 12 个/时间）；位图块；数据块。**目录项就是 inode 里的 `名字→inode` 列表**，不做 B 树 |
 | AF-4 | 块缓存 | 32 个 4 KiB 缓冲 + LRU，读命中直接返回，写标脏，`sync` 刷盘。内存从页帧池要（`alloc_pages`） |
 | AF-5 | VFS 薄层 | `mount / lookup / open / read / write / close / readdir / stat`，fd 表每任务一份（放在 `Space` 旁边），路径解析最多 8 层 |
 | AF-6 | syscall 接上 | 56 openat / 57 close / 62 lseek / 63 read / 80 fstat，编号与 Linux 一致 |

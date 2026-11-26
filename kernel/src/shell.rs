@@ -69,7 +69,7 @@ fn read_line(buf: &mut [u8]) -> usize {
                 n -= 1;
                 uart::puts("\x08 \x08");
             }
-            0x20..=0x7E if n < buf.len() - 1 => {
+            0x20..=0x7E | 0x80..=0xFF if n < buf.len() - 1 => {
                 buf[n] = c;
                 n += 1;
                 uart::putc(c);
@@ -178,6 +178,108 @@ fn cmd_fmt() {
     }
 }
 
+struct CatCell(core::cell::UnsafeCell<[u8; crate::afs::BS]>);
+unsafe impl Sync for CatCell {}
+static CAT_OUT: CatCell = CatCell(core::cell::UnsafeCell::new([0; crate::afs::BS]));
+
+fn cat_out() -> &'static mut [u8; crate::afs::BS] {
+    unsafe { &mut *CAT_OUT.0.get() }
+}
+
+fn cmd_mkfs() {
+    if !unsafe { EXTREME } {
+        println!("  需要 Extreme 权限：先输入 ex");
+        return;
+    }
+    if !crate::blk::available() {
+        println!("  没有 virtio-blk 设备");
+        return;
+    }
+    if crate::disk::probe().is_none() {
+        println!("  磁盘没有 AsterDisk 头，先 fmt");
+        return;
+    }
+    let ok = crate::afs::format("aster");
+    println!("  [EX] AsterFS v0 格式化：{}", if ok { "完成" } else { "失败" });
+    if ok {
+        cmd_df();
+    }
+}
+
+fn cmd_ls() {
+    let mut n = 0u32;
+    let r = crate::afs::list(&mut |name: &str, ino: u32, typ: u16, size: u32| {
+        let kind = if typ == crate::afs::T_DIR { "dir " } else { "file" };
+        println!("  {}  {:>5}  {:>4}  {}", kind, size, ino, name);
+        n += 1;
+    });
+    match r {
+        Ok(()) => {
+            if n == 0 {
+                println!("  （空目录）");
+            }
+        }
+        Err(e) => println!("  {}", e),
+    }
+}
+
+fn cmd_cat(a: &str) {
+    let name = a.split_whitespace().next().unwrap_or("");
+    if name.is_empty() {
+        println!("  用法: cat <文件>");
+        return;
+    }
+    let out = cat_out();
+    match crate::afs::read_file(name, out) {
+        Ok(n) => {
+            let mut i = 0usize;
+            while i < n {
+                let mut end = (i + 64).min(n);
+                while end < n && (out[end] & 0xc0) == 0x80 {
+                    end += 1;
+                }
+                match core::str::from_utf8(&out[i..end]) {
+                    Ok(s) => println!("  {}", s),
+                    Err(_) => println!("  <非 UTF-8 数据，{} 字节>", n),
+                }
+                i = end;
+            }
+        }
+        Err(e) => println!("  {}", e),
+    }
+}
+
+fn cmd_wr(a: &str) {
+    let t = a.trim();
+    if t.is_empty() {
+        println!("  用法: wr <文件> <内容>");
+        return;
+    }
+    let (name, text) = match t.find(|c: char| c.is_whitespace()) {
+        Some(p) => (&t[..p], t[p..].trim()),
+        None => (t, ""),
+    };
+    match crate::afs::write_file(name, text.as_bytes()) {
+        Ok(n) => println!("  {}  {} 字节", name, n),
+        Err(e) => println!("  {}", e),
+    }
+}
+
+fn cmd_df() {
+    match crate::afs::stat() {
+        Some(st) => {
+            println!(
+                "  AsterFS  {} 块 × 4 KiB = {} KiB，空闲 {} 块",
+                st.blocks,
+                st.blocks * 4,
+                st.free_blocks
+            );
+            println!("  inode   {}/{} 用", st.used_inodes, st.inodes);
+        }
+        None => println!("  磁盘未格式化（先 mkfs）"),
+    }
+}
+
 fn cmd_help() {
     println!("可得命令:");
     println!("  help      显示帮助");
@@ -195,6 +297,11 @@ fn cmd_help() {
     println!("  mem       内存布局");
     println!("  disk      磁盘信息（virtio-blk + AsterDisk 头/分区表）");
     println!("  fmt       格式化磁盘（需 Extreme）");
+    println!("  mkfs      格式化 AsterFS 文件系统（需 Extreme）");
+    println!("  ls        列根目录");
+    println!("  cat <文件> 显示文件内容");
+    println!("  wr <文件> <内容>  写入文件（覆盖或新建）");
+    println!("  df        文件系统用量");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
     println!("  ex off    关闭 Extreme 权限");
     println!("  peek A    读 8 字节（仅 Extreme）");
@@ -303,11 +410,24 @@ pub fn run() -> ! {
             cmd_poke(a);
             continue;
         }
+        if let Some(a) = line.strip_prefix("cat ") {
+            cmd_cat(a);
+            continue;
+        }
+        if let Some(a) = line.strip_prefix("wr ") {
+            cmd_wr(a);
+            continue;
+        }
 
         match line {
             "help" | "?" => cmd_help(),
             "disk" => cmd_disk(),
             "fmt" => cmd_fmt(),
+            "mkfs" => cmd_mkfs(),
+            "ls" => cmd_ls(),
+            "cat" => cmd_cat(""),
+            "wr" => cmd_wr(""),
+            "df" => cmd_df(),
             "info" => cmd_info(),
             "ex3" => cmd_ex3(),
             "hash" => cmd_hash(),
