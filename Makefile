@@ -87,7 +87,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑几条命令
 test: image
-	@printf '\nhelp\ninfo\nhash\nhalt\n' | timeout 25 \
+	@printf '\nhelp\nex3\nhash\nhalt\n' | timeout 25 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS: 内核已启动" || (echo "[TEST] FAIL" && exit 1)
