@@ -1,0 +1,7 @@
+[build]
+target = "aarch64-unknown-none"
+
+# 链接脚本由 Makefile 按目标板生成（build/kernel.ld），通过 RUSTFLAGS 传入。
+
+[net]
+offline = false

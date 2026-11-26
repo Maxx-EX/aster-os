@@ -1,0 +1,17 @@
+# 构建产物
+build/
+kernel/target/
+
+# 生成物
+boot/manifest.h
+
+# 密钥：绝不提交
+boot/keys/boot.key
+*.key
+
+# 临时
+*.o
+*.elf
+*.bin
+*.img
+*.log
