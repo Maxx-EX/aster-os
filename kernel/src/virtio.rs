@@ -225,6 +225,11 @@ impl Device {
         w32(self.base, 0x050, queue);
     }
 
+    /// 写 config 空间（virtio-input 用它选子区域）
+    pub fn write_config_u8(&self, off: u64, v: u8) {
+        unsafe { core::ptr::write_volatile((self.base + 0x100 + off) as *mut u8, v) }
+    }
+
     pub fn read_config_u8(&self, off: u64) -> u8 {
         unsafe { core::ptr::read_volatile((self.base + 0x100 + off) as *const u8) }
     }

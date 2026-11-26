@@ -5,6 +5,7 @@
 #![no_main]
 #![allow(static_mut_refs)]
 
+mod cursor;
 mod exceptions;
 mod ex3;
 mod fb;
@@ -153,6 +154,10 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
         println!("[IN] virtio-input 键盘已就绪（事件缓冲 8 个，字符环 128 字节）");
     } else {
         println!("[IN] 未找到 virtio-keyboard 设备（可用串口输入）");
+    }
+    if input::mouse_available() {
+        let (mx, my) = input::mouse_pos();
+        println!("[IN] virtio-input 鼠标已就绪，光标在 ({}, {})", mx, my);
     }
 
     if net::init() {

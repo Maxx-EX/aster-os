@@ -313,6 +313,54 @@ fn px(f: &Fb, x: u32, y: u32, color: u32) {
     }
 }
 
+pub fn read_px(x: u32, y: u32) -> u32 {
+    if !available() {
+        return 0;
+    }
+    let f = fb();
+    if x >= f.w || y >= f.h {
+        return 0;
+    }
+    let off = (y * f.stride + x * 4) as u64;
+    unsafe { core::ptr::read_volatile((f.base + off) as *const u32) }
+}
+
+pub fn write_px(x: u32, y: u32, color: u32) {
+    if !available() {
+        return;
+    }
+    let f = fb();
+    if x >= f.w || y >= f.h {
+        return;
+    }
+    let off = (y * f.stride + x * 4) as u64;
+    unsafe { core::ptr::write_volatile((f.base + off) as *mut u32, color) }
+}
+
+/// 16x16 位图，fill 为实心、edge 为 1px 描边（鼠标箭头用）
+pub fn blit16(x: i32, y: i32, fill_mask: &[u16; 16], edge_mask: &[u16; 16], fill: u32, edge: u32) {
+    for r in 0..16 {
+        let er = edge_mask[r];
+        let fr = fill_mask[r];
+        if er == 0 && fr == 0 {
+            continue;
+        }
+        for c in 0..16 {
+            let bit = 0x8000u16 >> c;
+            let xx = x + c as i32;
+            let yy = y + r as i32;
+            if xx < 0 || yy < 0 {
+                continue;
+            }
+            if er & bit != 0 {
+                write_px(xx as u32, yy as u32, edge);
+            } else if fr & bit != 0 {
+                write_px(xx as u32, yy as u32, fill);
+            }
+        }
+    }
+}
+
 pub fn fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
     if !available() {
         return;
@@ -811,6 +859,26 @@ fn clock_str(ms: u64) -> ([u8; 8], usize) {
     (buf, 5)
 }
 
+static mut FRAME: u32 = 0;
+
+static mut WIN_X: i32 = 140;
+static mut WIN_Y: i32 = 58;
+
+pub fn frame() -> u32 {
+    unsafe { FRAME }
+}
+
+pub fn win_pos() -> (i32, i32) {
+    unsafe { (WIN_X, WIN_Y) }
+}
+
+pub fn set_win_pos(x: i32, y: i32) {
+    unsafe {
+        WIN_X = x;
+        WIN_Y = y;
+    }
+}
+
 pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks: u32, kernel_kb: u64) {
     if !available() {
         return;
@@ -846,8 +914,8 @@ pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks:
     icon_tile(ix, 410, 0x392a45, 0xc792ea, 'i', "关于", false);
 
     // ---- 主窗口 ----
-    let win_x = 140i32;
-    let win_y = 58i32;
+    let win_x = unsafe { WIN_X };
+    let win_y = unsafe { WIN_Y };
     let win_w = 848u32;
     let win_h = 602u32;
 
@@ -914,6 +982,10 @@ pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks:
     draw_num(tx as u32 + 230, sy, used_pages as u64);
     draw_text(tx as u32 + 246, sy, "/ 32768", 0x71889f, 1);
     draw_text(tx as u32 + 320, sy, "键盘输入 · EX3 已校验 · AVP L1/L2/L3 全通过", 0x5a7391, 1);
+
+    unsafe {
+        FRAME = FRAME.wrapping_add(1);
+    }
 }
 
 fn term_guard(x: u32, y: u32, w: u32) {

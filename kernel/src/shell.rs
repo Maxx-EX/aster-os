@@ -218,7 +218,7 @@ pub fn run() -> ! {
             "gfx" => {
                 // 显式重绘才回一行提示；界面自动刷新时不能打印，
                 // 否则打印会再次把终端弄脏，形成无限重绘
-                render_dashboard();
+                crate::ui::redraw();
                 println!("[GFX] 界面已重绘（{}x{}）", fb::width(), fb::height());
             }
             "net" => cmd_net(),

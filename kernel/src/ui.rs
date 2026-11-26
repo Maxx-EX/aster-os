@@ -1,26 +1,79 @@
 // Aster Kernel — 桌面刷新调度
 //
-// 界面不是每帧都重画（内核里全屏重绘一次约几十毫秒），
-// 只在终端内容真的变化时重绘，并且限制最快 60ms 一次。
+// 界面不是每帧都重画（全屏重绘几十毫秒），只在两件事发生时重画：
+//   1. 终端内容变了（并且距上次刷新超过 60ms）
+//   2. 鼠标把窗口拖动了
+// 光标自己是个独立图层，移动不触发重绘，只搬自己那块像素。
+#![allow(static_mut_refs)]
 
-use crate::fb;
+use crate::{fb, input, timer};
 
 const MIN_INTERVAL_MS: u64 = 60;
+
+const TITLE_H: i32 = 38;
+
+static mut LAST: u64 = 0;
+static mut DRAGGING: bool = false;
+static mut OFF_X: i32 = 0;
+static mut OFF_Y: i32 = 0;
 
 pub fn tick() {
     if !fb::available() {
         return;
     }
-    if !crate::term::dirty() {
-        return;
+    let want = handle_mouse();
+    let now = timer::now_ms();
+    let dirty = crate::term::dirty();
+
+    if (want || dirty) && now.saturating_sub(unsafe { LAST }) >= MIN_INTERVAL_MS {
+        unsafe { LAST = now };
+        redraw();
+        // 整屏重画把光标压在下面了，重新贴一次
+        crate::cursor::invalidate();
     }
-    let now = crate::timer::now_ms();
-    if now.saturating_sub(crate::term::last_draw()) < MIN_INTERVAL_MS {
-        return;
-    }
-    redraw();
+    crate::cursor::update();
 }
 
 pub fn redraw() {
     crate::shell::render_dashboard();
+}
+
+/// 处理点击与拖拽，返回"需要重绘"
+fn handle_mouse() -> bool {
+    if !input::mouse_available() {
+        return false;
+    }
+    let mut want = false;
+
+    while let Some((x, y, pressed)) = input::take_click() {
+        if pressed {
+            let (wx, wy) = fb::win_pos();
+            // 点在标题栏（不用拖边框，整条都能拖）
+            if x >= wx && x < wx + 840 && y >= wy && y < wy + TITLE_H {
+                unsafe {
+                    DRAGGING = true;
+                    OFF_X = x - wx;
+                    OFF_Y = y - wy;
+                }
+            }
+        } else {
+            unsafe { DRAGGING = false };
+        }
+    }
+
+    if unsafe { DRAGGING } {
+        let (mx, my) = input::mouse_pos();
+        let (wx, wy) = fb::win_pos();
+        let nx = (mx - unsafe { OFF_X }).clamp(-560, 980);
+        let ny = (my - unsafe { OFF_Y }).clamp(34, 660);
+        if nx != wx || ny != wy {
+            fb::set_win_pos(nx, ny);
+            want = true;
+        }
+    }
+    want
+}
+
+pub fn dragging() -> bool {
+    unsafe { DRAGGING }
 }

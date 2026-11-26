@@ -138,6 +138,7 @@ run-gfx: image
 	@echo "  画面: VNC  vnc://<本机IP>:5901"
 	@echo "  终端: TCP  nc <本机IP> 4444"
 	$(QEMU) -M virt -cpu cortex-a72 -m 512M -device ramfb \
+	    -device virtio-keyboard-device -device virtio-mouse-device \
 	    -display vnc=0.0.0.0:1 -serial tcp:0.0.0.0:4444,server,nowait \
 	    -monitor unix:/tmp/aster-mon.sock,server,nowait -kernel $(BOOT_ELF)
 
