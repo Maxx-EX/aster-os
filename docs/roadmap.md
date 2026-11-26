@@ -10,14 +10,21 @@
 
 必须做的：
 
-1. **EL0 切换**：`SPSR_EL1` 设 `M=EL0t`，`ELR_EL1` 设用户入口，`ERET`
-2. **系统调用**：`SVC #0`，在向量表 `EC=0x15` 分支里按 x8 分发
-3. **地址空间**：每个进程一套 4 KiB 页表（L1/L2/L3 三级），内核映射共享
-4. **物理页分配**：位图式页帧分配器，从 DTB 的 memory node 或固定范围切
-5. **进程与调度**：`task struct` + 定时器中断 + round-robin
-6. **最小 syscall 集合**：`write/read/exit/brk/mmap/open/close`（10 个以内）
+| # | 事项 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| 1 | **EL0 切换**：`SPSR_EL1` 设 `M=EL0t`，`ELR_EL1` 设用户入口，`ERET` | ✅ 已完成 | `aster_enter_user`，进 EL0 前清空 x0–x30 |
+| 2 | **系统调用**：`SVC #0`，走向量表 8 号槽按 `x8` 分发 | ✅ 已完成 | write/exit/getpid，用 Linux 号 64/93/172 |
+| 3 | **页表级隔离**：内核页 `AP=EL1-only`，用户页 `AP=EL0RW` | ✅ 已完成 | L1→L2→L3 拆开，`runf` 实测越权被硬件拦下 |
+| 4 | **每个进程独立地址空间**：每任务一套 TTBR0 页表 + 切 ASID | ⬜ 未做 | 现在是同一张表靠 AP 位隔离 |
+| 5 | **物理页分配**：位图式页帧分配器（从 DTB memory node 切） | ⬜ 未做 | 现在的用户页是静态写死的 |
+| 6 | **进程与调度**：`task struct` + 定时器中断 + round-robin | ⬜ 未做 | 关键缺口：没有时间片，用户程序死循环会锁住整机 |
+| 7 | **最小 syscall 集合**：`write/read/exit/brk/mmap/open/close` | 🔶 部分 | 已有 write/exit/getpid，缺 read/brk/mmap/open |
 
 验收：能跑一个 EL0 的 `hello` 程序，从用户态 `write(1, ...)` 输出到串口。
+
+**这个验收已经达成**（`make test` 里断言"EL0 输出"和"退出码 = 7"两项）。但阶段二整体不能算完：还差 4/5/6/7。
+
+下一步优先级：**6（调度）** 最要紧 —— 现在的系统能被一个死循环用户程序卡死，这是真缺陷；做完调度再补 4/5（独立地址空间、页帧分配），然后 7 慢慢加 syscall。
 
 ---
 

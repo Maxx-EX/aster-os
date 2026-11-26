@@ -1,70 +1,93 @@
-# Aster v0.1 实机启动日志（QEMU virt / cortex-a72 / 512M）
 
-```
+==================================================
+   ASTER BOOT  v0.1  /  ARM64 原创引导器
+   Board: QEMU virt (ARM64)
+==================================================
+[BOOT] DTB        @ 0x0
+[BOOT] Payload    @ 0x40083000
+[BOOT] Payload len : 36896 bytes
 
-==================================================
-   ASTER BOOT  v0.1  /  ARM64 原创引导器
-   Board: QEMU virt (ARM64)
-==================================================
-[BOOT] DTB        @ 0x0
-[BOOT] Payload    @ 0x40083000
-[BOOT] Payload len : 32800 bytes
+[AVP] 开始三级校验 ...
+  L1 完整性 SHA-256      : PASS  sha256=d7d1d9d1bb3b4365c4794475016980a0f20a6f0ec66ccf3e899fd892ec33a483
+  L2 真实性 HMAC-SHA256  : PASS  mac=b78d4838fc8d19ab73d8fb59d6aa2b58...
+  L3 链绑定(+EX3)        : PASS  chain=c6c40bed9f44c6ef089ac182b6bda246...
+  EX3 原创校验值         : EX3-5994491FACE50680-CF53DC009337BDCD
+  校验耗时               : 1 ms
+  结论                   : TRUSTED / 允许启动
 
-[AVP] 开始三级校验 ...
-  L1 完整性 SHA-256      : PASS  sha256=798a3401239c50b777033e34254bee708b95d293a9fdfaa40285c755f407d5d8
-  L2 真实性 HMAC-SHA256  : PASS  mac=2981f9d84be072d33ab0103659753d86...
-  L3 链绑定(+EX3)        : PASS  chain=91dd9031b3eaa2daac56d7aa37ae4ef9...
-  EX3 原创校验值         : EX3-5994491FACE50680-CF53DC009337BDCD
-  校验耗时               : 1 ms
-  结论                   : TRUSTED / 允许启动
-
-[MENU] 3 秒内按 B 进入底层模式，其余任意键继续启动...
-[MENU] 跳过等待，继续启动
-[BOOT] 从内嵌镜像启动
-[BOOT] 载入内核 ...
-[BOOT] Entry      @ 0x40200000
-[BOOT] 跳转到 EL1 ...
+[MENU] 3 秒内按 B 进入底层模式，其余任意键继续启动...
+[MENU] 跳过等待，继续启动
+[BOOT] 从内嵌镜像启动
+[BOOT] 载入内核 ...
+[BOOT] Entry      @ 0x40200000
+[BOOT] 跳转到 EL1 ...
 
 
-        _    ____ _____ _____ ____  
-       / \  / ___|_   _| ____|  _ \ 
-      / _ \ \___ \ | | |  _| | |_) |
-     / ___ \ ___) || | | |___|  _ < 
-    /_/   \_\____/ |_| |_____|_| \_\
+        _    ____ _____ _____ ____  
+       / \  / ___|_   _| ____|  _ \ 
+      / _ \ \___ \ | | |  _| | |_) |
+     / ___ \ ___) || | | |___|  _ < 
+    /_/   \_\____/ |_| |_____|_| \_\
 
-    A S T E R   星芒   v0.1   ARM64
-    原创内核 · Rust + C · 无任何第三方内核依赖
+    A S T E R   星芒   v0.1   ARM64
+    原创内核 · Rust + C · 无任何第三方内核依赖
 
-[KERNEL] bootinfo magic  OK
-[KERNEL] 内核载入地址 0x40200000，大小 32800 bytes
-[KERNEL] 异常向量表 已装载
-[KERNEL] 开始链式校验（C 侧 SHA-256）...
-[KERNEL] 链式校验返回: ok=true
-[KERNEL] 链式校验（内核侧独立复算）: PASS
-[KERNEL] EX3 原创校验值 EX3-5994491FACE50680-CF53DC009337BDCD : PASS
-[KERNEL] MMU 已开启（恒等映射，4KiB 粒度 1GiB 块）
+[KERNEL] bootinfo magic  OK
+[KERNEL] 内核载入地址 0x40200000，大小 36896 bytes
+[KERNEL] 异常向量表 已装载
+[KERNEL] 开始链式校验（C 侧 SHA-256）...
+[KERNEL] 链式校验返回: ok=true
+[KERNEL] 链式校验（内核侧独立复算）: PASS
+[KERNEL] EX3 原创校验值 EX3-5994491FACE50680-CF53DC009337BDCD : PASS
+[KERNEL] MMU 已开启（恒等映射，4KiB 粒度 1GiB 块）
 
-Aster 内核已接管。输入 help 查看命令。
-aster> ex3
-  EX3 —— Aster 原创校验值
-    指纹     : EX3-5994491FACE50680-CF53DC009337BDCD
-    完整值   : 5994491face50680cf53dc009337bdcdf7f47a983b279843041e3ee3c77231d3
-    一致性   : 与引导器一致（内核与该引导器同源）
-    派生方式 : HMAC-SHA256(K, BOOT_ID ‖ "EX3" ‖ build_id ‖ nonce)
-    密钥位置 : 仅引导器只读区与构建机，内核拿不到，因此无法自行伪造
-aster> info
-  Aster Kernel 0.1  (Rust + C 混编)
-  内核基址   : 0x40200000
-  内核大小   : 32800 bytes
-  DTB        : 0x0
-  链式校验   : PASS
-  EX3        : EX3-5994491FACE50680-CF53DC009337BDCD (PASS)
-  引导器 AVP : 1557 us, trusted=true
-  C 侧状态   : C-side OK
-  计时器     : 62500000 Hz
-aster> hash
-  SHA-256 = ca77f127ae58f45006a9a7a2b7fe6a668f25bd1dda55664c22106b9b52ea47e1
-aster> mmu
-  MMU: 已开启
-aster> halt
-```
+Aster 内核已接管。输入 help 查看命令。
+aster> help
+可得命令:
+  help      显示帮助
+  info      系统与镜像信息
+  ex3       校验原创标识值 EX3
+  hash      重新计算内核镜像摘要（链式校验自检）
+  mmu       查看 MMU / 页表状态
+  run       切到 EL0 执行内嵌用户程序（演示系统调用）
+  runf      从 EL0 越权读内核内存（验证页表隔离）
+  uptime    运行时长
+  mem       内存布局
+  clear     清屏
+  reboot    复位整机 (PSCI)
+  halt      停机
+aster> ex3
+  EX3 —— Aster 原创校验值
+    指纹     : EX3-5994491FACE50680-CF53DC009337BDCD
+    完整值   : 5994491face50680cf53dc009337bdcdf7f47a983b279843041e3ee3c77231d3
+    一致性   : 与引导器一致（内核与该引导器同源）
+    派生方式 : HMAC-SHA256(K, BOOT_ID ‖ "EX3" ‖ build_id ‖ nonce)
+    密钥位置 : 仅引导器只读区与构建机，内核拿不到，因此无法自行伪造
+aster> run
+[TASK] 载入 hello 253 bytes → 0x44400000，栈顶 0x44403000
+[TASK] 切换到 EL0（用户态），特权指令与外设从此不可直接访问
+[SVC] write(fd=1, len=42)
+Aster 用户态已启动 (EL0 · AArch64)
+[SVC] getpid() → 1
+[SVC] write(fd=1, len=87)
+这句是用户程序通过 svc #0 发给内核、再经内核驱动串口打出来的
+[SVC] 未知系统调用号 9999 → ENOSYS
+[SVC] write(fd=1, len=24)
+用户态即将 exit(7)
+[SVC] exit(7)
+[TASK] 用户任务已退出，退出码 = 7
+aster> runf
+[TASK] 载入 fault 91 bytes → 0x44400000，栈顶 0x44403000
+[TASK] 切换到 EL0（用户态），特权指令与外设从此不可直接访问
+
+!!! 用户态故障（Aster 捕获，内核继续运行）!!!
+  EC      = 0x24 (数据中止(低 EL))
+  ELR     = 0x0000000044400004  (出错指令)
+  FAR     = 0x0000000040200000  (访问地址)
+  ESR     = 0x000000009200000e
+  → 该任务被终止，返回内核 shell。
+[TASK] 用户任务已退出，退出码 = 1
+aster> hash
+  SHA-256 = 8fe41edb24067d47be1d1f85dd4a5fd85bdb8e4ae0024b3451820da07c4d78f6
+aster> halt
+

@@ -75,7 +75,9 @@ fn cmd_help() {
     println!("  info      系统与镜像信息");
     println!("  ex3       校验原创标识值 EX3");
     println!("  hash      重新计算内核镜像摘要（链式校验自检）");
-    println!("  mmu       查看 MMU 状态");
+    println!("  mmu       查看 MMU / 页表状态");
+    println!("  run       切到 EL0 执行内嵌用户程序（演示系统调用）");
+    println!("  runf      从 EL0 越权读内核内存（验证页表隔离）");
     println!("  uptime    运行时长");
     println!("  mem       内存布局");
     println!("  clear     清屏");
@@ -165,7 +167,18 @@ pub fn run() -> ! {
             "info" => cmd_info(),
             "ex3" => cmd_ex3(),
             "hash" => cmd_hash(),
-            "mmu" => println!("  MMU: {}", if crate::mmu::enabled() { "已开启" } else { "关闭" }),
+            "mmu" => {
+                println!("  MMU: {}", if crate::mmu::enabled() { "已开启" } else { "关闭" });
+                crate::mmu::dump();
+            }
+            "run" => match crate::task::run_hello() {
+                Ok(code) => println!("[TASK] 用户任务已退出，退出码 = {}", code),
+                Err(e) => println!("[TASK] 无法运行: {}", e),
+            },
+            "runf" => match crate::task::run_fault() {
+                Ok(code) => println!("[TASK] 用户任务已退出，退出码 = {}", code),
+                Err(e) => println!("[TASK] 无法运行: {}", e),
+            },
             "uptime" => println!("  已运行 {} ms", uptime_ms()),
             "mem" => cmd_mem(),
             "clear" => {

@@ -9,6 +9,7 @@ mod exceptions;
 mod ex3;
 mod mmu;
 mod shell;
+mod task;
 mod uart;
 
 use core::arch::global_asm;

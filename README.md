@@ -2,7 +2,9 @@
 
 从零写起的 ARM64 系统：**原创引导器 + 原创内核 + 原创三级镜像校验**，不基于任何现有内核（没有 Linux、没有 Zircon、没有 *BSD 的任何代码）。
 
-当前是 **v0.1 / 阶段一**：能上电、能校验、能进内核、能在命令行里交互、能从串口刷写新镜像。图形、文件系统、用户态和 APK/EXE 兼容层是后续阶段，见 [docs/roadmap.md](docs/roadmap.md)。
+当前是 **v0.2 / 阶段二**：在阶段一（上电、校验、进内核、命令行、串口刷写）之上，加进了**真正的用户态**——内核会把程序装进一个只属于它的 4 KiB 代码页 + 一个栈页，然后切到 EL0 执行，程序只能通过 `svc` 请求内核做事。用户的程序读内核内存会被 MMU 当场拦下。
+
+图形、文件系统、抢占式调度、APK/EXE 兼容层仍是后续阶段，见 [docs/roadmap.md](docs/roadmap.md)。
 
 ---
 
@@ -20,11 +22,17 @@
 | 异常向量表 + 现场打印 | 通过 | 故意触发 FP 陷阱时能打印 ESR/ELR/FAR |
 | 内核侧独立复算摘要（链式校验） | 通过 | `hash` 命令输出与引导器一致 |
 | **EX3 原创校验值**（内核与引导器各持一份） | 通过 | `ex3` 命令；混搭镜像时内核自己拒绝接管 |
+| **用户态 EL0**：独立代码页 + 栈，切特权级执行 | 通过 | `run` 命令，串口打印 "Aster 用户态已启动 (EL0)" |
+| **SVC 系统调用**：write / exit / getpid | 通过 | 用户程序打印 3 段文本、退出码 7 正确带回内核 |
+| **页表级隔离**：EL0 打不开内核与外设 | 通过 | `runf` 故意读 0x4020_0000 → Data Abort(低 EL) 被捕获 |
+| **用户指针校验**：syscall 参数不能反手打穿内核 | 通过 | `write` 的 buf 必须落在用户页内，否则 EFAULT |
+| **寄存器清零**：进 EL0 前不留内核残留 | 通过 | `enter_user` 里 `x0..x30` 全清 |
 | 树莓派 4/5 镜像构建 | 构建通过 | `make rpi4` 产出 `kernel8.img`（未上真机验证） |
 
 ## 明确还没做的
 
-- **用户态（EL0）与系统调用**：现在所有代码都在 EL1
+- **抢占式调度**：目前是"跑一个用户程序、退出、回 shell"，没有多任务，也**没有时间片**——用户程序如果自己死循环，会把整机卡住（下一步加 timer 中断做看门狗/抢占）
+- **每个任务独立的地址空间**：现在所有任务共用同一张 TTBR0 页表，隔离靠页表 AP 位（硬件强制），不是靠切换页表
 - **文件系统 / 网络 / 驱动框架 / 图形**：都没有
 - **APK 与 EXE 兼容层**：只有路线设计，没有实现（见路线图）
 - 树莓派真机：只做了板级地址适配和镜像产出，没在硬件上跑过
@@ -59,9 +67,10 @@
  │                                                         │
  │  boot.S  设栈、放行 FP、清 bss                            │
  │  chain_check  用 C 侧 SHA-256 独立复算，与 bootinfo 比对   │
- │  mmu.rs  恒等映射，4 KiB 粒度，1 GiB 块                   │
- │  exceptions.rs  16 项向量表 + 同步异常现场                 │
- │  shell.rs  命令行                                        │
+ │  mmu.rs  L1/L2/L3 三级页表，内核页 EL1-only、用户页 EL0    │
+ │  exceptions.rs  16 项向量表 + SVC 入口 + EL0 故障处理      │
+ │  task.rs  装载用户程序、切 EL0、回收退出码                │
+ │  shell.rs  命令行（run / runf 触发用户态）                 │
  └─────────────────────────────────────────────────────────┘
 ```
 
@@ -74,6 +83,10 @@
 0x4008_3000  内嵌内核镜像（.payload 段）
 0x4020_0000  内核运行地址
 0x4410_0000  AFP 刷写暂存区（8 MiB 上限）
+0x4440_0000  用户代码页（4 KiB，EL0 可执行，内核 EL1 可读写）
+0x4440_1000  用户 guard 页（不映射，越界立刻 fault）
+0x4440_2000  用户栈页（4 KiB，EL0 可读写、不可执行）
+0x4440_3000  用户栈顶
 ```
 
 树莓派 4/5（`make rpi4`）：引导器 0x80000、内核 0x200000、PL011 0xFE20_1000。
@@ -86,9 +99,12 @@
 aster-os/
 ├── boot/            引导器：start.S、uart、sha256、verify(AVP)、flash(AFP)、shell、main
 ├── kernel/          内核：Rust 主体 + c/ 下 C 侧支持代码
-│   ├── src/          main.rs / uart.rs / mmu.rs / exceptions.rs / shell.rs / boot.S
+│   ├── src/          main.rs / uart.rs / mmu.rs / exceptions.rs / task.rs / shell.rs / boot.S
 │   │                 ex3.rs（构建时生成，内嵌 EX3）
 │   └── c/            aster_c.c、sha256.c（与引导器同一份实现）
+├── user/            用户态程序（独立扁平二进制，链接到 0x4440_0000）
+│   ├── hello.S      系统调用演示：write / getpid / 一次非法调用 / exit(7)
+│   └── fault.S      越权演示：从 EL0 读内核地址，验证 MMU 隔离
 ├── tools/            aster-sign.py（密钥/EX3/签名）、afp-flash.py（主机端刷写）、test-afp.py（刷写回归）
 ├── docs/             架构、校验链、路线图
 └── Makefile          一条命令走完 内核→签名→引导器→运行
@@ -108,7 +124,7 @@ sudo apt install gcc-aarch64-linux-gnu qemu-system-arm
 # 构建 + 启动（会打开串口交互）
 make run
 
-# 只做冒烟测试（不交互，跑 help/info/hash/halt）
+# 只做冒烟测试（不交互，逐项断言：内核接管 / EX3 / EL0 输出 / 退出码 / 越权被拦）
 make test
 
 # 树莓派镜像
@@ -122,6 +138,7 @@ make rpi4      # 产出 build/kernel8.img，拷到 SD 卡 boot 分区
 一次构建的顺序是固定的，`make` 已经排好：
 
 ```
+user/*.S（交叉汇编 + 链接到 0x44400000）→ 扁平 bin → 被 build.rs 嵌进内核
 gen-ex3（生成 EX3）→ cargo 编内核(.ast) → aster-sign（出 manifest.h）
                   → 交叉 gcc 编引导器 → 把 .ast 当 .payload 内嵌 → 链接
 ```
