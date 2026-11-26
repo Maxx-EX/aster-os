@@ -1,0 +1,73 @@
+# Aster v0.1 实机启动日志（QEMU virt / cortex-a72 / 512M）
+
+```
+
+==================================================
+   ASTER BOOT  v0.1  /  ARM64 原创引导器
+   Board: QEMU virt (ARM64)
+==================================================
+[BOOT] DTB        @ 0x0
+[BOOT] Payload    @ 0x40083000
+[BOOT] Payload len : 28704 bytes
+
+[AVP] 开始三级校验 ...
+  L1 完整性 SHA-256      : PASS  sha256=450de2b094abf3b6ce9103e60e163a21bda134bc86ca3b8ed2c6838303619e22
+  L2 真实性 HMAC-SHA256  : PASS  mac=aae554796f76d83a0ac2b3b835f44259...
+  L3 链绑定              : PASS  chain=d0e340b9cca3773f4a27c850503bc674...
+  校验耗时               : 1 ms
+  结论                   : TRUSTED / 允许启动
+
+[MENU] 3 秒内按 B 进入底层模式，其余任意键继续启动...
+[MENU] 跳过等待，继续启动
+[BOOT] 从内嵌镜像启动
+[BOOT] 载入内核 ...
+[BOOT] Entry      @ 0x40200000
+[BOOT] 跳转到 EL1 ...
+
+
+        _    ____ _____ _____ ____  
+       / \  / ___|_   _| ____|  _ \ 
+      / _ \ \___ \ | | |  _| | |_) |
+     / ___ \ ___) || | | |___|  _ < 
+    /_/   \_\____/ |_| |_____|_| \_\
+
+    A S T E R   星芒   v0.1   ARM64
+    原创内核 · Rust + C · 无任何第三方内核依赖
+
+[KERNEL] bootinfo magic  OK
+[KERNEL] 内核载入地址 0x40200000，大小 28704 bytes
+[KERNEL] 异常向量表 已装载
+[KERNEL] 开始链式校验（C 侧 SHA-256）...
+[KERNEL] 链式校验返回: ok=true
+[KERNEL] 链式校验（内核侧独立复算）: PASS
+[KERNEL] MMU 已开启（恒等映射，4KiB 粒度 1GiB 块）
+
+Aster 内核已接管。输入 help 查看命令。
+aster> help
+可得命令:
+  help      显示帮助
+  info      系统与镜像信息
+  hash      重新计算内核镜像摘要（链式校验自检）
+  mmu       查看 MMU 状态
+  uptime    运行时长
+  mem       内存布局
+  clear     清屏
+  reboot    复位整机 (PSCI)
+  halt      停机
+aster> info
+  Aster Kernel 0.1  (Rust + C 混编)
+  内核基址   : 0x40200000
+  内核大小   : 28704 bytes
+  DTB        : 0x0
+  链式校验   : PASS
+  引导器 AVP : 1475 us, trusted=true
+  C 侧状态   : C-side OK
+  计时器     : 62500000 Hz
+aster> hash
+  SHA-256 = a1503aac2219e5316dfcc9c948551a83b6468b123a98a607663e184c308b7a05
+aster> mmu
+  MMU: 已开启
+aster> uptime
+  已运行 29 ms
+aster> halt
+```
