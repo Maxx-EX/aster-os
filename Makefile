@@ -109,6 +109,31 @@ image: boot
 run: image
 	$(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF)
 
+# 图形 + 远程：画面走 VNC（默认 5901），命令行走 TCP（默认 4444）
+run-gfx: image
+	@echo "  画面: VNC  vnc://<本机IP>:5901"
+	@echo "  终端: TCP  nc <本机IP> 4444"
+	$(QEMU) -M virt -cpu cortex-a72 -m 512M -device ramfb \
+	    -display vnc=0.0.0.0:1 -serial tcp:0.0.0.0:4444,server,nowait \
+	    -monitor unix:/tmp/aster-mon.sock,server,nowait -kernel $(BOOT_ELF)
+
+# 抓一张画面存成 PNG（不需要人工开 VNC 客户端）
+shot: image
+	@mkdir -p $(B)
+	python3 tools/screenshot.py $(B)/screen.png 7
+
+# 图形链路冒烟测试：带 ramfb 跑一次，断言 framebuffer 起来且分辨率对
+test-gfx: image
+	@printf '\ngfx\nhalt\n' | timeout 45 \
+	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -device ramfb -display none -nographic \
+	    -kernel $(BOOT_ELF) > $(B)/test-gfx.log 2>&1 || true
+	@grep -q "图形输出已就绪：ramfb 1024x768" $(B)/test-gfx.log && echo "[TEST] PASS ramfb framebuffer" || (echo "[TEST] FAIL 图形未就绪" && exit 1)
+	@grep -q "界面已重绘" $(B)/test-gfx.log && echo "[TEST] PASS 界面绘制" || (echo "[TEST] FAIL 未绘制" && exit 1)
+	@python3 tools/screenshot.py $(B)/screen.png 7 >/dev/null && \
+	    python3 -c "from PIL import Image;import sys; im=Image.open('$(B)/screen.png'); \
+print('[TEST] PASS 截屏 %dx%d' % im.size); \
+sys.exit(0 if im.size==(1024,768) else 1)"
+
 # 串口挂到 unix socket，给 tools/afp-flash.py 用
 run-sock: image
 	@echo "串口 socket: /tmp/aster.sock"

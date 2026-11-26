@@ -7,6 +7,8 @@
 
 mod exceptions;
 mod ex3;
+mod fb;
+mod font;
 mod gic;
 mod mmu;
 mod sched;
@@ -141,6 +143,13 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
     timer::allow_el0_counter();
     println!("[KERNEL] GICv2 已初始化，PPI 30（EL1 物理定时器）作为调度时基");
 
+    if fb::init() {
+        println!("[KERNEL] 图形输出已就绪：ramfb {}x{} XRGB8888 @ {:#x}", fb::width(), fb::height(), fb::base_addr());
+    } else {
+        println!("[KERNEL] 未检测到 ramfb 设备，本次仅串口输出");
+        fb::dump_fwcfg();
+    }
+
     shell::set_info(shell::SysInfo {
         payload_base: info.payload_base,
         payload_size: info.payload_size,
@@ -151,6 +160,7 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
         boot_trusted: info.trusted == 1,
     });
 
+    shell::render_dashboard();
     shell::run()
 }
 

@@ -80,6 +80,10 @@ pub fn reset() {
     }
 }
 
+pub fn switches_total() -> u32 {
+    unsafe { TOTAL_SWITCHES }
+}
+
 pub fn count() -> usize {
     unsafe { NTASKS }
 }

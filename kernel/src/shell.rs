@@ -1,5 +1,5 @@
 // Aster Kernel — 内核命令行（用户看到的"系统"入口）
-use crate::{print, println, uart};
+use crate::{fb, print, println, sched, timer, uart};
 use core::arch::asm;
 
 pub struct SysInfo {
@@ -80,6 +80,7 @@ fn cmd_help() {
     println!("  runf      从 EL0 越权读内核内存（验证页表隔离）");
     println!("  runp      抢占验证（纯计算任务 vs 打印任务）");
     println!("  sched     任务调度统计");
+    println!("  gfx       重绘图形界面（ramfb / VNC 远程可见）");
     println!("  uptime    运行时长");
     println!("  mem       内存布局");
     println!("  clear     清屏");
@@ -186,6 +187,7 @@ pub fn run() -> ! {
                 Err(e) => println!("[TASK] 无法运行: {}", e),
             },
             "sched" => println!("  {}", crate::sched::stats()),
+            "gfx" => render_dashboard(),
             "uptime" => println!("  已运行 {} ms", uptime_ms()),
             "mem" => cmd_mem(),
             "clear" => {
@@ -201,4 +203,24 @@ pub fn run() -> ! {
             }
         }
     }
+}
+
+/// 把当前系统状态画到 framebuffer 上
+pub fn render_dashboard() {
+    if !fb::available() {
+        println!("[GFX] 没有 framebuffer（QEMU 启动时是否带了 -device ramfb？）");
+        return;
+    }
+    let i = info();
+    fb::draw_dashboard(&fb::Dashboard {
+        kernel_kb: i.payload_size / 1024,
+        ex3_tag: crate::ex3::EX3_TAG,
+        ex3_ok: i.ex3_ok,
+        tasks: sched::count(),
+        switches: sched::switches_total(),
+        uptime_ms: uptime_ms(),
+        slice_ms: timer::SLICE_MS,
+        trusted: i.boot_trusted,
+    });
+    println!("[GFX] 界面已重绘（{}x{}）", fb::width(), fb::height());
 }
