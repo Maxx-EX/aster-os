@@ -13,7 +13,7 @@ _start:
     movz    x0, #0x4020, lsl #16     /* x0 = 0x40200000 内核镜像基址 */
     ldr     x1, [x0]                 /* ← 这里应该 fault */
     /* 万一没 fault（说明隔离失效），打印一句提示再 exit */
-    movz    x0, #1
+    mov     x0, #1
     adr     x1, msg_leak
     mov     x2, #(msg_leak_end - msg_leak)
     mov     x8, #64

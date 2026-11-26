@@ -7,9 +7,12 @@
 
 mod exceptions;
 mod ex3;
+mod gic;
 mod mmu;
+mod sched;
 mod shell;
 mod task;
+mod timer;
 mod uart;
 
 use core::arch::global_asm;
@@ -132,7 +135,11 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
     }
 
     mmu::init();
-    println!("[KERNEL] MMU 已开启（恒等映射，4KiB 粒度 1GiB 块）");
+    println!("[KERNEL] MMU 已开启（L1/L2/L3 三级页表，用户段 4KiB 页）");
+
+    gic::init();
+    timer::allow_el0_counter();
+    println!("[KERNEL] GICv2 已初始化，PPI 30（EL1 物理定时器）作为调度时基");
 
     shell::set_info(shell::SysInfo {
         payload_base: info.payload_base,

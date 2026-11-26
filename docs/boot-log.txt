@@ -5,14 +5,14 @@
 ==================================================
 [BOOT] DTB        @ 0x0
 [BOOT] Payload    @ 0x40083000
-[BOOT] Payload len : 36896 bytes
+[BOOT] Payload len : 42144 bytes
 
 [AVP] 开始三级校验 ...
-  L1 完整性 SHA-256      : PASS  sha256=d7d1d9d1bb3b4365c4794475016980a0f20a6f0ec66ccf3e899fd892ec33a483
-  L2 真实性 HMAC-SHA256  : PASS  mac=b78d4838fc8d19ab73d8fb59d6aa2b58...
-  L3 链绑定(+EX3)        : PASS  chain=c6c40bed9f44c6ef089ac182b6bda246...
+  L1 完整性 SHA-256      : PASS  sha256=14840af2cd87d8f698590cf967e43536fb56d677b3637e71a7ff939bd616d977
+  L2 真实性 HMAC-SHA256  : PASS  mac=50b16e3c4e132034b5b5e452f0964178...
+  L3 链绑定(+EX3)        : PASS  chain=1d56dfda970f0a05d60de7607a1a6f9a...
   EX3 原创校验值         : EX3-5994491FACE50680-CF53DC009337BDCD
-  校验耗时               : 1 ms
+  校验耗时               : 2 ms
   结论                   : TRUSTED / 允许启动
 
 [MENU] 3 秒内按 B 进入底层模式，其余任意键继续启动...
@@ -33,13 +33,14 @@
     原创内核 · Rust + C · 无任何第三方内核依赖
 
 [KERNEL] bootinfo magic  OK
-[KERNEL] 内核载入地址 0x40200000，大小 36896 bytes
+[KERNEL] 内核载入地址 0x40200000，大小 42144 bytes
 [KERNEL] 异常向量表 已装载
 [KERNEL] 开始链式校验（C 侧 SHA-256）...
 [KERNEL] 链式校验返回: ok=true
 [KERNEL] 链式校验（内核侧独立复算）: PASS
 [KERNEL] EX3 原创校验值 EX3-5994491FACE50680-CF53DC009337BDCD : PASS
-[KERNEL] MMU 已开启（恒等映射，4KiB 粒度 1GiB 块）
+[KERNEL] MMU 已开启（L1/L2/L3 三级页表，用户段 4KiB 页）
+[KERNEL] GICv2 已初始化，PPI 30（EL1 物理定时器）作为调度时基
 
 Aster 内核已接管。输入 help 查看命令。
 aster> help
@@ -51,6 +52,8 @@
   mmu       查看 MMU / 页表状态
   run       切到 EL0 执行内嵌用户程序（演示系统调用）
   runf      从 EL0 越权读内核内存（验证页表隔离）
+  runp      抢占验证（纯计算任务 vs 打印任务）
+  sched     任务调度统计
   uptime    运行时长
   mem       内存布局
   clear     清屏
@@ -64,30 +67,121 @@
     派生方式 : HMAC-SHA256(K, BOOT_ID ‖ "EX3" ‖ build_id ‖ nonce)
     密钥位置 : 仅引导器只读区与构建机，内核拿不到，因此无法自行伪造
 aster> run
-[TASK] 载入 hello 253 bytes → 0x44400000，栈顶 0x44403000
-[TASK] 切换到 EL0（用户态），特权指令与外设从此不可直接访问
-[SVC] write(fd=1, len=42)
-Aster 用户态已启动 (EL0 · AArch64)
-[SVC] getpid() → 1
-[SVC] write(fd=1, len=87)
-这句是用户程序通过 svc #0 发给内核、再经内核驱动串口打出来的
-[SVC] 未知系统调用号 9999 → ENOSYS
-[SVC] write(fd=1, len=24)
-用户态即将 exit(7)
-[SVC] exit(7)
-[TASK] 用户任务已退出，退出码 = 7
+[TASK] 已登记 2 个任务，时间片 2 ms（GICv2 PPI 30）
+[TASK] 切换 EL0 —— 同一个程序装在两个槽里，靠 getpid 区分自己
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+TASK 1
+TASK 2
+[SVC] exit(0)  ← 任务 1
+[SVC] exit(0)  ← 任务 2
+[TASK] 全部任务结束，最后退出码 = 0
+aster> runp
+[TASK] 槽 A = 纯计算（无 syscall），槽 B = 打印任务，观察输出顺序
+BUSY start
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+TASK 2
+[SVC] exit(0)  ← 任务 2
+BUSY end
+[SVC] exit(0)  ← 任务 1
+[TASK] 全部任务结束，最后退出码 = 0
 aster> runf
-[TASK] 载入 fault 91 bytes → 0x44400000，栈顶 0x44403000
-[TASK] 切换到 EL0（用户态），特权指令与外设从此不可直接访问
+[TASK] 装载越权样本，切 EL0 执行 ld 0x40200000
 
 !!! 用户态故障（Aster 捕获，内核继续运行）!!!
   EC      = 0x24 (数据中止(低 EL))
   ELR     = 0x0000000044400004  (出错指令)
   FAR     = 0x0000000040200000  (访问地址)
   ESR     = 0x000000009200000e
-  → 该任务被终止，返回内核 shell。
-[TASK] 用户任务已退出，退出码 = 1
+  → 任务 1 被终止
+[TASK] 全部任务结束，最后退出码 = 1
+aster> sched
+  任务数 1，总切换 0
 aster> hash
-  SHA-256 = 8fe41edb24067d47be1d1f85dd4a5fd85bdb8e4ae0024b3451820da07c4d78f6
+  SHA-256 = b92388d7b3116d86e5911b9b542598f1c54bf0259c16af07ffbd4805ab12ed52
 aster> halt
 

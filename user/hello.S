@@ -1,68 +1,71 @@
-/* Aster 用户态示例程序（EL0 / AArch64）
+/* Aster 用户态示例程序（EL0 / AArch64）—— 两个任务共用这一份代码
  *
- * 这个程序不是内核的一部分：它是一个独立的扁平二进制，被链接到 0x44400000，
- * 由内核在 shell 里用 run 命令把它映射进用户页表、切到 EL0 执行。
+ * 被链接到 0x44400000（槽 A）和 0x44600000（槽 B）各装一次。
+ * 程序自己不知道住在哪个槽，它问内核 getpid() 拿到任务号，
+ * 于是同一个二进制在两处打印出 TASK 1 / TASK 2。
  *
- * 它只能用 svc 走系统调用，不能直接碰 UART、不能改页表、不能访问内核内存 ——
- * 违反任何一条都会触发异常被内核捕获。
+ * 每次打印后忙等约 8 ms（用 CNTPCT 计数器），让 2 ms 的时间片
+ * 有机会把 CPU 换给另一个任务 —— 这样串口上能看到两个任务交替输出。
  *
- * 系统调用号沿用 AArch64 Linux 编号，方便以后移植现成的用户态程序：
- *    64 = write(fd, buf, len)
- *    93 = exit(code)
- *   172 = getpid()
- * 约定：x8 = 号，x0..x2 = 参数，返回值在 x0。
+ * 系统调用号沿用 AArch64 Linux 编号：
+ *    64 = write(fd, buf, len)   93 = exit(code)   172 = getpid()
  */
 
     .section .text.start, "ax"
     .global _start
 
 _start:
-    /* ---- 1) write(1, "Aster 用户态已启动 ...") ---- */
-    mov     x0, #1                      /* fd = 1 stdout */
-    adr     x1, msg_hello
-    mov     x2, #(msg_hello_end - msg_hello)
-    mov     x8, #64                     /* SYS_write */
-    svc     #0
-    mov     x19, x0                     /* 记下返回值，稍后证明它是真值 */
+    mov     x19, #30                /* 循环 30 次后退出 */
 
-    /* ---- 2) getpid() ---- */
-    mov     x8, #172                    /* SYS_getpid */
+.Lloop:
+    /* ---- 取任务号，转成字符存到栈上 ---- */
+    mov     x8, #172                /* SYS_getpid */
     svc     #0
-    mov     x20, x0
+    add     x0, x0, #'0'
+    sub     x1, sp, #16
+    strb    w0, [x1]
 
-    /* ---- 3) write(1, "...") ---- */
+    /* ---- write(1, "TASK ", 5) ---- */
     mov     x0, #1
-    adr     x1, msg_svc
-    mov     x2, #(msg_svc_end - msg_svc)
+    adr     x1, s_task
+    mov     x2, #5
     mov     x8, #64
     svc     #0
 
-    /* ---- 4) 演示一次非法调用：号 9999 应该返回 -ENOSYS 而不是把内核打死 ---- */
-    mov     x8, #9999
-    svc     #0
-
-    /* ---- 5) write(1, "...") ---- */
+    /* ---- write(1, &digit, 1) ---- */
     mov     x0, #1
-    adr     x1, msg_bye
-    mov     x2, #(msg_bye_end - msg_bye)
+    sub     x1, sp, #16
+    mov     x2, #1
     mov     x8, #64
     svc     #0
 
-    /* ---- 6) exit(7)：退出码 7 一路带回内核 ---- */
-    mov     x0, #7
-    mov     x8, #93                     /* SYS_exit */
+    /* ---- write(1, "\n", 1) ---- */
+    mov     x0, #1
+    adr     x1, s_nl
+    mov     x2, #1
+    mov     x8, #64
     svc     #0
 
-    /* exit 正常不会返回；万一返回就自锁 */
-1:  b       1b
+    /* ---- 忙等 ≈8 ms：cntfrq/128 个计数 ---- */
+    mrs     x5, cntfrq_el0
+    lsr     x5, x5, #7
+    mrs     x6, cntpct_el0
+    add     x6, x6, x5
+1:  mrs     x7, cntpct_el0
+    cmp     x7, x6
+    b.lo    1b
+
+    subs    x19, x19, #1
+    b.ne    .Lloop
+
+    /* ---- exit(0) ---- */
+    mov     x0, #0
+    mov     x8, #93
+    svc     #0
+2:  b       2b
 
     .section .rodata, "a"
-msg_hello:
-    .ascii  "Aster 用户态已启动 (EL0 · AArch64)\n"
-msg_hello_end:
-msg_svc:
-    .ascii  "这句是用户程序通过 svc #0 发给内核、再经内核驱动串口打出来的\n"
-msg_svc_end:
-msg_bye:
-    .ascii  "用户态即将 exit(7)\n"
-msg_bye_end:
+s_task:
+    .ascii  "TASK "
+s_nl:
+    .ascii  "\n"

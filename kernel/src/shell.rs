@@ -78,6 +78,8 @@ fn cmd_help() {
     println!("  mmu       查看 MMU / 页表状态");
     println!("  run       切到 EL0 执行内嵌用户程序（演示系统调用）");
     println!("  runf      从 EL0 越权读内核内存（验证页表隔离）");
+    println!("  runp      抢占验证（纯计算任务 vs 打印任务）");
+    println!("  sched     任务调度统计");
     println!("  uptime    运行时长");
     println!("  mem       内存布局");
     println!("  clear     清屏");
@@ -171,14 +173,19 @@ pub fn run() -> ! {
                 println!("  MMU: {}", if crate::mmu::enabled() { "已开启" } else { "关闭" });
                 crate::mmu::dump();
             }
-            "run" => match crate::task::run_hello() {
-                Ok(code) => println!("[TASK] 用户任务已退出，退出码 = {}", code),
+            "run" => match crate::task::run_two() {
+                Ok(code) => println!("[TASK] 全部任务结束，最后退出码 = {}", code),
                 Err(e) => println!("[TASK] 无法运行: {}", e),
             },
             "runf" => match crate::task::run_fault() {
-                Ok(code) => println!("[TASK] 用户任务已退出，退出码 = {}", code),
+                Ok(code) => println!("[TASK] 全部任务结束，最后退出码 = {}", code),
                 Err(e) => println!("[TASK] 无法运行: {}", e),
             },
+            "runp" => match crate::task::run_preempt_test() {
+                Ok(code) => println!("[TASK] 全部任务结束，最后退出码 = {}", code),
+                Err(e) => println!("[TASK] 无法运行: {}", e),
+            },
+            "sched" => println!("  {}", crate::sched::stats()),
             "uptime" => println!("  已运行 {} ms", uptime_ms()),
             "mem" => cmd_mem(),
             "clear" => {

@@ -55,6 +55,7 @@ fn main() {
     for (env_key, static_name, default) in [
         ("ASTER_USER_BIN",       "USER_HELLO", "../build/user/hello.bin"),
         ("ASTER_USER_FAULT_BIN", "USER_FAULT", "../build/user/fault.bin"),
+        ("ASTER_USER_BUSY_BIN",  "USER_BUSY",  "../build/user/busy.bin"),
     ] {
         let path = env::var(env_key).map(PathBuf::from).unwrap_or_else(|_| manifest.join(default));
         let size_name = format!("{}_SIZE", static_name);

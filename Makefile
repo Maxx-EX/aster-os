@@ -40,8 +40,9 @@ info:
 # ---------- 0. 用户态程序（独立扁平二进制，链接到 0x44400000） ----------
 USER_BIN  := $(B)/user/hello.bin
 FAULT_BIN := $(B)/user/fault.bin
+BUSY_BIN  := $(B)/user/busy.bin
 
-user: $(USER_BIN) $(FAULT_BIN)
+user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN)
 
 $(B)/user/%.o: user/%.S
 	@mkdir -p $(B)/user
@@ -59,10 +60,14 @@ $(FAULT_BIN): $(B)/user/fault.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 fault: $$(stat -c%s $@) bytes"
 
+$(BUSY_BIN): $(B)/user/busy.elf
+	$(CROSS)-objcopy -O binary $< $@
+	@echo "[BUILD] 用户程序 busy: $$(stat -c%s $@) bytes"
+
 # ---------- 1. 内核（Rust + C） ----------
 kernel: $(KBIN)
 
-$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN)
+$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN)
 	@mkdir -p $(B)
 	@test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
 	@python3 tools/aster-sign.py --build-id "aster-$(BOARD)" gen-ex3
@@ -70,6 +75,7 @@ $(KBIN): FORCE $(USER_BIN) $(FAULT_BIN)
 	cd kernel && RUSTFLAGS="-C link-arg=-T$(CURDIR)/$(B)/kernel.ld -C relocation-model=static" \
 	    ASTER_USER_BIN="$(CURDIR)/$(USER_BIN)" \
 	    ASTER_USER_FAULT_BIN="$(CURDIR)/$(FAULT_BIN)" \
+	    ASTER_USER_BUSY_BIN="$(CURDIR)/$(BUSY_BIN)" \
 	    cargo build --release $(CARGO_FEAT)
 	$(CROSS)-objcopy -O binary $(KREL)/aster-kernel $@
 	@echo "[BUILD] kernel .ast: $$(stat -c%s $@) bytes"
@@ -111,14 +117,16 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\nrun\nrunf\nhash\nhalt\n' | timeout 30 \
+	@printf '\nhelp\nex3\nrun\nrunp\nrunf\nsched\nhash\nhalt\n' | timeout 45 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
 	@grep -q "原创校验值.*PASS" $(B)/test.log && echo "[TEST] PASS EX3" || (echo "[TEST] FAIL EX3" && exit 1)
-	@grep -q "Aster 用户态已启动" $(B)/test.log && echo "[TEST] PASS EL0 输出" || (echo "[TEST] FAIL EL0 无输出" && exit 1)
-	@grep -q "退出码 = 7" $(B)/test.log && echo "[TEST] PASS 系统调用/退出码" || (echo "[TEST] FAIL 退出码" && exit 1)
+	@grep -q "TASK 1" $(B)/test.log && echo "[TEST] PASS EL0 输出" || (echo "[TEST] FAIL EL0 无输出" && exit 1)
+	@grep -q "全部任务结束，最后退出码 = 0" $(B)/test.log && echo "[TEST] PASS 系统调用/退出码" || (echo "[TEST] FAIL 退出码" && exit 1)
 	@grep -q "数据中止(低 EL)" $(B)/test.log && echo "[TEST] PASS 用户越权被 MMU 拦下" || (echo "[TEST] FAIL 隔离失效" && exit 1)
+	@grep -q "TASK 2" $(B)/test.log && echo "[TEST] PASS 双任务轮转" || (echo "[TEST] FAIL 无多任务输出" && exit 1)
+	@awk '/BUSY start/{s=NR} /TASK 2/{t=NR} /BUSY end/{e=NR} END{if (s>0 && t>s && e>t) print "[TEST] PASS 抢占：纯计算期间另一任务仍在跑"; else {print "[TEST] FAIL 抢占未生效"; exit 1}}' $(B)/test.log
 
 # ---------- 5. 树莓派 ----------
 rpi4:
