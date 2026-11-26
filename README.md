@@ -2,9 +2,14 @@
 
 从零写起的 ARM64 系统：**原创引导器 + 原创内核 + 原创三级镜像校验**，不基于任何现有内核（没有 Linux、没有 Zircon、没有 *BSD 的任何代码）。
 
-当前是 **v0.4 / 阶段二**：在阶段一（上电、校验、进内核、命令行、串口刷写）之上，加进了**用户态 + 抢占调度 + 图形输出与远程访问**——内核把程序装进只属于它的 4 KiB 代码页和栈页，切到 EL0 执行，程序只能通过 `svc` 请求内核做事；每 2 ms 定时器中断打断一次，调度器在两个任务之间轮转；另有一条 ramfb 图形通路，把内存帧缓冲交给 QEMU 的显示器，配合 VNC 就能在别的机器（手机也行）上看到 Aster 的画面。
+当前是 **v0.5 / 阶段二**：在阶段一（上电、校验、进内核、命令行、串口刷写）之上，加进了**用户态 + 抢占调度 + 图形 + 键盘 + 网络**——
 
-文件系统、真正的网络协议栈、输入设备、APK/EXE 兼容层仍是后续阶段，见 [docs/roadmap.md](docs/roadmap.md)。
+- 内核把程序装进只属于它的 4 KiB 代码页和栈页，切到 EL0 执行，程序只能通过 `svc` 请求内核做事；每 2 ms 定时器中断打断一次，调度器在任务之间轮转。
+- ramfb 图形通路把内存帧缓冲交给 QEMU 的显示器，画的是**桌面**：顶栏、左侧图标、带标题栏的终端窗口、底部任务栏（开始按钮 / 运行中程序 / 键盘与网络状态灯 / 运行时长）。
+- **键盘能用了**：virtio-input 驱动把 Linux 键码翻成 ASCII，字符环喂给 shell——在 VNC 画面里直接敲命令，不必再开串口。
+- **网络是真的在内核里**：virtio-net 驱动 + 自研 ARP/ICMP/TCP + HTTP 服务，宿主的 `curl` 打进来能拿到 Aster 自己生成的页面。
+
+文件系统、鼠标与窗口管理、APK/EXE 兼容层仍是后续阶段，见 [docs/roadmap.md](docs/roadmap.md)（已写成到 v1.0 的完整九阶段）。
 
 ---
 
@@ -33,6 +38,9 @@
 | **图形界面**：卡片面板、中英文点阵混排、实时状态 | 通过 | `make shot` 生成 `build/screen.png` |
 | **VNC 远程画面** | 通过 | `make run-gfx`，远端握手返回 `RFB 003.008` |
 | **串口 TCP 远程终端** | 通过 | 连 4444 端口发 `info`，收到完整系统信息 |
+| **桌面式界面**：顶栏 / 图标列 / 终端窗口 / 任务栏 | 通过 | `make shot` → `docs/screenshot.png` |
+| **键盘输入**（virtio-input，EL1 驱动） | 通过 | QEMU `sendkey` 注入 `help`，桌面终端打印帮助 |
+| **内核网络栈**（virtio-net + ARP/ICMP/TCP + HTTP） | 通过 | `make test-net`：宿主 `curl` 拿到 `200` 与 2983 字节页面 |
 | 树莓派 4/5 镜像 | 仅构建通过 | `make rpi4` 产出 `kernel8.img`；**内存属性映射与 GIC 地址未适配，真机不可用** |
 
 ## 明确还没做的
@@ -41,13 +49,34 @@
 - **浮点/NEON 上下文不保存**：陷阱帧只存 x0-x30，任务里一旦用 Q 寄存器，被抢占后会串
 - **任务之间能互读对方的用户页**：共用一张 TTBR0，只靠不同虚拟区间分开（见下一条）
 - **每个任务独立的地址空间**：现在所有任务共用同一张 TTBR0 页表，隔离靠页表 AP 位（硬件强制），不是靠切换页表
-- **内核里的网络协议栈**：没有。现在的"远程"是 QEMU 把串口和显示转成 TCP/VNC，网络协议不在 Aster 内核里
-- **输入设备**：键盘/鼠标都没有，图形只能输出，不能交互
+- **网络只到 HTTP 的最小集**：没有重传、没有滑动窗口、没有 UDP/DNS、没有 TLS；一次只能可靠地服务单条连接
+- **只有键盘，没有鼠标**：界面能用键盘操作，但窗口还拖不动、点不了
+- **界面是"单窗口桌面"**：有任务栏和图标，但没有真正的窗口管理器、没有多窗口叠加
+- **终端输出是共享的**：串口和屏幕显示同一份内容，还没有多终端/多会话
 - **文件系统 / 驱动框架**：都没有
 - **APK 与 EXE 兼容层**：只有路线设计，没有实现（见路线图）
 - 树莓派真机：只做了板级地址适配和镜像产出，没在硬件上跑过
 
 这一版的目标是把"系统骨架 + 可信启动"这条线打通，而不是假装已经是个能日常使用的操作系统。
+
+---
+
+## 桌面、键盘与网络
+
+```bash
+make run-gfx     # VNC 画面 :5901，串口终端 :4444（键盘此时还不可用，需带 virtio-keyboard）
+make run-net     # 带网卡 + 键盘 + 桌面：浏览器开 http://127.0.0.1:18088/
+make test-net    # 端到端断言：宿主 curl 必须拿到 200
+make shot        # 掉一张 PNG 到 build/screen.png
+```
+
+桌面布局（1024×768）：顶栏放系统名与 EX3 短指纹；左侧四个图标（终端 / 系统 / 网络 / 关于，目前是入口占位）；主窗口是终端，内容与串口输出完全一致；底栏有开始按钮、运行中程序、键盘与网络状态灯、运行时长。
+
+键盘走 `virtio-keyboard-device`（virtio-mmio，DeviceID 18）：一条 eventq，8 个 8 字节事件缓冲循环使用，Linux 键码表翻成 ASCII，Shift/CapsLock 生效，退格与回车照常。字符进 128 字节环，shell 的读行循环优先取键盘、其次取串口。
+
+网络走 `virtio-net-device`（DeviceID 1）。**注意**：QEMU 的 virtio-mmio 默认 `force-legacy=1`，在这台 6.2 上 legacy 队列写进 `QueuePFN` 后设备并不真正激活（DRIVER_OK 认了、used ring 永不推进），所以启动一律带 `-global virtio-mmio.force-legacy=false` 走 modern（version=2）。差这一个参数，现象就是"驱动初始化全对、宿主 curl 超时、收发帧 0/0"。
+
+协议栈是自研的：ARP（开机先喊三声让 slirp 记住我们的 MAC，否则它没有目的地址可填）、ICMP echo、TCP 三次握手/序号/ACK/关闭、HTTP/1.1 响应，页面是编译进镜像的中文 HTML。
 
 ---
 
@@ -101,6 +130,9 @@ make test-gfx         # 断言 framebuffer 起来 + 界面画出来 + 截图 102
  │  exceptions.rs  16 项向量表 + SVC 入口 + EL0 故障处理      │
  │  task.rs  装载用户程序、切 EL0、回收退出码                │
  │  shell.rs  命令行（run / runf 触发用户态）                 │
+│  term.rs   屏幕终端缓冲（串口输出同步进桌面窗口）          │
+│  input.rs  virtio-input 键盘驱动                           │
+│  net.rs    virtio-net + ARP/ICMP/TCP + HTTP                │
  └─────────────────────────────────────────────────────────┘
 ```
 
@@ -129,7 +161,8 @@ make test-gfx         # 断言 framebuffer 起来 + 界面画出来 + 截图 102
 aster-os/
 ├── boot/            引导器：start.S、uart、sha256、verify(AVP)、flash(AFP)、shell、main
 ├── kernel/          内核：Rust 主体 + c/ 下 C 侧支持代码
-│   ├── src/          main.rs / uart.rs / mmu.rs / exceptions.rs / task.rs / shell.rs / boot.S
+│   ├── src/          main.rs / uart.rs / mmu.rs / exceptions.rs / sched.rs / task.rs / shell.rs /
+│                     fb.rs / font.rs / term.rs / ui.rs / input.rs / net.rs / virtio.rs / boot.S
 │   │                 ex3.rs（构建时生成，内嵌 EX3）
 │   └── c/            aster_c.c、sha256.c（与引导器同一份实现）
 ├── user/            用户态程序（独立扁平二进制，链接到 0x4440_0000）

@@ -56,7 +56,7 @@ fn banner() {
     println!("     / ___ \\ ___) || | | |___|  _ < ");
     println!("    /_/   \\_\\____/ |_| |_____|_| \\_\\");
     println!();
-    println!("    A S T E R   星芒   v0.1   ARM64");
+    println!("    A S T E R   星芒   v0.5   ARM64");
     println!("    原创内核 · Rust + C · 无任何第三方内核依赖");
     println!();
 }

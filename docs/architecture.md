@@ -306,7 +306,115 @@ python3 tools/genfont.py     # 生成 kernel/src/font.rs（ASCII 95 + 汉字 74�
 
 ### 10.6 这一块还没做的
 
-- 输入设备（键盘、鼠标）：图形只有输出路径，界面上点不动
-- 多窗口 / 合成器：现在是一张全屏面板，没有窗口概念
-- 光标与文本输入：命令行仍然只在串口里
+- 鼠标：键盘已经有了（见 §12），鼠标还没有，窗口拖不动、点不了
+- 多窗口 / 合成器：现在是"单窗口桌面"，没有真正的窗口管理器
 - 面板不是"实时"的：`run` 期间 shell 被阻塞在任务循环里，界面要等命令回来再按 `gfx` 重绘，所以任务表反映的是"上一次运行之后"的状态，不是运行中。EL1 期间的中断走 5 号槽，不触发调度（见 §9）
+
+
+---
+
+## 11. 网络
+
+### 11.1 为什么又选了 virtio-mmio
+
+上一节为了图形绕开 PCI，这次也一样。`virt` 机器把 32 个 virtio-mmio 槽摆在 `0x0a000000` 起、每槽 `0x200` 字节，设备倒序分配（第一个挂上的在第 31 槽，即 `0x0a003e00`）。走 mmio 的好处是不用 ECAM 枚举、不用 BAR 映射、不用 MSI-X，坏处是**没有 PCI 的 capability 描述**，版本行为完全依赖设备。
+
+### 11.2 那个让人误判一整晚的 legacy 坑
+
+QEMU 6.2 的 virtio-mmio 默认 `force-legacy=1`，于是设备自报 `Version=1`。按 legacy 规范写：
+
+```
+QueueSel=0 → QueueNum=8 → QueueAlign=4096 → QueuePFN=mem>>12 → Status|=DRIVER_OK → QueueNotify=0
+```
+
+全部写进去，寄存器读回也全对，`Status=0x7`（ACK|DRIVER|DRIVER_OK），`InterruptStatus=0`，**但 `used.idx` 永远是 0**。表现为：
+
+- 驱动初始化"成功"，MAC 从 config 空间读得到（`52:54:00:12:34:56`）
+- RX 挂了 8 个缓冲（`avail.idx=8`）
+- 收发计数 `0/0`，宿主 `curl` 12 秒超时 `HTTP 000`
+- `-trace "virtio*"` 显示 690 万次读、16 次写，`0x50` notify 确实到达了设备
+
+也就是说：设备收了 notify、认了 DRIVER_OK，却从不消费描述符。试过把 `QueuePFN` 先清 0 再设、把 QSIZE 换成 64、确认 desc 页对齐与物理可达——都没用。
+
+**解法**：加 `-global virtio-mmio.force-legacy=false`，设备变成 `Version=2`，走 modern 队列寄存器（`QueueDescLow/High`、`QueueDriverLow/High`、`QueueDeviceLow/High` + `QueueReady=1`）。同一份驱动逻辑立刻正常：`curl` 拿到 `200`，收发计数立刻动起来。
+
+代码里两条路径都保留了（`virtio::setup_queue_legacy` / `setup_queue`），但**默认启动一律 modern**，`make run-net` / `tools/nettest.py` 都带这个参数。
+
+### 11.3 队列与内存布局
+
+RX 与 TX 各一块 8 KiB 的页对齐静态区（`#[repr(C, align(4096))]`），内部切成 desc（`8×16=128`）、avail（紧跟其后）、used（固定在偏移 4096）。QSIZE=8，每帧缓冲 2048 字节，RX 用 `DESC_F_WRITE`，TX 用 `DESC_F_NEXT` 串两段（virtio-net 头 + 帧体）。
+
+`VIRTIO_NET_F_MRG_RXBUF` 与 `VIRTIO_NET_F_MAC` 参与协商；`HDR_LEN=12`（协商了 MRG 时头是 12 字节，没协商是 10）。
+
+### 11.4 协议栈是自己写的
+
+按依赖顺序实现，每步都能在串口里看到证据：
+
+1. **ARP**：开机先广播三次 `who has 10.0.2.2`。这一步不是可选的——slirp 只有在收到 guest 的帧之后才学到"这个 IP 对应这个 MAC"，在此之前它拿到宿主侧连接也没有目的地址可填，SYN 根本送不下来。少了这三次喊话，现象同样是"收帧 0"。
+2. **ICMP**：应答 echo，验证链路。
+3. **TCP**：三次握手、序号/确认号、ACK、FIN、单连接。校验和按 RFC 1071 反码求和。
+4. **HTTP/1.1**：解析请求行与方法，返回编译进镜像的中文页面（`HTTP_PAGE` 用 `r#""#` 原样串，因为 HTML 里有 `#`）。
+
+驱动层与协议层之间只有两个函数：`send_frame(&[u8])` 和轮询 `pop_used()`。`net::poll()` 挂在 shell 的空闲循环里，所以只要系统在等输入，网络就在收包。
+
+### 11.5 边界
+
+- 没有重传、没有滑动窗口、没有乱序处理；丢了就丢了
+- 没有 UDP / DNS / DHCP（地址是写死的 `10.0.2.15`，slirp 的固定网段）
+- 没有 TLS
+- 一次只维护一条连接，`建立连接` 计数只增不减（不复用端口）
+- 端口从宿主进 guest 仍需 QEMU `hostfwd`，因为 guest 在 NAT 后面
+
+---
+
+## 12. 输入设备与桌面
+
+### 12.1 事件模型
+
+`virtio-keyboard-device`（DeviceID 18）只有一条队列：queue 0 = eventq，方向"设备→驱动"。每个事件 8 字节、全部小端：
+
+```
+u16 type  0=EV_SYN  1=EV_KEY  2=EV_REL
+u16 code  Linux 键码（30='a'、42=LShift、58=CapsLock…）
+u32 value 1=按下 0=抬起 2=自动重复
+```
+
+挂 8 个 8 字节缓冲，消费一个立刻归还并 `notify(0)`——**不归还就会在敲十几个键之后彻底卡住**，因为队列只有 8 格。
+
+### 12.2 键码到字符
+
+`key_to_char` 是一张 `Linux code → (无 Shift, 有 Shift)` 的表：字母走大小写映射，符号（`1`↔`!`、`[`↔`{`）走 Shift 分支。`CapsLock` 只影响字母，`Shift` 与 `CapsLock` 用异或合成。`Enter/Backspace/Tab/Esc` 翻译成 `\n / 0x08 / \t / 0x1B`，其余丢弃。
+
+字符进一个 128 字节的环形缓冲。`shell::read_line` 的循环变成三路：**先取键盘环，再取串口，都没有就自旋**。这样键盘和串口可以同时用，谁先到算谁的。
+
+### 12.3 屏幕终端与重绘节流
+
+串口输出与屏幕共用一份内容：`uart::puts()` 在写 PL011 之前先 `term::write(s)`。终端缓冲是 `26×88` 个 `u16`：
+
+- `0` = 空
+- `<0x80` = ASCII
+- 其它 = Unicode 码位
+- `0xFFFF` = "宽字符第二格"——汉字占两格，保证中英混排行列对齐
+
+全屏重绘一次约几十毫秒（1024×768 的填充 + 2288 个格子的字模），所以不按帧刷：`term` 写入时置脏标记，`ui::tick()` 在 shell 等待输入的空闲里检查，**脏 + 距上次 ≥60 ms** 才重画。
+
+### 12.4 布局与配色
+
+1024×768，深色系：
+
+| 区域 | 位置 | 内容 |
+|---|---|---|
+| 顶栏 | y=0..28 | `ASTER 星芒 v0.5 ARM64 原创内核` + 右 `EX3-…` 短指纹 |
+| 图标列 | x=24，y=76 起 | 终端 / 系统 / 网络 / 关于（入口占位） |
+| 主窗口 | 140,60 848×600 | 标题栏（终端 TERMINAL + 三键）+ 终端内容 |
+| 任务栏 | y=720..768 | 开始按钮、运行中程序（下方亮条）、键盘/网络状态灯、运行时长 |
+
+壁纸用 48 条横带做的纵向渐变（`lerp(0x101a26 → 0x1d3149)`），右上两块微亮矩形打破平板感。强调色 `#4FC3F7`（青）、状态绿 `#7EE787`、警示橙 `#FFB86B`。
+
+字模来自 `tools/genfont.py`：ASCII 8×16（DejaVuSansMono-Bold），汉字 16×16（arphic `uming.ttc`）。**字表按源码自动提取**——脚本扫 `kernel/src/*.rs` 里所有非 ASCII 字符，去重后写进 `CJK_CHARS`，当前 641 个汉字，随文案更新自动增减。
+
+### 12.5 还没做的
+
+- 鼠标与光标
+- 窗口管理与多窗口
+- 多终端会话（现在串口与屏幕是同一份流）

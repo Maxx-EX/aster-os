@@ -123,7 +123,7 @@ fn cmd_ex3() {
 
 fn cmd_info() {
     let i = info();
-    println!("  Aster Kernel 0.1  (Rust + C 混编)");
+    println!("  Aster Kernel 0.5  (Rust + C 混编)");
     println!("  内核基址   : {:#x}", i.payload_base);
     println!("  内核大小   : {} bytes", i.payload_size);
     println!("  DTB        : {:#x}", i.dtb);
@@ -199,7 +199,12 @@ pub fn run() -> ! {
                 Err(e) => println!("[TASK] 无法运行: {}", e),
             },
             "sched" => println!("  {}", crate::sched::stats()),
-            "gfx" => render_dashboard(),
+            "gfx" => {
+                // 显式重绘才回一行提示；界面自动刷新时不能打印，
+                // 否则打印会再次把终端弄脏，形成无限重绘
+                render_dashboard();
+                println!("[GFX] 界面已重绘（{}x{}）", fb::width(), fb::height());
+            }
             "net" => cmd_net(),
             "uptime" => println!("  已运行 {} ms", uptime_ms()),
             "mem" => cmd_mem(),
@@ -235,7 +240,6 @@ pub fn render_dashboard() {
         i.payload_size / 1024,
     );
     crate::term::mark_clean(uptime_ms());
-    println!("[GFX] 界面已重绘（{}x{}）", fb::width(), fb::height());
 }
 
 fn cmd_net() {
