@@ -32,6 +32,10 @@ const ATTR_DEVICE: u64 = 1;
 // AP[7:6]：0b00 = EL1 读写、EL0 无权限；0b01 = EL0/EL1 都可读写
 const AP_EL1_RW: u64 = 0b00;
 const AP_ALL_RW: u64 = 0b01;
+/// EL1 与 EL0 都只读 —— 用户代码页用它：能读能执行、谁都写不进去。
+/// 注意 AP 编码：bit2=1 表示只读，bit1=0 表示 EL0 无访问权，所以 0b10
+/// 是"EL1 只读 + EL0 完全不可访问"，不是"EL0 只读"。这里要的是 0b11。
+const AP_RO_ALL: u64 = 0b11;
 
 /// 用户段布局（虚拟地址 = 物理地址，恒等映射）
 /// 任务 A 占第一个 2 MiB 块，任务 B 占第二个 —— 目前共用一张 TTBR0 页表，
@@ -238,7 +242,10 @@ pub fn new_space() -> Option<Space> {
     let idx = ((user_va::CODE - (1u64 << 30)) / (2 << 20)) as usize; // 34
     nl2[idx] = table_desc(l3);
 
-    nl3[0] = desc(code, 0b11, ATTR_NORMAL, AP_ALL_RW, 1, 0); // 代码：EL0 可执行
+    // 代码：EL0/EL1 都只读但可执行（AP=0b11 + UXN=0）。内核加载镜像时
+    // 走的是内核自己那张表的 2 MiB 块映射（EL1 RW），照样写得进去。
+    // 这样用户程序改不了自己的代码 —— W^X 的 X 那一半。
+    nl3[0] = desc(code, 0b11, ATTR_NORMAL, AP_RO_ALL, 1, 0);
     nl3[1] = 0; // guard：不映射，越界立刻 fault
     nl3[2] = desc(stack, 0b11, ATTR_NORMAL, AP_ALL_RW, 1, 1); // 栈：可写不可执行
 

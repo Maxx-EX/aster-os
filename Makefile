@@ -41,10 +41,11 @@ info:
 USER_BIN  := $(B)/user/hello.bin
 ISO_BIN   := $(B)/user/iso.bin
 FP_BIN    := $(B)/user/fp.bin
+WX_BIN    := $(B)/user/wx.bin
 FAULT_BIN := $(B)/user/fault.bin
 BUSY_BIN  := $(B)/user/busy.bin
 
-user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN)
+user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN)
 
 $(B)/user/%.o: user/%.S
 	@mkdir -p $(B)/user
@@ -62,6 +63,10 @@ $(FP_BIN): $(B)/user/fp.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 fp: $$(stat -c%s $@) bytes"
 
+$(WX_BIN): $(B)/user/wx.elf
+	$(CROSS)-objcopy -O binary $< $@
+	@echo "[BUILD] 用户程序 wx: $$(stat -c%s $@) bytes"
+
 $(USER_BIN): $(B)/user/hello.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 hello: $$(stat -c%s $@) bytes"
@@ -77,7 +82,7 @@ $(BUSY_BIN): $(B)/user/busy.elf
 # ---------- 1. 内核（Rust + C） ----------
 kernel: $(KBIN)
 
-$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN)
+$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN)
 	@mkdir -p $(B)
 	@test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
 	@python3 tools/aster-sign.py --build-id "aster-$(BOARD)" gen-ex3
@@ -88,6 +93,7 @@ $(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN)
 	    ASTER_USER_BUSY_BIN="$(CURDIR)/$(BUSY_BIN)" \
 	    ASTER_USER_ISO_BIN="$(CURDIR)/$(ISO_BIN)" \
 	    ASTER_USER_FP_BIN="$(CURDIR)/$(FP_BIN)" \
+	    ASTER_USER_WX_BIN="$(CURDIR)/$(WX_BIN)" \
 	    cargo build --release $(CARGO_FEAT)
 	$(CROSS)-objcopy -O binary $(KREL)/aster-kernel $@
 	@echo "[BUILD] kernel .ast: $$(stat -c%s $@) bytes"
@@ -188,6 +194,13 @@ test: image
 	    > $(B)/test-fp.log 2>&1 || true
 	@grep -q "FP 1: ." $(B)/test-fp.log && grep -q "FP 2: ." $(B)/test-fp.log && \
 	    echo "[TEST] PASS 浮点上下文不串（每任务 q0-q31）" || (echo "[TEST] FAIL 浮点上下文串了" && exit 1)
+	# W^X：EL0 写自己的代码页必须被拦（FAR 落在 0x4440_0xxx）
+	@(sleep 9; printf 'wx\n'; sleep 3; printf 'halt\n') | timeout 50 \
+	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
+	    > $(B)/test-wx.log 2>&1 || true
+	@grep -q "WX start" $(B)/test-wx.log && grep -q "数据中止(低 EL)" $(B)/test-wx.log && \
+	    grep -q "FAR     = 0x0000000044400" $(B)/test-wx.log && \
+	    echo "[TEST] PASS W^X（EL0 写代码页被拦）" || (echo "[TEST] FAIL W^X 未生效" && exit 1)
 	# 页帧分配器：两个任务各 5 页，加内核页表共 10 页
 	@grep -q "页帧池 10 / 32768 页已用" $(B)/test.log && \
 	    echo "[TEST] PASS 页帧分配器" || (echo "[TEST] FAIL 页帧计数不对" && exit 1)

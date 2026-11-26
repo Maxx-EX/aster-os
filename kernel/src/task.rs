@@ -86,7 +86,7 @@ pub fn run_iso() -> Result<u64, &'static str> {
     if sched::spawn(sa).is_none() || sched::spawn(sb).is_none() {
         return Err("任务表已满");
     }
-    crate::println!("[ISO] 两个任务写同一 VA 0x4440_0800，各自读回：'.' = 隔离成功，'X' = 串了");
+    crate::println!("[ISO] 两个任务写同一 VA 0x4440_2200，各自读回：'.' = 隔离成功，'X' = 串了");
     timer::arm();
     mmu::activate(&sa);
     let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
@@ -103,6 +103,21 @@ pub fn run_fp() -> Result<u64, &'static str> {
         return Err("任务表已满");
     }
     crate::println!("[FP] 两个任务各持一个 d0（1.5 / 2.5），被抢占后比较：'.' = 没串，'X' = 串了");
+    timer::arm();
+    mmu::activate(&sa);
+    let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
+    Ok(code)
+}
+
+
+/// W^X 验证：从 EL0 写自己的代码页，应当被页表权限拦下
+pub fn run_wx() -> Result<u64, &'static str> {
+    sched::reset();
+    let sa = make_space(USER_WX, USER_WX_SIZE)?;
+    if sched::spawn(sa).is_none() {
+        return Err("任务表已满");
+    }
+    crate::println!("[WX] 代码页 AP=0b10（EL0 只读），试着 store 进去看会不会被拦");
     timer::arm();
     mmu::activate(&sa);
     let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
