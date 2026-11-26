@@ -52,7 +52,7 @@ def pick(cands):
 
 
 def render(ch, font, w, h, baseline_ratio=0.8):
-    """把单个字符渲染成 w x h 的二值点阵，返回 h 行、每行 ceil(w/8) 字节"""
+    """渲染成 4-bit 灰度点阵（抗锯齿）：每像素一 nibble，每行 w/2 字节"""
     img = Image.new("L", (w, h), 0)
     d = ImageDraw.Draw(img)
     bbox = d.textbbox((0, 0), ch, font=font)
@@ -62,12 +62,15 @@ def render(ch, font, w, h, baseline_ratio=0.8):
     y = int(h * baseline_ratio) - bbox[3]
     d.text((x, y), ch, fill=255, font=font)
     rows = []
-    row_bytes = (w + 7) // 8
     for yy in range(h):
-        ba = bytearray(row_bytes)
+        ba = bytearray(w // 2)
         for xx in range(w):
-            if img.getpixel((xx, yy)) >= 110:
-                ba[xx >> 3] |= 0x80 >> (xx & 7)
+            v = img.getpixel((xx, yy))
+            q = min(15, (v * 15 + 120) // 255)
+            if xx % 2 == 0:
+                ba[xx // 2] |= q << 4
+            else:
+                ba[xx // 2] |= q
         rows.append(bytes(ba))
     return rows
 
@@ -78,7 +81,7 @@ def main():
 
     out = []
     out.append("// 由 tools/genfont.py 生成，勿手改。")
-    out.append("// ASCII: 8x16，每字符 16 字节；汉字: 16x16，每字符 32 字节。")
+    out.append("// ASCII: 8x16 灰度，每字符 64 字节；汉字: 16x16 灰度，每字符 128 字节。")
     out.append(f"pub const ASCII_W: usize = {ASCII_W};")
     out.append(f"pub const ASCII_H: usize = {ASCII_H};")
     out.append(f"pub const CJK_W: usize = {CJK_PX};")
@@ -87,7 +90,7 @@ def main():
     out.append(f"pub const ASCII_LAST: u8 = 126;")
 
     # ---- ASCII ----
-    out.append("pub static ASCII: [[u8; 16]; 95] = [")
+    out.append("pub static ASCII: [[u8; 64]; 95] = [")
     for code in range(32, 127):
         ch = chr(code)
         rows = render(ch, ascii_font, ASCII_W, ASCII_H)
@@ -100,7 +103,7 @@ def main():
     out.append(f"pub static CJK_CHARS: [char; {len(cjk)}] = [")
     out.append("    " + ", ".join(f"'{c}'" for c in cjk))
     out.append("];")
-    out.append(f"pub static CJK_BITS: [[u8; 32]; {len(cjk)}] = [")
+    out.append(f"pub static CJK_BITS: [[u8; 128]; {len(cjk)}] = [")
     for c in cjk:
         rows = render(c, cjk_font, CJK_PX, CJK_PX, baseline_ratio=0.85)
         flat = []

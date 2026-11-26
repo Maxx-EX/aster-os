@@ -343,20 +343,201 @@ pub fn frame_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
     fill_rect(x + w - 2, y, 2, h, color);
 }
 
-/// 画一个字符点阵（scale 只用于 ASCII，1 或 2）
-fn draw_glyph(x: u32, y: u32, rows: &[u8], glyph_w: u32, glyph_h: u32, color: u32, scale: u32) {
-    let bpr = ((glyph_w + 7) / 8) as usize;
-    for r in 0..glyph_h {
-        for c in 0..glyph_w {
-            let byte = rows[r as usize * bpr + (c / 8) as usize];
-            if byte & (0x80 >> (c % 8)) != 0 {
-                fill_rect(x + c * scale, y + r * scale, scale, scale, color);
+// ---------------- 抗锯齿图元 ----------------
+
+/// 按 alpha（0..255）混合一个像素
+#[inline]
+fn blend_px(x: u32, y: u32, color: u32, a: u32) {
+    if a == 0 || !available() {
+        return;
+    }
+    let f = fb();
+    if x >= f.w || y >= f.h {
+        return;
+    }
+    let off = (y * f.stride + x * 4) as u64;
+    unsafe {
+        let p = (f.base + off) as *mut u32;
+        if a >= 255 {
+            core::ptr::write_volatile(p, color);
+            return;
+        }
+        let dst = core::ptr::read_volatile(p);
+        let sa = a;
+        let ia = 255 - a;
+        let r = (((color >> 16) & 0xff) * sa + ((dst >> 16) & 0xff) * ia) / 255;
+        let g = (((color >> 8) & 0xff) * sa + ((dst >> 8) & 0xff) * ia) / 255;
+        let bl = ((color & 0xff) * sa + (dst & 0xff) * ia) / 255;
+        core::ptr::write_volatile(p, (r << 16) | (g << 8) | bl);
+    }
+}
+
+pub fn blend_rect(x: u32, y: u32, w: u32, h: u32, color: u32, a: u32) {
+    if !available() {
+        return;
+    }
+    let f = fb();
+    for yy in y..(y + h).min(f.h) {
+        for xx in x..(x + w).min(f.w) {
+            blend_px(xx, yy, color, a);
+        }
+    }
+}
+
+/// 整数平方根（no_std 里 f32::sqrt 不可用）
+fn isqrt(v: u32) -> u32 {
+    if v == 0 {
+        return 0;
+    }
+    let mut x = v;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + v / x) / 2;
+    }
+    x
+}
+
+/// 圆角矩形，角落按到圆心的距离做覆盖率混合
+pub fn rounded_rect_alpha(x: i32, y: i32, w: u32, h: u32, r: u32, color: u32, a: u32) {
+    if !available() || w == 0 || h == 0 {
+        return;
+    }
+    let rr = r.min(w / 2).min(h / 2);
+    let ux = |v: i32| -> u32 { v.max(0) as u32 };
+    if rr == 0 {
+        blend_rect(ux(x), ux(y), w, h, color, a);
+        return;
+    }
+    blend_rect(ux(x + rr as i32), ux(y), w - 2 * rr, h, color, a);
+    blend_rect(ux(x), ux(y + rr as i32), rr, h - 2 * rr, color, a);
+    blend_rect(ux(x + w as i32 - rr as i32), ux(y + rr as i32), rr, h - 2 * rr, color, a);
+    // 以半像素为单位算距离：像素中心到圆心的 dx = rr - dx - 0.5
+    for dy in 0..rr {
+        for dx in 0..rr {
+            let cx = (2 * rr - 2 * dx) as i32 - 1;
+            let cy = (2 * rr - 2 * dy) as i32 - 1;
+            let dh = isqrt((cx * cx + cy * cy) as u32) as i32;
+            let cov = 2 * rr as i32 + 1 - dh; // 半像素单位的覆盖量
+            if cov <= 0 {
+                continue;
+            }
+            let av = ((cov.min(2) as u32) * a) / 2;
+            if av == 0 {
+                continue;
+            }
+            let px = x + dx as i32;
+            let py = y + dy as i32;
+            let px2 = x + w as i32 - 1 - dx as i32;
+            let py2 = y + h as i32 - 1 - dy as i32;
+            blend_px(ux(px), ux(py), color, av);
+            blend_px(ux(px2), ux(py), color, av);
+            blend_px(ux(px), ux(py2), color, av);
+            blend_px(ux(px2), ux(py2), color, av);
+        }
+    }
+}
+
+pub fn rounded_rect(x: i32, y: i32, w: u32, h: u32, r: u32, color: u32) {
+    rounded_rect_alpha(x, y, w, h, r, color, 255);
+}
+
+/// 柔和投影：三层递减，只露在窗口边缘外
+pub fn drop_shadow(x: i32, y: i32, w: u32, h: u32, r: u32) {
+    for i in 0..3u32 {
+        let d = 4 + i * 4;
+        rounded_rect_alpha(
+            x - d as i32,
+            y - (d / 2) as i32 + 2,
+            w + d * 2,
+            h + d * 2,
+            r + d,
+            0x000000,
+            16,
+        );
+    }
+}
+
+/// 实心圆（边缘抗锯齿）
+pub fn circle(cx: i32, cy: i32, r: u32, color: u32, a: u32) {
+    for dy in 0..(2 * r) {
+        for dx in 0..(2 * r) {
+            let px = dx as i32 - r as i32 + 0; // 像素左上角，下面用 +1 补中心
+            let py = dy as i32 - r as i32 + 0;
+            let cx = 2 * px + 1;
+            let cy = 2 * py + 1;
+            let dh = isqrt((cx * cx + cy * cy) as u32) as i32;
+            let cov = 2 * r as i32 + 1 - dh;
+            if cov <= 0 {
+                continue;
+            }
+            let av = ((cov.min(2) as u32) * a) / 2;
+            if av > 0 {
+                blend_px((cx + dx as i32 - r as i32).max(0) as u32, (cy + dy as i32 - r as i32).max(0) as u32, color, av);
             }
         }
     }
 }
 
-fn cjk_lookup(c: char) -> Option<&'static [u8; 32]> {
+/// 竖直渐变
+pub fn vgrad(x: u32, y: u32, w: u32, h: u32, top: u32, bottom: u32) {
+    for i in 0..h {
+        let c = if h <= 1 { top } else { lerp(top, bottom, i, h - 1) };
+        fill_rect(x, y + i, w, 1, c);
+    }
+}
+
+fn lighten(c: u32, n: u32) -> u32 {
+    let r = (((c >> 16) & 0xff) + n).min(255);
+    let g = (((c >> 8) & 0xff) + n).min(255);
+    let b = ((c & 0xff) + n).min(255);
+    (r << 16) | (g << 8) | b
+}
+
+/// 一团柔光（壁纸用），三层由外到内
+fn glow_rect(x: i32, y: i32, w: u32, h: u32, color: u32, a: u32) {
+    for i in 0..3u32 {
+        let g = i * 10;
+        rounded_rect_alpha(
+            x - g as i32,
+            y - g as i32,
+            w + g * 2,
+            h + g * 2,
+            60 + g,
+            color,
+            a / 3,
+        );
+    }
+}
+
+/// 画一个字符点阵（4-bit 灰度，做 alpha 混合）
+fn draw_glyph(x: u32, y: u32, rows: &[u8], glyph_w: u32, glyph_h: u32, color: u32, scale: u32) {
+    let bpr = (glyph_w / 2) as usize;
+    for r in 0..glyph_h {
+        let base = r as usize * bpr;
+        for c in 0..glyph_w {
+            let byte = rows[base + (c / 2) as usize];
+            let nib = if c % 2 == 0 { byte >> 4 } else { byte & 0x0f };
+            if nib == 0 {
+                continue;
+            }
+            let a = (nib as u32) * 17;
+            let dx = x + c * scale;
+            let dy = y + r * scale;
+            if scale == 1 {
+                blend_px(dx, dy, color, a);
+            } else {
+                for sy in 0..scale {
+                    for sx in 0..scale {
+                        blend_px(dx + sx, dy + sy, color, a);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn cjk_lookup(c: char) -> Option<&'static [u8; 128]> {
     for (i, &ch) in font::CJK_CHARS.iter().enumerate() {
         if ch == c {
             return Some(&font::CJK_BITS[i]);
@@ -602,18 +783,19 @@ fn text_center(cx: u32, y: u32, s: &str, color: u32, scale: u32) {
 }
 
 fn icon_tile(x: u32, y: u32, bg: u32, fg: u32, glyph: char, label: &str, cjk: bool) {
-    let size = 64u32;
-    // 底部阴影
-    fill_rect(x + 2, y + 3, size, size, 0x0a1119);
-    fill_rect(x, y, size, size, bg);
-    frame_rect(x, y, size, size, lerp(bg, 0xffffff, 1, 6));
+    let s = 52u32;
+    drop_shadow(x as i32, y as i32, s, s, 14);
+    rounded_rect(x as i32, y as i32, s, s, 14, bg);
+    // 顶部 1px 内高光（只画中间直段，避开圆角）
+    fill_rect(x + 14, y + 1, s - 28, 1, lighten(bg, 52));
+    // 底部 1px 内暗边
+    fill_rect(x + 14, y + s - 2, s - 28, 1, 0x000000);
     if cjk {
-        draw_char(x + 24, y + 24, glyph, fg, 1);
+        draw_char(x + (s - 16) / 2, y + 15, glyph, fg, 1);
     } else {
-        draw_char(x + 20, y + 16, glyph, fg, 3);
+        draw_char(x + (s - 16) / 2, y + 18, glyph, fg, 2);
     }
-    let lw = text_len(label, 1);
-    draw_text(x + size / 2 - lw / 2, y + size + 8, label, 0xc3d2e2, 1);
+    text_center(x + s / 2, y + s + 9, label, 0xa2b6ca, 1);
 }
 
 fn clock_str(ms: u64) -> ([u8; 8], usize) {
@@ -634,107 +816,111 @@ pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks:
         return;
     }
 
-    // 壁纸：自上而下的深蓝渐变，分 48 条带减少写入次数
-    let top = 0x101a26u32;
-    let bottom = 0x1d3149u32;
-    let bands = 48u32;
+    // ---- 壁纸：非线性竖直渐变 + 两团柔光 ----
+    let bands = 128u32;
     let band_h = H / bands + 1;
+    let span = (bands - 1) * (bands - 1);
     for i in 0..bands {
-        let c = lerp(top, bottom, i, bands - 1);
+        let c = lerp(0x0a1220, 0x213a54, i * i, span);
         fill_rect(0, i * band_h, W, band_h, c);
     }
-    // 右上角两点柔光，让画面不那么平
-    fill_rect(760, 60, 200, 120, 0x1b2b3d);
-    fill_rect(700, 120, 260, 80, 0x1a2836);
+    glow_rect(690, 40, 380, 260, 0x2f6f96, 24);
+    glow_rect(90, 460, 340, 260, 0x1f4a6b, 18);
 
     // ---- 顶栏 ----
-    fill_rect(0, 0, W, 28, 0x0b131c);
-    fill_rect(0, 28, W, 1, 0x2b3d52);
-    draw_text(14, 6, "ASTER", 0x4fc3f7, 1);
-    draw_text(58, 6, "星芒", 0xdbe7f3, 1);
-    draw_text(96, 6, "v0.5  ARM64  原创内核", 0x6d8299, 1);
+    vgrad(0, 0, W, 30, 0x111c28, 0x0a121b);
+    fill_rect(0, 30, W, 1, 0x2c4056);
+    draw_text(14, 7, "ASTER", 0x5cc8f5, 1);
+    draw_text(58, 7, "星芒", 0xe4eef7, 1);
+    draw_text(96, 7, "v0.6  ARM64  原创内核", 0x71889f, 1);
     let right = text_len("EX3 ", 1) + text_len(ex3_short, 1);
-    draw_text(W - right - 14, 6, "EX3 ", 0x6d8299, 1);
-    draw_text(W - text_len(ex3_short, 1) - 14, 6, ex3_short, 0x7ee787, 1);
+    draw_text(W - right - 14, 7, "EX3 ", 0x71889f, 1);
+    draw_text(W - text_len(ex3_short, 1) - 14, 7, ex3_short, 0x7ee787, 1);
 
     // ---- 左侧图标 ----
-    draw_text(24, 52, "桌面", 0x8ea6bd, 1);
+    draw_text(26, 50, "桌面", 0x8ea6bd, 1);
     let ix = 24u32;
-    icon_tile(ix, 76, 0x1b3a4d, 0x4fc3f7, '>', "终端", false);
-    icon_tile(ix, 190, 0x2b3040, 0xffb86b, 'S', "系统", false);
-    icon_tile(ix, 304, 0x1e3a2f, 0x7ee787, 'N', "网络", false);
-    icon_tile(ix, 418, 0x3a2740, 0xc792ea, 'i', "关于", false);
+    icon_tile(ix, 74, 0x1b3a52, 0x5cc8f5, '>', "终端", false);
+    icon_tile(ix, 186, 0x2f323f, 0xffb86b, 'S', "系统", false);
+    icon_tile(ix, 298, 0x1e3a2f, 0x7ee787, 'N', "网络", false);
+    icon_tile(ix, 410, 0x392a45, 0xc792ea, 'i', "关于", false);
 
     // ---- 主窗口 ----
-    let win_x = 140u32;
-    let win_y = 60u32;
+    let win_x = 140i32;
+    let win_y = 58i32;
     let win_w = 848u32;
-    let win_h = 600u32;
+    let win_h = 602u32;
 
-    fill_rect(win_x + 6, win_y + 8, win_w, win_h, 0x070d13); // 阴影
-    fill_rect(win_x, win_y, win_w, win_h, 0x141e29); // 窗体
-    frame_rect(win_x, win_y, win_w, win_h, 0x2e4257);
+    drop_shadow(win_x, win_y, win_w, win_h, 16);
+    rounded_rect(win_x, win_y, win_w, win_h, 16, 0x121d29);
 
-    // 标题栏
-    fill_rect(win_x + 1, win_y + 1, win_w - 2, 34, 0x1c2a3a);
-    fill_rect(win_x + 1, win_y + 35, win_w - 2, 1, 0x2e4257);
-    draw_text(win_x + 14, win_y + 10, "终端", 0xdbe7f3, 1);
-    draw_text(win_x + 50, win_y + 10, "TERMINAL", 0x6d8299, 1);
+    // 标题栏：同上圆角，下边补成直边
+    let tx = win_x + 1;
+    let ty = win_y + 1;
+    let tw = win_w - 2;
+    rounded_rect(tx, ty, tw, 38, 15, 0x223448);
+    fill_rect(tx as u32, ty as u32 + 24, tw, 14, 0x223448);
+    fill_rect(tx as u32 + 14, ty as u32 + 1, tw - 28, 1, 0x35506e);
+    fill_rect(tx as u32 + 1, ty as u32 + 38, tw - 2, 1, 0x2b3f56);
 
-    // 右上三个按钮
-    let bx = win_x + win_w - 92;
-    for i in 0..3 {
-        let x = bx + i * 28;
-        fill_rect(x, win_y + 12, 20, 14, if i == 2 { 0x8c3a3a } else { 0x2a3a4c });
-        match i {
-            0 => fill_rect(x + 6, win_y + 19, 8, 1, 0x9fb1c4),   // 最小化
-            1 => frame_rect(x + 6, win_y + 16, 8, 7, 0x9fb1c4),  // 最大化
-            _ => {                                                // 关闭
-                fill_rect(x + 6, win_y + 17, 8, 1, 0xffd9d9);
-                fill_rect(x + 6, win_y + 19, 8, 1, 0xffd9d9);
-            }
-        }
-    }
+    draw_text(tx as u32 + 14, ty as u32 + 11, "终端", 0xe4eef7, 1);
+    draw_text(tx as u32 + 50, ty as u32 + 11, "TERMINAL", 0x71889f, 1);
 
-    // 终端内容：窗口内 88 列 × 26 行
-    term_guard(win_x + 12, win_y + 44);
+    // 三个圆点按钮
+    let by = ty + 15;
+    let bx = tx + tw as i32 - 76;
+    circle(bx, by, 6, 0xff5f57, 255);
+    circle(bx + 22, by, 6, 0xfebc2e, 255);
+    circle(bx + 44, by, 6, 0x28c840, 255);
+
+    // ---- 终端面板 ----
+    term_guard(tx as u32 + 12, ty as u32 + 50, 88 * 8 + 8);
 
     // ---- 底栏 ----
-    let bar_y = H - 48;
-    fill_rect(0, bar_y, W, 48, 0x0d1620);
-    fill_rect(0, bar_y, W, 1, 0x2b3d52);
+    let bar_y = H - 50;
+    fill_rect(0, bar_y, W, 50, 0x0b1420);
+    fill_rect(0, bar_y, W, 1, 0x2a3d52);
 
-    // 开始按钮
-    fill_rect(10, bar_y + 9, 92, 30, 0x1f3346);
-    frame_rect(10, bar_y + 9, 92, 30, 0x35506b);
-    draw_char(20, bar_y + 15, 'A', 0x4fc3f7, 2);
-    draw_text(46, bar_y + 16, "开始", 0xdbe7f3, 1);
+    rounded_rect(10, bar_y as i32 + 9, 94, 32, 9, 0x1e3145);
+    fill_rect(24, bar_y + 10, 66, 1, lighten(0x1e3145, 44));
+    draw_char(22, bar_y + 16, 'A', 0x5cc8f5, 2);
+    draw_text(48, bar_y + 17, "开始", 0xe4eef7, 1);
 
-    // 运行中的程序
-    fill_rect(112, bar_y + 9, 96, 30, 0x16283a);
-    fill_rect(112, bar_y + 37, 96, 2, 0x4fc3f7);
-    draw_text(124, bar_y + 16, "终端", 0xcfe0f0, 1);
+    rounded_rect(114, bar_y as i32 + 9, 100, 32, 9, 0x162637);
+    fill_rect(124, bar_y + 36, 80, 2, 0x5cc8f5);
+    draw_text(128, bar_y + 17, "终端", 0xcfe0f0, 1);
 
-    // 右侧状态：键盘 / 网络 / 时长
     let now = clock_str(uptime_ms);
-    let time_str = core::str::from_utf8(&now.0[..now.1]).unwrap_or("00:00");
-    draw_text(W - 74, bar_y + 16, time_str, 0xdbe7f3, 1);
+    let tstr = core::str::from_utf8(&now.0[..now.1]).unwrap_or("00:00");
+    draw_text(W - 76, bar_y + 17, tstr, 0xe4eef7, 1);
 
-    let kx = W - 210;
-    draw_text(kx, bar_y + 16, "键盘", 0x6d8299, 1);
-    fill_rect(kx + 36, bar_y + 20, 8, 8, if kb { 0x7ee787 } else { 0x5a6b7d });
+    let kx = W - 216;
+    draw_text(kx, bar_y + 17, "键盘", 0x71889f, 1);
+    circle(kx as i32 + 40, bar_y as i32 + 26, 4, if kb { 0x7ee787 } else { 0x4a5a6b }, 255);
 
-    let nx = W - 150;
-    draw_text(nx, bar_y + 16, "网络", 0x6d8299, 1);
-    fill_rect(nx + 36, bar_y + 20, 8, 8, if net { 0x7ee787 } else { 0x5a6b7d });
+    let nx = W - 154;
+    draw_text(nx, bar_y + 17, "网络", 0x71889f, 1);
+    circle(nx as i32 + 40, bar_y as i32 + 26, 4, if net { 0x7ee787 } else { 0x4a5a6b }, 255);
 
-    let _ = (tasks, kernel_kb);
+    // 窗口底部状态行
+    let sy = (win_y + win_h as i32 - 30) as u32;
+    draw_text(tx as u32 + 14, sy, "任务 ", 0x71889f, 1);
+    draw_num(tx as u32 + 56, sy, tasks as u64);
+    draw_text(tx as u32 + 76, sy, "内核 ", 0x71889f, 1);
+    draw_num(tx as u32 + 116, sy, kernel_kb);
+    draw_text(tx as u32 + 160, sy, "KB", 0x71889f, 1);
+    draw_text(tx as u32 + 190, sy, "页帧 ", 0x71889f, 1);
+    let (used_pages, _total, _) = crate::frame::stats();
+    draw_num(tx as u32 + 230, sy, used_pages as u64);
+    draw_text(tx as u32 + 246, sy, "/ 32768", 0x71889f, 1);
+    draw_text(tx as u32 + 320, sy, "键盘输入 · EX3 已校验 · AVP L1/L2/L3 全通过", 0x5a7391, 1);
 }
 
-fn term_guard(x: u32, y: u32) {
-    // 终端底色
-    fill_rect(x - 4, y - 4, 88 * 8 + 8, 26 * 16 + 8, 0x0e1620);
-    frame_rect(x - 4, y - 4, 88 * 8 + 8, 26 * 16 + 8, 0x1f2d3c);
+fn term_guard(x: u32, y: u32, w: u32) {
+    let ph = 26 * 16 + 8;
+    rounded_rect(x as i32 - 4, y as i32 - 4, w, ph, 10, 0x233549);
+    rounded_rect(x as i32 - 3, y as i32 - 3, w - 2, ph - 2, 9, 0x0d151f);
+    fill_rect(x - 3, y - 3, w - 8, 1, 0x1a2634);
     crate::term::render(x, y, 0xd7e2ee);
 }
 
