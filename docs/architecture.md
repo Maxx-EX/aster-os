@@ -23,7 +23,7 @@
 | 5 | `boot/image.c` | 逐字节拷到 `0x4020_0000`，`dc cvau` + `ic ialluis` |
 | 6 | `boot/image.c` | `br x1`，x0 指向 `struct aster_bootinfo` |
 | 7 | `kernel/src/boot.S` | 设内核栈、放行 FP、清内核 bss |
-| 8 | `kernel_main` | 校验 magic → 装异常向量 → 复算摘要 → 开 MMU → shell |
+| 8 | `kernel_main` | 校验 magic → 装异常向量 → 复算摘要 → **比对 EX3** → 开 MMU → shell |
 
 ### 为什么 FP/SIMD 要显式放行
 
@@ -65,7 +65,21 @@ L1[3]  3 - 4 GiB    Normal WBWA      （预留）
 
 `build.rs` 在构建时调 `aarch64-linux-gnu-gcc` 编 C 再 `ar` 成 `libaster_c.a`，由 `cargo:rustc-link-lib=static=aster_c` 交给 rust-lld。
 
-## 6. 串口协议之外的东西
+## 6. EX3 落到代码里的位置
+
+`EX3` 不是一个手写常量，而是构建产物：
+
+| 环节 | 文件 | 说明 |
+| --- | --- | --- |
+| 生成 | `tools/aster-sign.py gen-ex3` | `HMAC(K, BOOT_ID‖"EX3"‖build_id‖nonce)` |
+| C 侧载体 | `boot/ex3.h`（生成） | `ASTER_EX3[32]`、`ASTER_EX3_TAG` |
+| Rust 侧载体 | `kernel/src/ex3.rs`（生成） | `EX3: [u8;32]`、`EX3_TAG` |
+| 传递 | `bootinfo.ex3` | 引导器校验通过后填进 bootinfo 交给内核 |
+| 比对 | `kernel_main` → `ex3_check` | 32 字节常量时间比较，不一致就 wfe 停机 |
+
+两个生成文件都在 `.gitignore` 里：克隆下来的人第一次 `make` 会用自己的 K 和 nonce 生成属于自己的 EX3，不会和仓库里某人构建出的值撞车。
+
+## 7. 串口协议之外的东西
 
 引导器里还有个 `AFP`（Aster Flash Protocol），跑在串口上：握手 → 长度 → 期望 MAC → 数据。收到数据后用同一把 K 算 HMAC 比对，通过了才标记为"可信暂存镜像"，`boot` 命令就会优先从暂存区启动。
 

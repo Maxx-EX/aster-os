@@ -61,6 +61,7 @@ void boot_main(uint64_t dtb)
     for (int i = 0; i < 32; i++) {
         g_bootinfo.image_hash[i] = r.hash[i];
         g_bootinfo.image_mac[i]  = r.mac[i];
+        g_bootinfo.ex3[i]        = r.ex3[i];
     }
 
     if (!r.trusted) {

@@ -19,6 +19,7 @@
 | MMU 开启（恒等映射，1 GiB 块） | 通过 | `mmu` 命令显示"已开启"，开启后系统不崩 |
 | 异常向量表 + 现场打印 | 通过 | 故意触发 FP 陷阱时能打印 ESR/ELR/FAR |
 | 内核侧独立复算摘要（链式校验） | 通过 | `hash` 命令输出与引导器一致 |
+| **EX3 原创校验值**（内核与引导器各持一份） | 通过 | `ex3` 命令；混搭镜像时内核自己拒绝接管 |
 | 树莓派 4/5 镜像构建 | 构建通过 | `make rpi4` 产出 `kernel8.img`（未上真机验证） |
 
 ## 明确还没做的
@@ -46,7 +47,7 @@
  │  3. AVP 三级校验内嵌内核镜像                              │
  │       L1 SHA-256      完整性                             │
  │       L2 HMAC-SHA256  真实性（密钥只在这里）               │
- │       L3 HMAC(BOOT_ID‖L2)  链绑定，防只换内核             │
+ │       L3 HMAC(BOOT_ID‖"|CHAIN|"‖EX3‖L2)  链绑定          │
  │  4. 校验通过 → 3 秒菜单（按 B 进底层模式）                 │
  │     校验失败 → 强制进底层模式，绝不放行                     │
  │  5. 逐字节载入内核到 0x4020_0000，清 cache，跳 EL1          │
@@ -86,8 +87,9 @@ aster-os/
 ├── boot/            引导器：start.S、uart、sha256、verify(AVP)、flash(AFP)、shell、main
 ├── kernel/          内核：Rust 主体 + c/ 下 C 侧支持代码
 │   ├── src/          main.rs / uart.rs / mmu.rs / exceptions.rs / shell.rs / boot.S
+│   │                 ex3.rs（构建时生成，内嵌 EX3）
 │   └── c/            aster_c.c、sha256.c（与引导器同一份实现）
-├── tools/            aster-sign.py（签名+清单）、afp-flash.py（主机端刷写）
+├── tools/            aster-sign.py（密钥/EX3/签名）、afp-flash.py（主机端刷写）、test-afp.py（刷写回归）
 ├── docs/             架构、校验链、路线图
 └── Makefile          一条命令走完 内核→签名→引导器→运行
 ```
@@ -113,7 +115,16 @@ make test
 make rpi4      # 产出 build/kernel8.img，拷到 SD 卡 boot 分区
 ```
 
-首次构建会自动生成引导密钥 `boot/keys/boot.key`（32 字节，**不会**被提交到仓库）。
+首次构建会自动生成引导密钥 `boot/keys/boot.key` 和 EX3 构建随机数 `boot/keys/ex3.nonce`（都**不会**提交到仓库），并据此生成 `boot/ex3.h` 与 `kernel/src/ex3.rs`。
+
+内核产物用自定义后缀 **`.ast`**（`build/aster-kernel.ast`），是 Aster 自己的裸机镜像格式，不会和常见的 `.bin`/`.img` 混淆。
+
+一次构建的顺序是固定的，`make` 已经排好：
+
+```
+gen-ex3（生成 EX3）→ cargo 编内核(.ast) → aster-sign（出 manifest.h）
+                  → 交叉 gcc 编引导器 → 把 .ast 当 .payload 内嵌 → 链接
+```
 
 ## 怎么调试
 
@@ -123,7 +134,8 @@ qemu-system-aarch64 -M virt -cpu cortex-a72 -m 512M -nographic -kernel build/ast
 
 # 串口挂 unix socket（刷写、自动化测试用）
 make run-sock
-python3 tools/afp-flash.py build/aster-kernel.bin --sock /tmp/aster.sock
+python3 tools/afp-flash.py build/aster-kernel.ast --sock /tmp/aster.sock
+python3 tools/test-afp.py                       # 完整刷写回归（需先 make run-sock）
 ```
 
 ---
@@ -134,9 +146,24 @@ python3 tools/afp-flash.py build/aster-kernel.bin --sock /tmp/aster.sock
 
 1. **L1 完整性** `SHA-256(payload)`，防止镜像被截断或改字节
 2. **L2 真实性** `HMAC-SHA256(K, payload)`，K 只存在于引导器只读区和构建机
-3. **L3 链绑定** `HMAC-SHA256(K, "ASTER-BOOT-ARM64-V1" ‖ L2)`，把镜像和引导器版本绑死；单独替换内核、不重新签名就会在 L3 失败
+3. **L3 链绑定** `HMAC-SHA256(K, "ASTER-BOOT-ARM64-V1" ‖ "|CHAIN|" ‖ EX3 ‖ L2)`，把引导器版本、EX3 和镜像指纹绑死
 
-内核再独立算一遍 `SHA-256` 并与引导器传来的摘要比对，形成第二道关：即使有人削弱了引导器，内核也能发现跳转后内存被改。
+内核再独立算一遍 `SHA-256` 并与引导器传来的摘要比对，形成第二道关。
+
+### EX3 —— 原创校验值
+
+EX3（Aster Exclusive Identifier v3）是本系统给每次构建打的原创身份值：
+
+```
+EX3 = HMAC-SHA256(K, BOOT_ID ‖ "EX3" ‖ build_id ‖ nonce)
+```
+
+- 32 字节，显示为 `EX3-8F2A1C7D-3B9E4421` 这种指纹
+- 由只有本机持有的 K 派生，内核**拿不到 K，只能比对、无法伪造**
+- 引导器在 AVP 里算一份，内核在自己的 `.aster` 镜像里嵌一份，两边必须完全一致才允许内核接管
+- 换了内核（来自另一次构建）而引导器不变 → **AVP 三层全过，内核照样自己拒绝**
+
+这就是 EX3 的独立价值：它不依赖引导器的判断，内核用自己嵌的那份做最后确认。实测记录见 [docs/verify-chain.md](docs/verify-chain.md)。
 
 > 注意：这是**共享密钥**（HMAC）方案，适合"设备自己可信"的场景。要防的是"外部改镜像"。如果要做成"第三方可以验证但无法伪造"的发布签名，需要换成非对称签名（Ed25519），那是阶段三的事。
 

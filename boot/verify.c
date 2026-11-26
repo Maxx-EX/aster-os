@@ -30,6 +30,9 @@ avp_result avp_check(const void *payload, size_t len)
     avp_result r = {0};
     uint64_t t0 = timer_us();
 
+    /* EX3 是本次构建的原创校验值，先落位，报告里要显示 */
+    for (int i = 0; i < 32; i++) r.ex3[i] = ASTER_EX3[i];
+
     /* L1：完整性 */
     sha256(payload, len, r.hash);
     if (!aster_memeq_ct(r.hash, ASTER_EXPECTED_HASH, 32)) {
@@ -46,11 +49,13 @@ avp_result avp_check(const void *payload, size_t len)
         return r;
     }
 
-    /* L3：链绑定 —— 把引导器身份和镜像指纹绑在一起 */
+    /* L3：链绑定 —— 把引导器身份、EX3 和镜像指纹绑在一起 */
     {
         hmac_sha256_ctx c;
         hmac_sha256_init(&c, ASTER_BOOT_KEY, ASTER_BOOT_KEY_LEN);
         hmac_sha256_update(&c, ASTER_BOOT_ID, sizeof(ASTER_BOOT_ID) - 1);
+        hmac_sha256_update(&c, "|CHAIN|", 7);
+        hmac_sha256_update(&c, ASTER_EX3, 32);
         hmac_sha256_update(&c, r.mac, 32);
         hmac_sha256_final(&c, r.chain);
     }
@@ -85,11 +90,15 @@ void avp_print_report(const avp_result *r)
     uart_puts(h2);
     uart_puts("...\n");
 
-    uart_puts("  L3 链绑定              : ");
+    uart_puts("  L3 链绑定(+EX3)        : ");
     uart_puts(r->trusted ? "PASS" : "FAIL");
     uart_puts("  chain=");
     uart_puts(h3);
     uart_puts("...\n");
+
+    uart_puts("  EX3 原创校验值         : ");
+    uart_puts(ASTER_EX3_TAG);
+    uart_putc('\n');
 
     uart_puts("  校验耗时               : ");
     bprintf("%d", (int)(r->elapsed_us / 1000));

@@ -6,7 +6,7 @@ CROSS     ?= aarch64-linux-gnu
 BOARD     ?= qemu
 B         := build
 KREL      := kernel/target/aarch64-unknown-none/release
-KBIN      := $(B)/aster-kernel.bin
+KBIN      := $(B)/aster-kernel.ast
 BOOT_ELF  := $(B)/aster-boot.elf
 QEMU      := qemu-system-aarch64
 
@@ -42,16 +42,18 @@ kernel: $(KBIN)
 
 $(KBIN): FORCE
 	@mkdir -p $(B)
+	@test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
+	@python3 tools/aster-sign.py --build-id "aster-$(BOARD)" gen-ex3
 	@sed 's/0x40200000/$(KERN_BASE)/' kernel/src/linker.ld > $(B)/kernel.ld
 	cd kernel && RUSTFLAGS="-C link-arg=-T$(CURDIR)/$(B)/kernel.ld -C relocation-model=static" \
 	    cargo build --release $(CARGO_FEAT)
 	$(CROSS)-objcopy -O binary $(KREL)/aster-kernel $@
-	@echo "[BUILD] kernel bin: $$(stat -c%s $@) bytes"
+	@echo "[BUILD] kernel .ast: $$(stat -c%s $@) bytes"
 
 # ---------- 2. 签名 + 生成 AVP 清单 ----------
 sign: $(KBIN)
 	@test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
-	python3 tools/aster-sign.py sign $(KBIN) --build-id "aster-$(BOARD)"
+	python3 tools/aster-sign.py --build-id "aster-$(BOARD)" sign $(KBIN)
 
 # ---------- 3. 引导器 ----------
 boot: sign $(BOOT_OBJ)
@@ -63,7 +65,7 @@ boot: sign $(BOOT_OBJ)
 	@$(CROSS)-objcopy -O binary $(BOOT_ELF) $(B)/aster-boot.bin
 	@echo "[BUILD] boot elf: $$(stat -c%s $(BOOT_ELF)) bytes"
 
-$(B)/obj/%.o: boot/%.c boot/manifest.h
+$(B)/obj/%.o: boot/%.c boot/manifest.h boot/ex3.h
 	@mkdir -p $(B)/obj
 	$(CROSS)-gcc $(CFLAGS) -c $< -o $@
 

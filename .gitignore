@@ -4,9 +4,12 @@ kernel/target/
 
 # 生成物
 boot/manifest.h
+boot/ex3.h
+kernel/src/ex3.rs
 
-# 密钥：绝不提交
+# 密钥与 EX3 构建随机数：绝不提交
 boot/keys/boot.key
+boot/keys/ex3.nonce
 *.key
 
 # 临时
@@ -14,4 +17,5 @@ boot/keys/boot.key
 *.elf
 *.bin
 *.img
+*.ast
 *.log

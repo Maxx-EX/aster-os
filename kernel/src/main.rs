@@ -6,6 +6,7 @@
 #![allow(static_mut_refs)]
 
 mod exceptions;
+mod ex3;
 mod mmu;
 mod shell;
 mod uart;
@@ -23,6 +24,7 @@ pub struct BootInfo {
     pub payload_size: u64,
     pub image_hash: [u8; 32],
     pub image_mac: [u8; 32],
+    pub ex3: [u8; 32],
     pub avp_elapsed_us: u32,
     pub trusted: u32,
 }
@@ -55,6 +57,27 @@ fn chain_check(info: &BootInfo) -> bool {
     unsafe {
         aster_c_hash_image(info.payload_base, info.payload_size, h.as_mut_ptr());
         aster_c_ct_eq(h.as_ptr(), info.image_hash.as_ptr(), 32) == 1
+    }
+}
+
+/// EX3 校验：内核自己内嵌的那份 EX3，必须和引导器校验通过后传下来的完全一致。
+/// EX3 由只有构建机持有的 K 派生，内核无法自己生成，只能比对 ——
+/// 所以它是"防镜像混搭"的第三道关：换了内核，EX3 就对不上。
+fn ex3_check(info: &BootInfo) -> bool {
+    unsafe { aster_c_ct_eq(ex3::EX3.as_ptr(), info.ex3.as_ptr(), 32) == 1 }
+}
+
+fn hex32(v: &[u8; 32]) -> &'static str {
+    // 只在出错路径用，简单拼成静态缓冲即可
+    unsafe {
+        static mut BUF: [u8; 65] = [0; 65];
+        const H: &[u8; 16] = b"0123456789abcdef";
+        for i in 0..32 {
+            BUF[i * 2] = H[(v[i] >> 4) as usize];
+            BUF[i * 2 + 1] = H[(v[i] & 0xF) as usize];
+        }
+        BUF[64] = 0;
+        core::str::from_utf8_unchecked(&BUF[..64])
     }
 }
 
@@ -94,6 +117,19 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
         if ok { "PASS" } else { "FAIL" }
     );
 
+    // EX3：原创校验值，必须与引导器传下来的一致
+    let ex3_ok = ex3_check(info);
+    print!("[KERNEL] EX3 原创校验值 {} : ", ex3::EX3_TAG);
+    println!("{}", if ex3_ok { "PASS" } else { "FAIL" });
+    if !ex3_ok {
+        println!("[KERNEL] EX3 不一致 —— 内核与引导器不是同一次构建，拒绝接管。");
+        println!("[KERNEL] 内核 EX3 = {}", hex32(&ex3::EX3));
+        println!("[KERNEL] 引导器 EX3 = {}", hex32(&info.ex3));
+        loop {
+            unsafe { core::arch::asm!("wfe") };
+        }
+    }
+
     mmu::init();
     println!("[KERNEL] MMU 已开启（恒等映射，4KiB 粒度 1GiB 块）");
 
@@ -102,6 +138,7 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
         payload_size: info.payload_size,
         dtb: info.dtb,
         hash_ok: ok,
+        ex3_ok,
         avp_us: info.avp_elapsed_us,
         boot_trusted: info.trusted == 1,
     });

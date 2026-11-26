@@ -27,6 +27,7 @@ typedef struct {
     uint8_t  hash[32];
     uint8_t  mac[32];
     uint8_t  chain[32];
+    uint8_t  ex3[32];        /* 本次构建的原创校验值 */
 } avp_result;
 
 avp_result avp_check(const void *payload, size_t len);
