@@ -53,9 +53,9 @@ vector_table:
     b aster_unexpected
     .endr
 
-    /* ---------- 陷阱帧 272 字节 ---------- */
+    /* ---------- 陷阱帧 800 字节：通用 272 + FP 528 ---------- */
     .macro SAVE_FRAME
-    sub     sp, sp, #272
+    sub     sp, sp, #800
     stp     x0, x1,   [sp, #0]
     stp     x2, x3,   [sp, #16]
     stp     x4, x5,   [sp, #32]
@@ -78,9 +78,32 @@ vector_table:
     str     x0,       [sp, #256]
     mrs     x0, spsr_el1
     str     x0,       [sp, #264]
+    /* FP：q0..q31 = 512 字节（偏移 272..784），再 fpsr/fpcr。
+       基址先挪到 sp+272，因为 stp q 的立即数上限只有 ±512 字节。 */
+    add     x0, sp, #272
+    stp     q0,  q1,  [x0, #0]
+    stp     q2,  q3,  [x0, #32]
+    stp     q4,  q5,  [x0, #64]
+    stp     q6,  q7,  [x0, #96]
+    stp     q8,  q9,  [x0, #128]
+    stp     q10, q11, [x0, #160]
+    stp     q12, q13, [x0, #192]
+    stp     q14, q15, [x0, #224]
+    stp     q16, q17, [x0, #256]
+    stp     q18, q19, [x0, #288]
+    stp     q20, q21, [x0, #320]
+    stp     q22, q23, [x0, #352]
+    stp     q24, q25, [x0, #384]
+    stp     q26, q27, [x0, #416]
+    stp     q28, q29, [x0, #448]
+    stp     q30, q31, [x0, #480]
+    mrs     x0, fpsr
+    str     x0,       [sp, #784]
+    mrs     x0, fpcr
+    str     x0,       [sp, #792]
     .endm
 
-    /* 先装 ELR/SPSR/SP_EL0（借 x1 当临时），再恢复通用寄存器，最后 eret */
+    /* 先装 ELR/SPSR/SP_EL0（借 x1 当临时），再恢复 FP，最后通用寄存器 */
     .macro LOAD_FRAME
     ldr     x1, [sp, #248]
     msr     sp_el0, x1
@@ -88,6 +111,27 @@ vector_table:
     msr     elr_el1, x1
     ldr     x1, [sp, #264]
     msr     spsr_el1, x1
+    add     x1, sp, #272
+    ldp     q0,  q1,  [x1, #0]
+    ldp     q2,  q3,  [x1, #32]
+    ldp     q4,  q5,  [x1, #64]
+    ldp     q6,  q7,  [x1, #96]
+    ldp     q8,  q9,  [x1, #128]
+    ldp     q10, q11, [x1, #160]
+    ldp     q12, q13, [x1, #192]
+    ldp     q14, q15, [x1, #224]
+    ldp     q16, q17, [x1, #256]
+    ldp     q18, q19, [x1, #288]
+    ldp     q20, q21, [x1, #320]
+    ldp     q22, q23, [x1, #352]
+    ldp     q24, q25, [x1, #384]
+    ldp     q26, q27, [x1, #416]
+    ldp     q28, q29, [x1, #448]
+    ldp     q30, q31, [x1, #480]
+    ldr     x1, [sp, #784]
+    msr     fpsr, x1
+    ldr     x1, [sp, #792]
+    msr     fpcr, x1
     ldp     x0, x1,   [sp, #0]
     ldp     x2, x3,   [sp, #16]
     ldp     x4, x5,   [sp, #32]
@@ -104,7 +148,7 @@ vector_table:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldr     x30,      [sp, #240]
-    add     sp, sp, #272
+    add     sp, sp, #800
     eret
     .endm
 
@@ -128,7 +172,7 @@ aster_lower_sync:
     bl      svc_handler
     cmp     x0, #0
     b.eq    1f
-    add     sp, sp, #272
+    add     sp, sp, #800
     b       aster_task_end
 1:  LOAD_FRAME
 

@@ -14,7 +14,7 @@
 // 真正的地址空间隔离要等每个任务一张页表，见 docs/roadmap.md 阶段二 #4。
 #![allow(static_mut_refs)]
 
-pub const FRAME_WORDS: usize = 34;
+pub const FRAME_WORDS: usize = 100;
 pub const IX_SP_EL0: usize = 31;
 pub const IX_ELR: usize = 32;
 pub const IX_SPSR: usize = 33;

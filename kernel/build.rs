@@ -57,6 +57,7 @@ fn main() {
         ("ASTER_USER_FAULT_BIN", "USER_FAULT", "../build/user/fault.bin"),
         ("ASTER_USER_BUSY_BIN",  "USER_BUSY",  "../build/user/busy.bin"),
         ("ASTER_USER_ISO_BIN",   "USER_ISO",   "../build/user/iso.bin"),
+        ("ASTER_USER_FP_BIN",    "USER_FP",    "../build/user/fp.bin"),
     ] {
         let path = env::var(env_key).map(PathBuf::from).unwrap_or_else(|_| manifest.join(default));
         let size_name = format!("{}_SIZE", static_name);

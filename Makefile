@@ -40,10 +40,11 @@ info:
 # ---------- 0. 用户态程序（独立扁平二进制，链接到 0x44400000） ----------
 USER_BIN  := $(B)/user/hello.bin
 ISO_BIN   := $(B)/user/iso.bin
+FP_BIN    := $(B)/user/fp.bin
 FAULT_BIN := $(B)/user/fault.bin
 BUSY_BIN  := $(B)/user/busy.bin
 
-user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN)
+user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN)
 
 $(B)/user/%.o: user/%.S
 	@mkdir -p $(B)/user
@@ -56,6 +57,10 @@ $(B)/user/%.elf: $(B)/user/%.o user/hello.ld
 $(ISO_BIN): $(B)/user/iso.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 iso: $$(stat -c%s $@) bytes"
+
+$(FP_BIN): $(B)/user/fp.elf
+	$(CROSS)-objcopy -O binary $< $@
+	@echo "[BUILD] 用户程序 fp: $$(stat -c%s $@) bytes"
 
 $(USER_BIN): $(B)/user/hello.elf
 	$(CROSS)-objcopy -O binary $< $@
@@ -72,7 +77,7 @@ $(BUSY_BIN): $(B)/user/busy.elf
 # ---------- 1. 内核（Rust + C） ----------
 kernel: $(KBIN)
 
-$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN)
+$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN)
 	@mkdir -p $(B)
 	@test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
 	@python3 tools/aster-sign.py --build-id "aster-$(BOARD)" gen-ex3
@@ -82,6 +87,7 @@ $(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN)
 	    ASTER_USER_FAULT_BIN="$(CURDIR)/$(FAULT_BIN)" \
 	    ASTER_USER_BUSY_BIN="$(CURDIR)/$(BUSY_BIN)" \
 	    ASTER_USER_ISO_BIN="$(CURDIR)/$(ISO_BIN)" \
+	    ASTER_USER_FP_BIN="$(CURDIR)/$(FP_BIN)" \
 	    cargo build --release $(CARGO_FEAT)
 	$(CROSS)-objcopy -O binary $(KREL)/aster-kernel $@
 	@echo "[BUILD] kernel .ast: $$(stat -c%s $@) bytes"
@@ -176,6 +182,12 @@ test: image
 	# 隔离：两个任务写同一 VA，各自读回自己写的值（打印 '.'，不是 'X'）
 	@grep -q "ISO 1: ." $(B)/test.log && grep -q "ISO 2: ." $(B)/test.log && \
 	    echo "[TEST] PASS 地址空间隔离（同 VA 不串）" || (echo "[TEST] FAIL 地址空间串了" && exit 1)
+	# 浮点上下文：单独跑一次（连发命令会丢字符，必须带节拍）
+	@(sleep 9; printf 'fp\n'; sleep 4; printf 'halt\n') | timeout 55 \
+	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
+	    > $(B)/test-fp.log 2>&1 || true
+	@grep -q "FP 1: ." $(B)/test-fp.log && grep -q "FP 2: ." $(B)/test-fp.log && \
+	    echo "[TEST] PASS 浮点上下文不串（每任务 q0-q31）" || (echo "[TEST] FAIL 浮点上下文串了" && exit 1)
 	# 页帧分配器：两个任务各 5 页，加内核页表共 10 页
 	@grep -q "页帧池 10 / 32768 页已用" $(B)/test.log && \
 	    echo "[TEST] PASS 页帧分配器" || (echo "[TEST] FAIL 页帧计数不对" && exit 1)

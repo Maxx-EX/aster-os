@@ -92,3 +92,19 @@ pub fn run_iso() -> Result<u64, &'static str> {
     let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
     Ok(code)
 }
+
+
+/// 浮点上下文验证：两个任务各持一个 d0，被抢占后看是否仍属于自己
+pub fn run_fp() -> Result<u64, &'static str> {
+    sched::reset();
+    let sa = make_space(USER_FP, USER_FP_SIZE)?;
+    let sb = make_space(USER_FP, USER_FP_SIZE)?;
+    if sched::spawn(sa).is_none() || sched::spawn(sb).is_none() {
+        return Err("任务表已满");
+    }
+    crate::println!("[FP] 两个任务各持一个 d0（1.5 / 2.5），被抢占后比较：'.' = 没串，'X' = 串了");
+    timer::arm();
+    mmu::activate(&sa);
+    let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
+    Ok(code)
+}
