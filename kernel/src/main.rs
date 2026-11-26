@@ -15,6 +15,7 @@ mod gic;
 mod input;
 mod mmu;
 mod net;
+mod rtc;
 mod sched;
 mod shell;
 mod task;
@@ -52,15 +53,12 @@ const ASTER_BOOT_MAGIC: u64 = 0x4153_5445_524B_4552; // "ASTERKER"
 
 fn banner() {
     println!();
-    println!("        _    ____ _____ _____ ____  ");
-    println!("       / \\  / ___|_   _| ____|  _ \\ ");
-    println!("      / _ \\ \\___ \\ | | |  _| | |_) |");
-    println!("     / ___ \\ ___) || | | |___|  _ < ");
-    println!("    /_/   \\_\\____/ |_| |_____|_| \\_\\");
-    println!();
-    println!("    A S T E R   星芒   v0.6   ARM64");
-    println!("    原创内核 · Rust + C · 无任何第三方内核依赖");
-    println!();
+    match crate::rtc::local() {
+        Some((y, mo, d, h, mi, _s)) => {
+            println!("  Aster 0.6   ARM64   {:04}-{:02}-{:02} {:02}:{:02} CST", y, mo, d, h, mi)
+        }
+        None => println!("  Aster 0.6   ARM64"),
+    }
 }
 
 /// 链式校验：引导器算过一遍摘要，内核再独立算一遍，两者必须一致。

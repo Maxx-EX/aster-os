@@ -20,6 +20,8 @@ ASCII_FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
 ]
 CJK_FONT_CANDIDATES = [
+    # 文泉驿正黑自带 16px 点阵，小字号比矢量字清楚得多
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     "/usr/share/fonts/truetype/arphic/uming.ttc",
     "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
 ]
@@ -75,6 +77,36 @@ def render(ch, font, w, h, baseline_ratio=0.8):
     return rows
 
 
+def render_cjk(ch, font, w, h):
+    """汉字：先画到两倍画布，按实际笔画范围裁剪再居中，避免字体度量把字形顶出格子"""
+    big = Image.new("L", (w * 2, h * 2), 0)
+    d = ImageDraw.Draw(big)
+    d.text((w // 2, h // 2), ch, font=font, fill=255)
+    bbox = big.getbbox()
+    if not bbox:
+        return [bytes(w // 2) for _ in range(h)]
+    crop = big.crop(bbox)
+    cw, chh = crop.size
+    if cw > w or chh > h:
+        sc = min(w / cw, h / chh)
+        crop = crop.resize((max(1, int(cw * sc)), max(1, int(chh * sc))), Image.LANCZOS)
+        cw, chh = crop.size
+    out = Image.new("L", (w, h), 0)
+    out.paste(crop, ((w - cw) // 2, (h - chh) // 2))
+    rows = []
+    for yy in range(h):
+        ba = bytearray(w // 2)
+        for xx in range(w):
+            v = out.getpixel((xx, yy))
+            q = min(15, (v * 15 + 120) // 255)
+            if xx % 2 == 0:
+                ba[xx // 2] |= q << 4
+            else:
+                ba[xx // 2] |= q
+        rows.append(bytes(ba))
+    return rows
+
+
 def main():
     ascii_font = ImageFont.truetype(pick(ASCII_FONT_CANDIDATES), 14)
     cjk_font = ImageFont.truetype(pick(CJK_FONT_CANDIDATES), CJK_PX, index=0)
@@ -105,7 +137,7 @@ def main():
     out.append("];")
     out.append(f"pub static CJK_BITS: [[u8; 128]; {len(cjk)}] = [")
     for c in cjk:
-        rows = render(c, cjk_font, CJK_PX, CJK_PX, baseline_ratio=0.85)
+        rows = render_cjk(c, cjk_font, CJK_PX, CJK_PX)
         flat = []
         for r in rows:
             flat.extend(r)

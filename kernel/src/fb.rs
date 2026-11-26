@@ -939,7 +939,7 @@ pub fn cache_wall(ex3_short: &str) {
     fill_rect(0, 30, W, 1, 0x2c4056);
     draw_text(14, 7, "ASTER", 0x5cc8f5, 1);
     draw_text(58, 7, "星芒", 0xe4eef7, 1);
-    draw_text(96, 7, "v0.6  ARM64  原创内核", 0x71889f, 1);
+    draw_text(96, 7, "v0.6  ARM64", 0x71889f, 1);
     let right = text_len("EX3 ", 1) + text_len(ex3_short, 1);
     draw_text(W - right - 14, 7, "EX3 ", 0x71889f, 1);
     draw_text(W - text_len(ex3_short, 1) - 14, 7, ex3_short, 0x7ee787, 1);
@@ -1042,8 +1042,18 @@ pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks:
 
     // 底栏上会变的两样：时钟、键盘/网络指示灯
     let bar_y = H - 50;
-    let now = clock_str(uptime_ms);
-    let tstr = core::str::from_utf8(&now.0[..now.1]).unwrap_or("00:00");
+    let (cbuf, clen) = match crate::rtc::hm() {
+        Some((h, m)) => {
+            let mut b = *b"00:00   ";
+            b[0] = b'0' + (h / 10) as u8;
+            b[1] = b'0' + (h % 10) as u8;
+            b[3] = b'0' + (m / 10) as u8;
+            b[4] = b'0' + (m % 10) as u8;
+            (b, 5)
+        }
+        None => clock_str(uptime_ms),
+    };
+    let tstr = core::str::from_utf8(&cbuf[..clen]).unwrap_or("00:00");
     draw_text(W - 76, bar_y + 17, tstr, 0xe4eef7, 1);
     circle((W - 216) as i32 + 40, bar_y as i32 + 26, 4, if kb { 0x7ee787 } else { 0x4a5a6b }, 255);
     circle((W - 154) as i32 + 40, bar_y as i32 + 26, 4, if net { 0x7ee787 } else { 0x4a5a6b }, 255);

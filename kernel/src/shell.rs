@@ -80,6 +80,56 @@ fn read_line(buf: &mut [u8]) -> usize {
 }
 
 
+static mut EXTREME: bool = false;
+
+fn parse_hex(s: &str) -> Option<u64> {
+    let t = s.trim();
+    let t = t.strip_prefix("0x").unwrap_or(t);
+    u64::from_str_radix(t, 16).ok()
+}
+
+fn in_ram(addr: u64) -> bool {
+    (0x4000_0000..0x5000_0000).contains(&addr)
+}
+
+fn cmd_peek(a: &str) {
+    if !unsafe { EXTREME } {
+        println!("  需要 Extreme 权限：先输入 ex");
+        return;
+    }
+    match parse_hex(a) {
+        Some(addr) if in_ram(addr) => {
+            let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
+            println!("  [EX] {:#012x} = {:#018x}", addr, v);
+        }
+        Some(_) => println!("  [EX] 拒绝：地址不在 0x4000_0000-0x5000_0000"),
+        None => println!("  用法: peek 0x40200000"),
+    }
+}
+
+fn cmd_poke(a: &str) {
+    if !unsafe { EXTREME } {
+        println!("  需要 Extreme 权限：先输入 ex");
+        return;
+    }
+    let mut it = a.split_whitespace();
+    let (addr_s, val_s) = match (it.next(), it.next()) {
+        (Some(x), Some(y)) => (x, y),
+        _ => {
+            println!("  用法: poke 0x地址 0x值");
+            return;
+        }
+    };
+    match (parse_hex(addr_s), parse_hex(val_s)) {
+        (Some(addr), Some(v)) if in_ram(addr) && addr % 8 == 0 => {
+            unsafe { core::ptr::write_volatile(addr as *mut u64, v) };
+            println!("  [EX] {:#012x} <- {:#018x}", addr, v);
+        }
+        (Some(_), _) => println!("  [EX] 拒绝：地址须 8 字节对齐且在 RAM 范围内"),
+        _ => println!("  用法: poke 0x地址 0x值"),
+    }
+}
+
 fn cmd_help() {
     println!("可得命令:");
     println!("  help      显示帮助");
@@ -95,6 +145,10 @@ fn cmd_help() {
     println!("  net       网络状态（virtio-net / IP / 收发计数）");
     println!("  uptime    运行时长");
     println!("  mem       内存布局");
+    println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
+    println!("  ex off    关闭 Extreme 权限");
+    println!("  peek A    读 8 字节（仅 Extreme）");
+    println!("  poke A V  写 8 字节（仅 Extreme）");
     println!("  clear     清屏");
     println!("  reboot    复位整机 (PSCI)");
     println!("  halt      停机");
@@ -170,12 +224,35 @@ pub fn run() -> ! {
     println!("Aster 内核已接管。输入 help 查看命令。");
     let mut buf = [0u8; 128];
     loop {
-        print!("aster> ");
+        if unsafe { EXTREME } {
+            print!("# ");
+        } else {
+            print!("$ ");
+        }
         let n = read_line(&mut buf);
         if n == 0 {
             continue;
         }
         let line = core::str::from_utf8(&buf[..n]).unwrap_or("").trim();
+
+        if line == "ex" || line == "ex on" {
+            unsafe { EXTREME = true };
+            println!("[EX] Extreme 已开启，提示符变为 #，输入 ex off 退出");
+            continue;
+        }
+        if line == "ex off" || line == "rex" {
+            unsafe { EXTREME = false };
+            println!("[EX] Extreme 已关闭");
+            continue;
+        }
+        if let Some(a) = line.strip_prefix("peek ") {
+            cmd_peek(a);
+            continue;
+        }
+        if let Some(a) = line.strip_prefix("poke ") {
+            cmd_poke(a);
+            continue;
+        }
 
         match line {
             "help" | "?" => cmd_help(),
