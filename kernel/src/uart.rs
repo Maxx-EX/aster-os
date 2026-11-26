@@ -54,6 +54,8 @@ pub fn putc(c: u8) {
 }
 
 pub fn puts(s: &str) {
+    // 串口和屏幕共用一份输出：桌面上的终端窗口就是它
+    crate::term::write(s);
     for b in s.bytes() {
         putc(b);
     }

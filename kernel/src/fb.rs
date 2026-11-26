@@ -366,6 +366,22 @@ fn cjk_lookup(c: char) -> Option<&'static [u8; 32]> {
 }
 
 /// 混合排版的文字：ASCII 8x16、汉字 16x16，返回结束的 x 坐标
+/// 画一个字符（终端逐格渲染用）
+pub fn draw_char(x: u32, y: u32, ch: char, color: u32, scale: u32) {
+    if !available() {
+        return;
+    }
+    if ch.is_ascii() {
+        let code = ch as u8;
+        if code >= font::ASCII_FIRST && code <= font::ASCII_LAST {
+            let idx = (code - font::ASCII_FIRST) as usize;
+            draw_glyph(x, y, &font::ASCII[idx], font::ASCII_W as u32, font::ASCII_H as u32, color, scale);
+        }
+    } else if let Some(rows) = cjk_lookup(ch) {
+        draw_glyph(x, y, rows, font::CJK_W as u32, font::CJK_H as u32, color, 1);
+    }
+}
+
 pub fn draw_text(mut x: u32, y: u32, text: &str, color: u32, scale: u32) -> u32 {
     if !available() {
         return x;
@@ -556,4 +572,172 @@ fn draw_num(x: u32, y: u32, v: u64) {
 fn draw_kb(x: u32, y: u32, kb: u64) {
     draw_num(x, y, kb);
     draw_text(x + 8 * (digits(kb) as u32) + 8, y, "KB", C_DIM, 1);
+}
+
+
+// ---------------- 桌面 ----------------
+//
+// 布局（1024x768）：
+//   顶栏 28px  —— 系统名 / EX3 短指纹
+//   左侧图标列  —— 终端、系统、网络、关于
+//   主窗口      —— 终端（内容来自 term 缓冲，和串口输出一致）
+//   底栏 48px   —— 开始按钮、运行中程序、键盘/网络状态、运行时长
+
+const W: u32 = 1024;
+const H: u32 = 768;
+
+fn lerp(a: u32, b: u32, t: u32, span: u32) -> u32 {
+    let inv = span.saturating_sub(t);
+    let ch = |sh: u32| -> u32 {
+        let ca = (a >> sh) & 0xff;
+        let cb = (b >> sh) & 0xff;
+        ((ca * inv + cb * t) / span) & 0xff
+    };
+    (ch(16) << 16) | (ch(8) << 8) | ch(0)
+}
+
+fn text_center(cx: u32, y: u32, s: &str, color: u32, scale: u32) {
+    let w = text_len(s, scale);
+    draw_text(cx.saturating_sub(w / 2), y, s, color, scale);
+}
+
+fn icon_tile(x: u32, y: u32, bg: u32, fg: u32, glyph: char, label: &str, cjk: bool) {
+    let size = 64u32;
+    // 底部阴影
+    fill_rect(x + 2, y + 3, size, size, 0x0a1119);
+    fill_rect(x, y, size, size, bg);
+    frame_rect(x, y, size, size, lerp(bg, 0xffffff, 1, 6));
+    if cjk {
+        draw_char(x + 24, y + 24, glyph, fg, 1);
+    } else {
+        draw_char(x + 20, y + 16, glyph, fg, 3);
+    }
+    let lw = text_len(label, 1);
+    draw_text(x + size / 2 - lw / 2, y + size + 8, label, 0xc3d2e2, 1);
+}
+
+fn clock_str(ms: u64) -> ([u8; 8], usize) {
+    // 运行时长 mm:ss
+    let s = ms / 1000;
+    let m = (s / 60) % 100;
+    let sec = s % 60;
+    let mut buf = *b"00:00   ";
+    buf[0] = b'0' + (m / 10) as u8;
+    buf[1] = b'0' + (m % 10) as u8;
+    buf[3] = b'0' + (sec / 10) as u8;
+    buf[4] = b'0' + (sec % 10) as u8;
+    (buf, 5)
+}
+
+pub fn draw_desktop(ex3_short: &str, uptime_ms: u64, kb: bool, net: bool, tasks: u32, kernel_kb: u64) {
+    if !available() {
+        return;
+    }
+
+    // 壁纸：自上而下的深蓝渐变，分 48 条带减少写入次数
+    let top = 0x101a26u32;
+    let bottom = 0x1d3149u32;
+    let bands = 48u32;
+    let band_h = H / bands + 1;
+    for i in 0..bands {
+        let c = lerp(top, bottom, i, bands - 1);
+        fill_rect(0, i * band_h, W, band_h, c);
+    }
+    // 右上角两点柔光，让画面不那么平
+    fill_rect(760, 60, 200, 120, 0x1b2b3d);
+    fill_rect(700, 120, 260, 80, 0x1a2836);
+
+    // ---- 顶栏 ----
+    fill_rect(0, 0, W, 28, 0x0b131c);
+    fill_rect(0, 28, W, 1, 0x2b3d52);
+    draw_text(14, 6, "ASTER", 0x4fc3f7, 1);
+    draw_text(58, 6, "星芒", 0xdbe7f3, 1);
+    draw_text(96, 6, "v0.5  ARM64  原创内核", 0x6d8299, 1);
+    let right = text_len("EX3 ", 1) + text_len(ex3_short, 1);
+    draw_text(W - right - 14, 6, "EX3 ", 0x6d8299, 1);
+    draw_text(W - text_len(ex3_short, 1) - 14, 6, ex3_short, 0x7ee787, 1);
+
+    // ---- 左侧图标 ----
+    draw_text(24, 52, "桌面", 0x8ea6bd, 1);
+    let ix = 24u32;
+    icon_tile(ix, 76, 0x1b3a4d, 0x4fc3f7, '>', "终端", false);
+    icon_tile(ix, 190, 0x2b3040, 0xffb86b, 'S', "系统", false);
+    icon_tile(ix, 304, 0x1e3a2f, 0x7ee787, 'N', "网络", false);
+    icon_tile(ix, 418, 0x3a2740, 0xc792ea, 'i', "关于", false);
+
+    // ---- 主窗口 ----
+    let win_x = 140u32;
+    let win_y = 60u32;
+    let win_w = 848u32;
+    let win_h = 600u32;
+
+    fill_rect(win_x + 6, win_y + 8, win_w, win_h, 0x070d13); // 阴影
+    fill_rect(win_x, win_y, win_w, win_h, 0x141e29); // 窗体
+    frame_rect(win_x, win_y, win_w, win_h, 0x2e4257);
+
+    // 标题栏
+    fill_rect(win_x + 1, win_y + 1, win_w - 2, 34, 0x1c2a3a);
+    fill_rect(win_x + 1, win_y + 35, win_w - 2, 1, 0x2e4257);
+    draw_text(win_x + 14, win_y + 10, "终端", 0xdbe7f3, 1);
+    draw_text(win_x + 50, win_y + 10, "TERMINAL", 0x6d8299, 1);
+
+    // 右上三个按钮
+    let bx = win_x + win_w - 92;
+    for i in 0..3 {
+        let x = bx + i * 28;
+        fill_rect(x, win_y + 12, 20, 14, if i == 2 { 0x8c3a3a } else { 0x2a3a4c });
+        match i {
+            0 => fill_rect(x + 6, win_y + 19, 8, 1, 0x9fb1c4),   // 最小化
+            1 => frame_rect(x + 6, win_y + 16, 8, 7, 0x9fb1c4),  // 最大化
+            _ => {                                                // 关闭
+                fill_rect(x + 6, win_y + 17, 8, 1, 0xffd9d9);
+                fill_rect(x + 6, win_y + 19, 8, 1, 0xffd9d9);
+            }
+        }
+    }
+
+    // 终端内容：窗口内 88 列 × 26 行
+    term_guard(win_x + 12, win_y + 44);
+
+    // ---- 底栏 ----
+    let bar_y = H - 48;
+    fill_rect(0, bar_y, W, 48, 0x0d1620);
+    fill_rect(0, bar_y, W, 1, 0x2b3d52);
+
+    // 开始按钮
+    fill_rect(10, bar_y + 9, 92, 30, 0x1f3346);
+    frame_rect(10, bar_y + 9, 92, 30, 0x35506b);
+    draw_char(20, bar_y + 15, 'A', 0x4fc3f7, 2);
+    draw_text(46, bar_y + 16, "开始", 0xdbe7f3, 1);
+
+    // 运行中的程序
+    fill_rect(112, bar_y + 9, 96, 30, 0x16283a);
+    fill_rect(112, bar_y + 37, 96, 2, 0x4fc3f7);
+    draw_text(124, bar_y + 16, "终端", 0xcfe0f0, 1);
+
+    // 右侧状态：键盘 / 网络 / 时长
+    let now = clock_str(uptime_ms);
+    let time_str = core::str::from_utf8(&now.0[..now.1]).unwrap_or("00:00");
+    draw_text(W - 74, bar_y + 16, time_str, 0xdbe7f3, 1);
+
+    let kx = W - 210;
+    draw_text(kx, bar_y + 16, "键盘", 0x6d8299, 1);
+    fill_rect(kx + 36, bar_y + 20, 8, 8, if kb { 0x7ee787 } else { 0x5a6b7d });
+
+    let nx = W - 150;
+    draw_text(nx, bar_y + 16, "网络", 0x6d8299, 1);
+    fill_rect(nx + 36, bar_y + 20, 8, 8, if net { 0x7ee787 } else { 0x5a6b7d });
+
+    let _ = (tasks, kernel_kb);
+}
+
+fn term_guard(x: u32, y: u32) {
+    // 终端底色
+    fill_rect(x - 4, y - 4, 88 * 8 + 8, 26 * 16 + 8, 0x0e1620);
+    frame_rect(x - 4, y - 4, 88 * 8 + 8, 26 * 16 + 8, 0x1f2d3c);
+    crate::term::render(x, y, 0xd7e2ee);
+}
+
+pub fn desktop_size() -> (u32, u32) {
+    (W, H)
 }

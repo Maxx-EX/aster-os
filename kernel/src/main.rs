@@ -10,12 +10,17 @@ mod ex3;
 mod fb;
 mod font;
 mod gic;
+mod input;
 mod mmu;
+mod net;
 mod sched;
 mod shell;
 mod task;
+mod term;
+mod ui;
 mod timer;
 mod uart;
+mod virtio;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -142,6 +147,26 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
     gic::init();
     timer::allow_el0_counter();
     println!("[KERNEL] GICv2 已初始化，PPI 30（EL1 物理定时器）作为调度时基");
+
+    if input::init() {
+        println!("[IN] virtio-input 键盘已就绪（事件缓冲 8 个，字符环 128 字节）");
+    } else {
+        println!("[IN] 未找到 virtio-keyboard 设备（可用串口输入）");
+    }
+
+    if net::init() {
+        let m = net::mac();
+        println!(
+            "[NET] virtio-net 已就绪  MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  IP 10.0.2.15/24  GW 10.0.2.2  HTTP :80",
+            m[0], m[1], m[2], m[3], m[4], m[5]
+        );
+    } else {
+        println!("[NET] 未找到 virtio-net 设备（启动时是否带了 -device virtio-net-device？）");
+        // 诊断槽位表放到 `net` 命令里按需查看，启动时不要刷屏
+        // virtio::dump_slots();
+    }
+
+    timer::mark_boot();
 
     if fb::init() {
         println!("[KERNEL] 图形输出已就绪：ramfb {}x{} XRGB8888 @ {:#x}", fb::width(), fb::height(), fb::base_addr());

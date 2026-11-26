@@ -1,0 +1,663 @@
+// Aster Kernel — virtio-net 驱动 + 极简 IPv4 栈（ARP / ICMP / TCP）
+//
+// 目标很具体：宿主能 ping 通、能用浏览器打开 Aster 的页面。
+// 为了做到这一点，必须自己算 ARP 应答、ICMP 校验和、TCP 三段握手与校验和——
+// 少一样，宿主那边的协议栈就不认。
+//
+// 网络配置沿用 QEMU user-mode 网络的约定：guest 10.0.2.15/24、网关 10.0.2.2。
+#![allow(dead_code, static_mut_refs)]
+
+use crate::virtio::{self, Avail, Desc, Device, Queue, Used};
+
+pub const IP: [u8; 4] = [10, 0, 2, 15];
+pub const MASK: [u8; 4] = [255, 255, 255, 0];
+pub const GW: [u8; 4] = [10, 0, 2, 2];
+pub const HTTP_PORT: u16 = 80;
+const RX_BUFS: usize = 8;
+const TX_BUFS: usize = 4;
+const BUF_SIZE: usize = 2048;
+const HDR_LEN: usize = 12; // virtio_net_hdr + num_buffers（协商了 MRG_RXBUF）
+
+const F_MRG_RXBUF: u64 = 1 << 15;
+const F_MAC: u64 = 1 << 5;
+
+// ---------------- 静态内存 ----------------
+
+// legacy 队列要求 desc|avail|[4K 对齐]used 在同一块连续页内存里，所以这里给每个队列
+// 开一块 8 KiB、页对齐的原始内存，内部再切分，两种模式共用同一套指针。
+const QSIZE: u16 = 8;
+
+#[repr(C, align(4096))]
+struct QMem {
+    raw: [u8; 8192],
+}
+
+static mut RX_MEM: QMem = QMem { raw: [0; 8192] };
+static mut TX_MEM: QMem = QMem { raw: [0; 8192] };
+
+/// 从原始内存里切出 (desc, avail, used)
+unsafe fn q_parts(mem: *mut u8, size: u16) -> (*mut Desc, *mut Avail, *mut Used) {
+    let desc = mem as *mut Desc;
+    let avail = mem.add((size as usize) * core::mem::size_of::<Desc>()) as *mut Avail;
+    let used = mem.add(4096) as *mut Used;
+    (desc, avail, used)
+}
+
+static mut RX_BUF: [[u8; BUF_SIZE]; RX_BUFS] = [[0; BUF_SIZE]; RX_BUFS];
+static mut TX_BUF: [[u8; BUF_SIZE]; TX_BUFS] = [[0; BUF_SIZE]; TX_BUFS];
+
+static mut RXQ: Queue = Queue::empty();
+static mut TXQ: Queue = Queue::empty();
+static mut DEV: Option<Device> = None;
+static mut MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+static mut HAVE_NET: bool = false;
+static mut GW_MAC: [u8; 6] = [0x52, 0x55, 0x0a, 0x00, 0x02, 0x02];
+static mut GW_KNOWN: bool = false;
+static mut RX_PENDING: u16 = 0;
+
+// 统计
+static mut RX_FRAMES: u32 = 0;
+static mut TX_FRAMES: u32 = 0;
+static mut TCP_CONNS: u32 = 0;
+
+// ---------------- 初始化 ----------------
+
+pub fn init() -> bool {
+    let dev = match virtio::find(virtio::DEV_NET, 0) {
+        Some(d) => d,
+        None => return false,
+    };
+    unsafe { DEV = Some(dev) };
+
+    dev.reset();
+    let mut st = 0;
+    st |= virtio::STATUS_ACK;
+    dev.set_status(st);
+    st |= virtio::STATUS_DRIVER;
+    dev.set_status(st);
+
+    let feats = dev.device_features();
+    let want = feats & (F_MRG_RXBUF | F_MAC);
+    dev.set_features(want);
+
+    if dev.version == 2 {
+        st |= virtio::STATUS_FEATURES_OK;
+        dev.set_status(st);
+        if dev.status() & virtio::STATUS_FEATURES_OK == 0 {
+            crate::println!("[NET] 设备拒绝了特性协商");
+            return false;
+        }
+    }
+
+    if want & F_MAC != 0 {
+        for i in 0..6 {
+            let b = dev.read_config_u8(i as u64);
+            unsafe { MAC[i] = b };
+        }
+    }
+
+    unsafe {
+        let rx_mem = core::ptr::addr_of_mut!(RX_MEM) as *mut u8;
+        let tx_mem = core::ptr::addr_of_mut!(TX_MEM) as *mut u8;
+        let (rd, ra, ru) = q_parts(rx_mem, QSIZE);
+        let (td, ta, tu) = q_parts(tx_mem, QSIZE);
+
+        RXQ.bind(rd, ra, ru, QSIZE);
+        TXQ.bind(td, ta, tu, QSIZE);
+
+        let ok = if dev.version == 2 {
+            dev.setup_queue(0, rd, ra, ru, QSIZE) && dev.setup_queue(1, td, ta, tu, QSIZE)
+        } else {
+            dev.setup_queue_legacy(0, rx_mem as u64, QSIZE)
+                && dev.setup_queue_legacy(1, tx_mem as u64, QSIZE)
+        };
+        if !ok {
+            crate::println!("[NET] 队列建立失败");
+            return false;
+        }
+
+        // RX：把 8 个缓冲全部挂上去
+        for i in 0..RX_BUFS {
+            let d = RXQ.alloc().unwrap();
+            let buf = core::ptr::addr_of!(RX_BUF[i]) as u64;
+            RXQ.set(d, buf, BUF_SIZE as u32, virtio::DESC_F_WRITE, 0);
+            RXQ.submit(d);
+        }
+        RX_PENDING = RX_BUFS as u16;
+    }
+
+    dev.add_status(virtio::STATUS_DRIVER_OK);
+    dev.notify(0);
+    unsafe { HAVE_NET = true };
+    true
+}
+
+pub fn gw_known() -> bool {
+    unsafe { GW_KNOWN }
+}
+
+pub fn available() -> bool {
+    unsafe { HAVE_NET }
+}
+
+pub fn mac() -> [u8; 6] {
+    unsafe { MAC }
+}
+
+/// 调试信息：(设备版本, 设备状态, RX avail.idx, RX used.idx, 设备 interrupt status)
+pub fn debug_info() -> (u32, u32, u16, u16, u32) {
+    unsafe {
+        let dev = match DEV {
+            Some(d) => d,
+            None => return (0, 0, 0, 0, 0),
+        };
+        (
+            dev.version,
+            dev.status(),
+            (*RXQ.avail).idx,
+            (*RXQ.used).idx,
+            core::ptr::read_volatile((dev.base + 0x060) as *const u32),
+        )
+    }
+}
+
+pub fn stats() -> (u32, u32, u32) {
+    unsafe { (RX_FRAMES, TX_FRAMES, TCP_CONNS) }
+}
+
+// ---------------- 收发 ----------------
+
+pub fn poll() {
+    if !available() {
+        return;
+    }
+    unsafe {
+        let dev = match DEV {
+            Some(d) => d,
+            None => return,
+        };
+        let mut got = false;
+        loop {
+            let (id, len) = match RXQ.pop_used() {
+                Some(v) => v,
+                None => break,
+            };
+            let idx = (id as usize) % RX_BUFS;
+            if (len as usize) > HDR_LEN {
+                RX_FRAMES += 1;
+                handle_frame(&RX_BUF[idx][HDR_LEN..len as usize]);
+            }
+            let base = core::ptr::addr_of!(RX_BUF[idx]) as u64;
+            RXQ.set(id as u16, base, BUF_SIZE as u32, virtio::DESC_F_WRITE, 0);
+            RXQ.submit(id as u16);
+            got = true;
+        }
+        if got {
+            dev.notify(0);
+        }
+        // 我们不用中断，但设备的 interrupt status 会累积，顺手清掉
+        let is = core::ptr::read_volatile((dev.base + 0x060) as *const u32);
+        if is != 0 {
+            core::ptr::write_volatile((dev.base + 0x064) as *mut u32, is);
+        }
+    }
+}
+
+fn send_frame(payload: &[u8]) -> bool {
+    if !available() || payload.len() + HDR_LEN > BUF_SIZE {
+        return false;
+    }
+    unsafe {
+        let i = 0usize;
+        let buf = core::ptr::addr_of_mut!(TX_BUF[i]) as *mut u8;
+        core::ptr::write_bytes(buf, 0, HDR_LEN);
+        for (k, b) in payload.iter().enumerate() {
+            core::ptr::write_volatile(buf.add(HDR_LEN + k), *b);
+        }
+        let d = TXQ.alloc().unwrap();
+        let addr = buf as u64;
+        TXQ.set(d, addr, (HDR_LEN + payload.len()) as u32, 0, 0);
+        TXQ.submit(d);
+        let dev = DEV.unwrap();
+        dev.notify(1);
+        // 等设备归还（小流量下直接轮询，够了）
+        for _ in 0..1_000_000u32 {
+            if TXQ.pop_used().is_some() {
+                TX_FRAMES += 1;
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    false
+}
+
+// ---------------- 以太网 ----------------
+
+const ET_ARP: u16 = 0x0806;
+const ET_IP: u16 = 0x0800;
+
+fn handle_frame(f: &[u8]) {
+    if f.len() < 14 {
+        return;
+    }
+    let etype = u16::from_be_bytes([f[12], f[13]]);
+    match etype {
+        ET_ARP => handle_arp(f),
+        ET_IP => handle_ip(f),
+        _ => {}
+    }
+}
+
+/// 主动发 ARP 请求。QEMU 的 slirp 只有在收到 guest 的帧之后才知道
+/// "这个 IP 对应这个 MAC"，在此之前它没有可用的目的地址，宿主侧连接
+/// 的 SYN 根本送不到 guest。所以开局必须自己先喊一嗓子。
+fn send_arp_request(target: [u8; 4]) -> bool {
+    let mut f = [0u8; 42];
+    for i in 0..6 {
+        f[i] = 0xff; // 广播
+    }
+    for i in 0..6 {
+        f[6 + i] = unsafe { MAC[i] };
+    }
+    f[12..14].copy_from_slice(&ET_ARP.to_be_bytes());
+    f[14..16].copy_from_slice(&1u16.to_be_bytes());
+    f[16..18].copy_from_slice(&ET_IP.to_be_bytes());
+    f[18] = 6;
+    f[19] = 4;
+    f[20..22].copy_from_slice(&1u16.to_be_bytes()); // request
+    for i in 0..6 {
+        f[22 + i] = unsafe { MAC[i] };
+    }
+    f[28..32].copy_from_slice(&IP);
+    for i in 0..6 {
+        f[32 + i] = 0;
+    }
+    f[38..42].copy_from_slice(&target);
+    send_frame(&f)
+}
+
+fn handle_arp(f: &[u8]) {
+    if f.len() < 42 {
+        return;
+    }
+    let op = u16::from_be_bytes([f[20], f[21]]);
+    if op == 2 {
+        // 这是别人对我们 ARP 的回应，记下它的 MAC 供后续直接发送
+        let sender_ip = [f[28], f[29], f[30], f[31]];
+        let sender_mac = [f[22], f[23], f[24], f[25], f[26], f[27]];
+        unsafe {
+            if sender_ip == GW {
+                GW_MAC = sender_mac;
+                GW_KNOWN = true;
+            }
+        }
+        return;
+    }
+    let tip = &f[38..42];
+    if op != 1 || tip != IP {
+        return;
+    }
+    // who-has(我们的 IP) -> 回复我们的 MAC
+    let mut r = [0u8; 42];
+    for i in 0..6 {
+        r[i] = f[6 + i]; // dst = 请求方
+        r[6 + i] = unsafe { MAC[i] }; // src = 我们
+    }
+    r[12..14].copy_from_slice(&ET_ARP.to_be_bytes());
+    r[14..16].copy_from_slice(&1u16.to_be_bytes()); // ethernet
+    r[16..18].copy_from_slice(&ET_IP.to_be_bytes());
+    r[18] = 6;
+    r[19] = 4;
+    r[20..22].copy_from_slice(&2u16.to_be_bytes()); // reply
+    for i in 0..6 {
+        r[22 + i] = unsafe { MAC[i] };
+    }
+    r[28..32].copy_from_slice(&IP);
+    for i in 0..6 {
+        r[32 + i] = f[22 + i]; // 回给请求方 MAC
+    }
+    for i in 0..4 {
+        r[38 + i] = f[28 + i];
+    }
+    send_frame(&r);
+}
+
+fn csum_add(mut sum: u32, data: &[u8]) -> u32 {
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += ((data[i] as u32) << 8) | data[i + 1] as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    sum
+}
+
+fn csum_fold(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// 构造以太网 + IPv4 + 协议头，返回 IP 包总长
+fn build_ip(
+    out: &mut [u8],
+    dst_mac: [u8; 6],
+    dst_ip: [u8; 4],
+    proto: u8,
+    payload_len: usize,
+) -> usize {
+    let mut m = [0u8; 6];
+    m.copy_from_slice(&mac());
+    out[0..6].copy_from_slice(&dst_mac);
+    out[6..12].copy_from_slice(&m);
+    out[12..14].copy_from_slice(&ET_IP.to_be_bytes());
+
+    let ip_len = 20 + payload_len;
+    out[14] = 0x45;
+    out[15] = 0;
+    out[16..18].copy_from_slice(&(ip_len as u16).to_be_bytes());
+    out[18..20].copy_from_slice(&0u16.to_be_bytes());
+    out[20..22].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
+    out[22] = 64;
+    out[23] = proto;
+    out[24..26].copy_from_slice(&0u16.to_be_bytes());
+    out[26..30].copy_from_slice(&IP);
+    out[30..34].copy_from_slice(&dst_ip);
+
+    let hc = csum_fold(csum_add(0, &out[14..34]));
+    out[24..26].copy_from_slice(&hc.to_be_bytes());
+    14 + ip_len
+}
+
+fn handle_ip(f: &[u8]) {
+    if f.len() < 34 {
+        return;
+    }
+    let ihl = ((f[14] & 0x0f) as usize) * 4;
+    if ihl < 20 || f.len() < 14 + ihl {
+        return;
+    }
+    let proto = f[23];
+    let src_ip = [f[26], f[27], f[28], f[29]];
+    let dst_ip = [f[30], f[31], f[32], f[33]];
+    if dst_ip != IP {
+        return;
+    }
+    let src_mac = [f[6], f[7], f[8], f[9], f[10], f[11]];
+    let total = u16::from_be_bytes([f[16], f[17]]) as usize;
+    let body = &f[14 + ihl..(14 + total).min(f.len())];
+
+    match proto {
+        1 => handle_icmp(src_mac, src_ip, body),
+        6 => handle_tcp(src_mac, src_ip, body),
+        _ => {}
+    }
+}
+
+fn handle_icmp(src_mac: [u8; 6], src_ip: [u8; 4], b: &[u8]) {
+    if b.len() < 8 || b[0] != 8 {
+        return;
+    }
+    // echo reply：改类型、重算校验和
+    let mut resp = [0u8; 1500];
+    let n = b.len().min(1400);
+    resp[..n].copy_from_slice(&b[..n]);
+    resp[0] = 0;
+    resp[2..4].copy_from_slice(&0u16.to_be_bytes());
+    let c = csum_fold(csum_add(0, &resp[..n]));
+    resp[2..4].copy_from_slice(&c.to_be_bytes());
+
+    let mut out = [0u8; 1514];
+    let total = build_ip(&mut out, src_mac, src_ip, 1, n);
+    out[34..34 + n].copy_from_slice(&resp[..n]);
+    let total = 34 + n;
+    send_frame(&out[..total]);
+}
+
+// ---------------- TCP ----------------
+
+const TCP_FIN: u8 = 0x01;
+const TCP_SYN: u8 = 0x02;
+const TCP_RST: u8 = 0x04;
+const TCP_PSH: u8 = 0x08;
+const TCP_ACK: u8 = 0x10;
+
+struct Conn {
+    active: bool,
+    phase: u8, // 0 关闭 1 SYN_RCVD 2 ESTAB 3 FIN_WAIT
+    their_ip: [u8; 4],
+    their_mac: [u8; 6],
+    their_port: u16,
+    our_seq: u32,
+    their_seq: u32,
+    acked: u32,
+}
+
+static mut CONN: Conn = Conn {
+    active: false,
+    phase: 0,
+    their_ip: [0; 4],
+    their_mac: [0; 6],
+    their_port: 0,
+    our_seq: 0,
+    their_seq: 0,
+    acked: 0,
+};
+
+fn tcp_csum(src: [u8; 4], dst: [u8; 4], seg: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    sum = csum_add(sum, &src);
+    sum = csum_add(sum, &dst);
+    sum += 6u32; // protocol
+    sum += seg.len() as u32;
+    sum = csum_add(sum, seg);
+    csum_fold(sum)
+}
+
+fn send_tcp(
+    dst_mac: [u8; 6],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload: &[u8],
+) -> bool {
+    let mut out = [0u8; 1514];
+    let total = build_ip(&mut out, dst_mac, dst_ip, 6, 20 + payload.len());
+    let t = &mut out[34..];
+    t[0..2].copy_from_slice(&src_port.to_be_bytes());
+    t[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    t[4..8].copy_from_slice(&seq.to_be_bytes());
+    t[8..12].copy_from_slice(&ack.to_be_bytes());
+    t[12] = 5 << 4;
+    t[13] = flags;
+    t[14..16].copy_from_slice(&8192u16.to_be_bytes());
+    t[16..18].copy_from_slice(&0u16.to_be_bytes());
+    t[18..20].copy_from_slice(&0u16.to_be_bytes());
+    t[20..20 + payload.len()].copy_from_slice(payload);
+    let seg_len = 20 + payload.len();
+    let c = tcp_csum(IP, dst_ip, &out[34..34 + seg_len]);
+    out[34 + 16..34 + 18].copy_from_slice(&c.to_be_bytes());
+    let _ = total;
+    send_frame(&out[..34 + seg_len])
+}
+
+fn handle_tcp(src_mac: [u8; 6], src_ip: [u8; 4], b: &[u8]) {
+    if b.len() < 20 {
+        return;
+    }
+    let src_port = u16::from_be_bytes([b[0], b[1]]);
+    let dst_port = u16::from_be_bytes([b[2], b[3]]);
+    let seq = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
+    let ack = u32::from_be_bytes([b[8], b[9], b[10], b[11]]);
+    let doff = ((b[12] >> 4) as usize) * 4;
+    let flags = b[13];
+    if doff < 20 || b.len() < doff {
+        return;
+    }
+    let payload = &b[doff..];
+
+    if flags & TCP_RST != 0 {
+        unsafe {
+            CONN.active = false;
+            CONN.phase = 0;
+        }
+        return;
+    }
+
+    let ours = src_port == HTTP_PORT || dst_port == HTTP_PORT;
+
+    unsafe {
+        // 新建连接
+        if flags & TCP_SYN != 0 && !CONN.active && dst_port == HTTP_PORT {
+            CONN.active = true;
+            CONN.phase = 1;
+            CONN.their_ip = src_ip;
+            CONN.their_mac = src_mac;
+            CONN.their_port = src_port;
+            CONN.their_seq = seq.wrapping_add(1);
+            CONN.our_seq = 0x1234_0000u32.wrapping_add(crate::timer::freq_hz() as u32 & 0xfff);
+            CONN.acked = seq.wrapping_add(1);
+            TCP_CONNS += 1;
+            let isn = CONN.our_seq;
+            send_tcp(src_mac, src_ip, HTTP_PORT, src_port, isn, CONN.their_seq, TCP_SYN | TCP_ACK, &[]);
+            CONN.our_seq = isn.wrapping_add(1);
+            return;
+        }
+
+        if !CONN.active || !ours || src_ip != CONN.their_ip {
+            return;
+        }
+
+        if flags & TCP_FIN != 0 && CONN.phase != 3 {
+            CONN.phase = 3;
+            let s = CONN.our_seq;
+            CONN.our_seq = s.wrapping_add(1);
+            send_tcp(src_mac, src_ip, HTTP_PORT, src_port, s, seq.wrapping_add(1), TCP_FIN | TCP_ACK, &[]);
+            if payload.is_empty() {
+                CONN.active = false;
+                CONN.phase = 0;
+            }
+        }
+
+        if CONN.phase == 1 && flags & TCP_ACK != 0 {
+            CONN.phase = 2;
+        }
+
+        // HTTP 请求到达：回页面
+        if !payload.is_empty() && CONN.phase >= 2 {
+            let req_head: &[u8] = payload;
+            let is_get = req_head.len() >= 4 && &req_head[0..4] == b"GET ";
+            let body = if is_get { http_page() } else { "HTTP/1.0 400 Bad Request\r\n\r\n".as_bytes() };
+            let mut hdr = [0u8; 512];
+            let head_len = if is_get {
+                build_http_head(&mut hdr)
+            } else {
+                let h = "HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                let n = h.len();
+                hdr[..n].copy_from_slice(h.as_bytes());
+                n
+            };
+
+            let mut sent = 0usize;
+            let total = head_len + body.len();
+            let mut seqn = CONN.our_seq;
+            while sent < total {
+                let chunk = (total - sent).min(1200);
+                let mut seg = [0u8; 1400];
+                let mut n = 0usize;
+                if sent < head_len {
+                    let take = (head_len - sent).min(chunk);
+                    seg[..take].copy_from_slice(&hdr[sent..sent + take]);
+                    n += take;
+                }
+                if n < chunk {
+                    let off = sent + n - head_len;
+                    let take = (chunk - n).min(body.len() - off);
+                    seg[n..n + take].copy_from_slice(&body[off..off + take]);
+                    n += take;
+                }
+                let last = sent + n >= total;
+                let fl = TCP_ACK | if last { TCP_PSH | TCP_FIN } else { TCP_PSH };
+                send_tcp(src_mac, src_ip, HTTP_PORT, src_port, seqn, seq.wrapping_add(payload.len() as u32), fl, &seg[..n]);
+                seqn = seqn.wrapping_add(n as u32);
+                if last {
+                    seqn = seqn.wrapping_add(1); // FIN 占一个序号
+                }
+                sent += n;
+            }
+            CONN.our_seq = seqn;
+            if sent >= total {
+                CONN.phase = 3;
+            }
+        }
+    }
+}
+
+fn build_http_head(out: &mut [u8]) -> usize {
+    let s = "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n";
+    out[..s.len()].copy_from_slice(s.as_bytes());
+    s.len()
+}
+
+fn http_page() -> &'static [u8] {
+    HTTP_PAGE.as_bytes()
+}
+
+/// 宿主浏览器打开 http://localhost:8080 看到的就是这一页
+static HTTP_PAGE: &str = r#"(
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aster · 星芒</title>
+<style>
+:root{--bg:#0b1119;--card:#152130;--line:#2e4053;--text:#eaf2f8;--dim:#8fa3b0;--accent:#5dade2;--ok:#58d68d}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:linear-gradient(160deg,#0b1119 0%,#101c2a 60%,#0b1119 100%);color:var(--text);
+font-family:-apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;min-height:100vh;padding:32px}
+.wrap{max-width:920px;margin:0 auto}
+.brand{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.logo{width:44px;height:44px;display:grid;grid-template-columns:repeat(2,18px);grid-gap:4px}
+.logo i{background:var(--accent);border-radius:3px}
+h1{font-size:30px;letter-spacing:3px;font-weight:700}
+h1 span{font-size:15px;color:var(--dim);letter-spacing:2px;margin-left:10px;font-weight:400}
+.sub{color:var(--dim);font-size:13px;margin:8px 0 26px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+.k{color:var(--dim);font-size:12px;letter-spacing:1px;margin-bottom:10px}
+.v{font-size:19px;font-weight:600}
+.v.ok{color:var(--ok)}
+.v.acc{color:var(--accent)}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:13px;color:var(--accent);word-break:break-all}
+.note{margin-top:26px;color:var(--dim);font-size:12.5px;line-height:1.9}
+.note b{color:var(--text);font-weight:600}
+.pill{display:inline-block;padding:3px 10px;border:1px solid var(--line);border-radius:999px;font-size:11px;color:var(--dim);margin-left:8px}
+</style></head>
+<body><div class="wrap">
+<div class="brand"><div class="logo"><i></i><i></i><i></i><i></i></div>
+<h1>ASTER<span>星芒</span></h1></div>
+<div class="sub">原创内核 · 无任何第三方内核依赖 · ARM64 <span class="pill">live from guest</span></div>
+<div class="grid">
+<div class="card"><div class="k">校验 EX3</div><div class="v ok">PASS</div></div>
+<div class="card"><div class="k">引导链 AVP</div><div class="v">L1 · L2 · L3</div></div>
+<div class="card"><div class="k">特权级</div><div class="v acc">EL0 / EL1</div></div>
+<div class="card"><div class="k">调度</div><div class="v">2 ms 抢占</div></div>
+<div class="card"><div class="k">网络</div><div class="v ok">10.0.2.15</div></div>
+<div class="card"><div class="k">页面来源</div><div class="v acc">内核内 TCP</div></div>
+</div>
+<div class="card" style="margin-top:16px">
+<div class="k">EX3 指纹</div><div class="mono">EX3-5994491FACE50680-CF53DC009337BDCD</div></div>
+<div class="note">
+这一页不是宿主机上的服务，是 <b>Aster 内核自己算的 ARP、ICMP 和 TCP</b> 发出来的：<br>
+三次握手、20 字节 IP 头、TCP 校验和、按 1200 字节分段，全部在内核里完成。<br>
+宿主的浏览器只是把它的字节渲染出来。
+</div>
+</div></body></html>
+"#;

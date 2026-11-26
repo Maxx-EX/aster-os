@@ -117,6 +117,21 @@ run-gfx: image
 	    -display vnc=0.0.0.0:1 -serial tcp:0.0.0.0:4444,server,nowait \
 	    -monitor unix:/tmp/aster-mon.sock,server,nowait -kernel $(BOOT_ELF)
 
+# 网络：内核自带 TCP/IP 栈与 HTTP 服务，宿主用 hostfwd 打开 guest:80
+run-net: image
+	@echo "  浏览器打开: http://127.0.0.1:18088/"
+	@echo "  终端: nc 127.0.0.1 4448"
+	$(QEMU) -M virt -cpu cortex-a72 -m 512M -global virtio-mmio.force-legacy=false \
+	    -device virtio-net-device,netdev=n0 -netdev user,id=n0,hostfwd=tcp::18088-:80 \
+	    -device ramfb -display vnc=0.0.0.0:1 \
+	    -serial tcp:0.0.0.0:4448,server,nowait \
+	    -monitor unix:/tmp/aster-mon.sock,server,nowait -kernel $(BOOT_ELF)
+
+# 网络端到端冒烟：起 QEMU，等内核起 HTTP，宿主 curl 应拿到 200 和页面
+test-net: image
+	@python3 tools/nettest.py 28088 4448 | tee $(B)/test-net.log
+	@grep -q "200" $(B)/test-net.log && echo "[TEST] PASS 内核 HTTP 200" || (echo "[TEST] FAIL 未响应" && exit 1)
+
 # 抓一张画面存成 PNG（不需要人工开 VNC 客户端）
 shot: image
 	@mkdir -p $(B)

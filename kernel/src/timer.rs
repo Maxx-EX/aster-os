@@ -45,6 +45,28 @@ pub fn freq_hz() -> u64 {
     cntfrq()
 }
 
+/// 从开机算起的毫秒数（kernel 启动时记一次基准）
+static mut BASE: u64 = 0;
+
+pub fn mark_boot() {
+    unsafe { BASE = read_cnt() };
+}
+
+fn read_cnt() -> u64 {
+    let v: u64;
+    unsafe { asm!("isb; mrs {}, cntpct_el0", out(reg) v) };
+    v
+}
+
+pub fn now_ms() -> u64 {
+    let f = cntfrq();
+    if f == 0 {
+        return 0;
+    }
+    let base = unsafe { BASE };
+    (read_cnt().saturating_sub(base) * 1000 / f) as u64
+}
+
 /// 允许 EL0 读 CNTPCT_EL0（用户程序要用它做忙等/计时）
 pub fn allow_el0_counter() {
     unsafe {

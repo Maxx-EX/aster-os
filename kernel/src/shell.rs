@@ -45,10 +45,21 @@ fn uptime_ms() -> u64 {
 fn read_line(buf: &mut [u8]) -> usize {
     let mut n = 0;
     loop {
-        while !uart::rx_ready() {
+        let mut c;
+        loop {
+            crate::net::poll();
+            crate::input::poll();
+            crate::ui::tick();
+            if let Some(ch) = crate::input::read_char() {
+                c = ch;
+                break;
+            }
+            if uart::rx_ready() {
+                c = uart::getc().unwrap_or(0);
+                break;
+            }
             core::hint::spin_loop();
         }
-        let c = uart::getc().unwrap_or(0);
         match c {
             b'\r' | b'\n' => {
                 uart::putc(b'\n');
@@ -81,6 +92,7 @@ fn cmd_help() {
     println!("  runp      抢占验证（纯计算任务 vs 打印任务）");
     println!("  sched     任务调度统计");
     println!("  gfx       重绘图形界面（ramfb / VNC 远程可见）");
+    println!("  net       网络状态（virtio-net / IP / 收发计数）");
     println!("  uptime    运行时长");
     println!("  mem       内存布局");
     println!("  clear     清屏");
@@ -188,6 +200,7 @@ pub fn run() -> ! {
             },
             "sched" => println!("  {}", crate::sched::stats()),
             "gfx" => render_dashboard(),
+            "net" => cmd_net(),
             "uptime" => println!("  已运行 {} ms", uptime_ms()),
             "mem" => cmd_mem(),
             "clear" => {
@@ -212,15 +225,33 @@ pub fn render_dashboard() {
         return;
     }
     let i = info();
-    fb::draw_dashboard(&fb::Dashboard {
-        kernel_kb: i.payload_size / 1024,
-        ex3_tag: crate::ex3::EX3_TAG,
-        ex3_ok: i.ex3_ok,
-        tasks: sched::count(),
-        switches: sched::switches_total(),
-        uptime_ms: uptime_ms(),
-        slice_ms: timer::SLICE_MS,
-        trusted: i.boot_trusted,
-    });
+    let short = &crate::ex3::EX3_TAG[..13];
+    fb::draw_desktop(
+        short,
+        uptime_ms(),
+        crate::input::available(),
+        crate::net::available(),
+        sched::count() as u32,
+        i.payload_size / 1024,
+    );
+    crate::term::mark_clean(uptime_ms());
     println!("[GFX] 界面已重绘（{}x{}）", fb::width(), fb::height());
+}
+
+fn cmd_net() {
+    if !crate::net::available() {
+        println!("  网络未启用");
+        return;
+    }
+    let m = crate::net::mac();
+    let (rx, tx, conns) = crate::net::stats();
+    println!("  设备      : virtio-net (virtio-mmio)");
+    println!("  MAC       : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
+    println!("  IP        : 10.0.2.15/24   网关 10.0.2.2");
+    println!("  服务      : TCP :80（宿主用 hostfwd 映射即可打开）");
+    println!("  收/发帧   : {}/{}", rx, tx);
+    println!("  建立连接  : {}", conns);
+    let (ver, st, av, us, is) = crate::net::debug_info();
+    println!("  设备版本  : {}   状态: {:#x}   RX avail={} used={}  intstatus={:#x}", ver, st, av, us, is);
+    println!("  网关 MAC  : {}", if crate::net::gw_known() { "已学习" } else { "未知（ARP 未回）" });
 }
