@@ -89,6 +89,7 @@ where
 
 pub struct Found {
     pub data_off: usize,
+    pub csize: u32,
     pub size: u32,
     pub method: u16,
 }
@@ -97,7 +98,7 @@ pub struct Found {
 /// 中央目录不同，必须按本地头重新算）。
 pub fn find(data: &[u8], want: &str) -> Result<Found, &'static str> {
     let mut hit: Option<Found> = None;
-    walk(data, |name, method, _csize, usize_, loff| {
+    walk(data, |name, method, csize, usize_, loff| {
         if hit.is_none() && name.eq_ignore_ascii_case(want) {
             let lo = loff as usize;
             if lo + 30 <= data.len() && u32le(data, lo) == SIG_LOCAL {
@@ -105,7 +106,7 @@ pub fn find(data: &[u8], want: &str) -> Result<Found, &'static str> {
                 let elen = u16le(data, lo + 28) as usize;
                 let off = lo + 30 + nlen + elen;
                 if off <= data.len() {
-                    hit = Some(Found { data_off: off, size: usize_, method });
+                    hit = Some(Found { data_off: off, csize, size: usize_, method });
                 }
             }
         }
@@ -113,18 +114,26 @@ pub fn find(data: &[u8], want: &str) -> Result<Found, &'static str> {
     hit.ok_or("APK 里没有这个条目")
 }
 
-/// 取出条目内容。method 0 直接拷，method 8 明确拒绝。
+/// 取出条目内容。stored 直接拷，deflate 走 inflate。
 pub fn extract(data: &[u8], want: &str, out: &mut [u8]) -> Result<usize, &'static str> {
     let f = find(data, want)?;
-    if f.method != 0 {
-        return Err("条目是 deflate 压缩（method 8），需要 inflate，下一阶段做");
-    }
-    let n = (f.size as usize).min(out.len());
-    if f.data_off + n > data.len() {
+    let end = f.data_off + f.csize as usize;
+    if end > data.len() {
         return Err("条目数据越界");
     }
-    out[..n].copy_from_slice(&data[f.data_off..f.data_off + n]);
-    Ok(n)
+    match f.method {
+        0 => {
+            // 明确按容量判断，不静默截断
+            if f.size as usize > out.len() {
+                return Err("输出缓冲不够（stored 条目大于目标缓冲）");
+            }
+            let n = f.size as usize;
+            out[..n].copy_from_slice(&data[f.data_off..f.data_off + n]);
+            Ok(n)
+        }
+        8 => crate::inflate::inflate(&data[f.data_off..end], out),
+        _ => Err("不支持的压缩方式"),
+    }
 }
 
 pub struct Summary {

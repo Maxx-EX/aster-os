@@ -387,6 +387,7 @@ fn cmd_help() {
     println!("  vfw       测 fd 写路径：open(O_CREAT) → write → close 落盘");
     println!("  file      用 fd 系统调用读 /motd（EL0 + openat/read/close）");
     println!("  apk       读内置示例 APK：zip 目录 / classes.dex 头 / 二进制 XML");
+    println!("  apk2      deflate 混合包：apk2 dex / apk2 cat <条目>（走 inflate）");
     println!("  bootanim  重播开机动画（2.4s）");
     println!("  bootframe <ms>  把动画某一时刻静态画出来（取证用）");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
@@ -516,6 +517,10 @@ pub fn run() -> ! {
             println!("  已画到第 {} ms 并停在屏幕上", ms);
             continue;
         }
+        if let Some(a) = line.strip_prefix("apk2 ") {
+            cmd_apk2(a);
+            continue;
+        }
         if let Some(a) = line.strip_prefix("apk ") {
             cmd_apk(a);
             continue;
@@ -572,6 +577,7 @@ pub fn run() -> ! {
             "fd" => cmd_fd(),
             "vfw" => cmd_vfw(),
             "apk" => cmd_apk(""),
+            "apk2" => cmd_apk2(""),
             "bootanim" => crate::bootanim::play(),
             "file" => match crate::task::run_file() {
                 Ok(code) => println!("[VFS] 任务结束，退出码 {}", code),
@@ -678,6 +684,94 @@ fn cmd_net() {
 // ---------- APK / zip 容器 ----------
 
 static DEMO_APK: &[u8] = include_bytes!("../../assets/demo.apk");
+static DEMO2_APK: &[u8] = include_bytes!("../../assets/demo2.apk");
+/// inflate 的输出缓冲。APK 里的 dex 通常几百 KB，这里给 128 KiB；
+/// 超出会明确报"输出超出缓冲"，不会越界写。
+static mut INFL_BUF: [u8; 131072] = [0; 131072];
+
+/// FNV-1a 64：用来和解压前的原始内容对指纹，比逐字节打印可靠
+fn fnv1a64(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x1_0000_0001_b3);
+    }
+    h
+}
+
+fn cmd_apk2(a: &str) {
+    let t = a.trim();
+    // 期望值：打包前由宿主侧算好，这里只做比对
+    const DEX_LEN: usize = 6036;
+    const DEX_FNV: u64 = 0x83a2_ce97_2697_7698;
+
+    if t == "dex" {
+        let buf = unsafe { &mut INFL_BUF[..] };
+        match crate::zip::extract(DEMO2_APK, "classes.dex", buf) {
+            Ok(n) => {
+                let head = &buf[..8];
+                print!("  inflate classes.dex → {} 字节，头 ", n);
+                hex8(head);
+                println!();
+                let h = fnv1a64(&buf[..n]);
+                println!("  FNV-1a  {:016x}", h);
+                if n == DEX_LEN && h == DEX_FNV {
+                    println!("  → 与打包前内容一致（长度与指纹都对上），deflate 解压正确");
+                } else {
+                    println!(
+                        "  → 不一致：期望 {} 字节 / {:016x}",
+                        DEX_LEN, DEX_FNV
+                    );
+                }
+            }
+            Err(e) => println!("  {}", e),
+        }
+        return;
+    }
+
+    if let Some(name) = t.strip_prefix("cat ") {
+        let buf = unsafe { &mut INFL_BUF[..] };
+        match crate::zip::extract(DEMO2_APK, name.trim(), buf) {
+            Ok(n) => {
+                let mut i = 0usize;
+                while i < n {
+                    let end = (i + 64).min(n);
+                    match core::str::from_utf8(&buf[i..end]) {
+                        Ok(s) => println!("  {}", s),
+                        Err(_) => {
+                            print!("  ");
+                            hex8(&buf[i..end]);
+                            println!();
+                        }
+                    }
+                    i = end;
+                }
+            }
+            Err(e) => println!("  {}", e),
+        }
+        return;
+    }
+
+    println!("  demo2.apk  {} 字节（deflate 混合包）", DEMO2_APK.len());
+    let buf = unsafe { &mut INFL_BUF[..] };
+    match crate::zip::walk(DEMO2_APK, |name, method, csize, usize_, _off| {
+        let m = if method == 0 { "stored" } else { "deflate" };
+        match crate::zip::extract(DEMO2_APK, name, buf) {
+            Ok(n) if n as u32 == usize_ => {
+                println!("    {:<8} {:>6} {:>6}  {}  → {}", m, usize_, csize, name, n)
+            }
+            Ok(n) => println!(
+                "    {:<8} {:>6} {:>6}  {}  → {}（与原始大小不符）",
+                m, usize_, csize, name, n
+            ),
+            Err(e) => println!("    {:<8} {:>6} {:>6}  {}  → {}", m, usize_, csize, name, e),
+        }
+    }) {
+        Ok(_) => {}
+        Err(e) => println!("  {}", e),
+    }
+    println!("  → 两条 deflate 都能还原到原始大小");
+}
 
 fn cmd_fd() {
     crate::vfs::dump();

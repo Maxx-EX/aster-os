@@ -220,7 +220,8 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 
 ## 阶段七：跑 APK（v0.9）
 
-### APK-1 ✅ 容器读取（已做）
+### APK-1 ✅ 容器读取
+- APK-2 ✅ DEFLATE 解压（stored / 固定 / 动态 Huffman，LZ77 回拷，128 KiB 缓冲）（已做）
 
 APK 是 zip，目录在文件尾的 EOCD。`kernel/src/zip.rs` 会倒扫 EOCD、遍历中央目录、按本地头重算数据偏移，把 stored 条目原样取出；deflate 条目明确报"需要 inflate"。内置 `assets/demo.apk` 做自检，`apk / apk dex / apk axml / apk cat <条目>` 四个命令能看到 `classes.dex` 的 `dex\n035` 魔数和 `AndroidManifest.xml` 的 AXML 头 `03 00 08 00`。**这是 DEX 解释器的前置：先能把 dex 取出来，才谈得上解析它。**
 

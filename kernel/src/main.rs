@@ -25,6 +25,7 @@ mod cache;
 mod afs;
 mod vfs;
 mod zip;
+mod inflate;
 mod net;
 mod rtc;
 mod sched;
