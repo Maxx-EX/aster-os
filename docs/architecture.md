@@ -828,3 +828,19 @@ inode 只留 10 个直接块指针，没有间接块。一个文件最大 40 KiB
 拖动做到窗口粒度：`move_window(i, nx, ny)` 用新旧位置的并集矩形 `restore_wall` 擦一次静态层，然后全量 `draw_all()`。三个窗口叠在一起时，并集擦除会连带擦掉压在上面的其他窗口，所以重画必须是整体重画，而不是只重画被拖的那一个——代价是拖动时每帧画三个窗口，但窗口内文字量（22 行终端 + 十行 kv）远小于 1024×768 全屏填充。
 
 侧栏的点击语义随之扩展：0 终端、1 系统、2 网络、3 关于，前三个对应 `open` 翻转，第四个先落到系统窗。悬停高亮仍由 `ui::tick` 在每帧算一次鼠标位置后调 `fb::set_side_hover`。
+
+---
+
+## 28. 树莓派路径：从"能编译"到"能启动"
+
+这轮做的是让同一个内核真正跑在树莓派上，而不是只编出一个文件。
+
+**三处非改不可的东西。** 第一是内核基址：树莓派固件把 `kernel8.img` 固定加载到 `0x80000`，内核原来链接在 `0x200000`，bss 一路铺到 `0x5C0000`。QEMU 的 raspi 模型会把 framebuffer 分配在 `0x300000` —— 正好压在内核 bss 里，第一次 `clear()` 就把内核踩穿了。把内核挪到 `0x800000`（8 MiB）之后两边不打架，真机上同样安全。第二是页表：原来 `[0, 1GiB)` 整段按 device 映射（QEMU 的 MMIO 全在那里），但树莓派的内核自己就在这段 RAM 里，device 内存带 XN 位，取指直接挂。现在树莓派分支把 `[0, 1GiB)` 拆成 512 个 2 MiB 块，`0x3F00_0000` 以上 16 MiB 标 device（外设窗口），其余标 normal。第三是页帧池：QEMU 用 `0x4800_0000`，树莓派没有这段，改成 `0x3000_0000`，从 `board.rs` 取。
+
+**mailbox 驱动**（`kernel/src/mailbox.rs`）。property 通道 8，五个 tag 串起来发一次：`SET_PHYS_WH`、`SET_VIRT_WH`、`SET_DEPTH(32)`、`SET_VIRT_OFFSET(0,0)`、`ALLOCATE_BUFFER(对齐 4096)`，再补一个 `GET_PITCH`。写进 mailbox 的是**总线地址**（物理 + 偏移，BCM2837 是 `0x4000_0000`，BCM2711 是 `0xC000_0000`），拿回来的 framebuffer 地址同样要减偏移。这里有个坑：QEMU 的 raspi 模型直接给物理地址（实测 `0x300000`），减偏移会下溢成天文数字，所以判据写成"小于 RAM 大小就当物理地址用"。
+
+**像素格式**。QEMU 的 ramfb 是 XRGB8888，树莓派的 framebuffer 是 BGRA8888。一开始我加了一层红蓝互换，后来实测读回值和写入值完全一致 —— 两者在小端内存里的字节顺序都是 B、G、R、X，本来就一样，换来换去反而把蓝色界面涂成橙色。这层已经撤掉，只留一条注释。
+
+**现状**。raspi3b 上整条链路是通的：引导器三级 AVP 校验 PASS、EX3 生成、内核进 EL1、MMU 与 GICv2 起来、`board.rs` 认出 BCM2837、mailbox 拿到 `1024×768` 的 framebuffer、`clear()` 之后读回 `0x141619` 与写入一致、进入 shell。**QEMU 6.2 的 raspi3b 不会把这块内存同步到 `screendump`**，所以截图仍是白的 —— 这是 QEMU 的显示层限制，真机是 HDMI 直出，不经过 QEMU。
+
+EMMC（SDHCI）和 USB HID（xHCI）还没接，`board.rs` 里已经占好位（`BlkKind::SdHost` / `InputKind::UsbHid`），下次从这里往下做。

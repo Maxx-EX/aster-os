@@ -216,6 +216,7 @@ fn find_file(name: &[u8]) -> Option<u16> {
 
 // ---------------- 初始化 ----------------
 
+#[cfg(not(any(feature = "rpi3", feature = "rpi4")))]
 pub fn init() -> bool {
     let sel = match find_file(b"etc/ramfb") {
         Some(s) => s,
@@ -256,6 +257,24 @@ pub fn init() -> bool {
 }
 
 /// 列出 fw_cfg 目录里的所有文件（调试用）
+/// 树莓派：fb 由 VideoCore 分配，像素是 BGRA，颜色在 px() 里换序
+#[cfg(any(feature = "rpi3", feature = "rpi4"))]
+pub fn init() -> bool {
+    let (addr, w, h, stride) = match crate::mailbox::fb_init(FB_W, FB_H) {
+        Some(v) => v,
+        None => return false,
+    };
+    unsafe {
+        FB = Some(Fb { w, h, stride, base: addr });
+    }
+    clear(0x0014_1619);
+    crate::println!(
+        "[FB] mailbox 拿到 framebuffer：{:#x}  {}x{}  stride {}  自检读回 {:#x}",
+        addr, w, h, stride, read_px(w / 2, h / 2)
+    );
+    true
+}
+
 pub fn dump_fwcfg() {
     let n = match dma_read(FW_CFG_FILE_DIR, 2052) {
         Some(n) => n,
@@ -302,6 +321,13 @@ fn fb() -> &'static Fb {
 
 // ---------------- 绘图原语 ----------------
 
+/// QEMU 的 ramfb 是 XRGB8888，树莓派是 BGRA8888。
+/// 两者在小端内存里的字节顺序都是 B,G,R,X —— 不需要换位，实测读回一致。
+#[inline(always)]
+fn native(c: u32) -> u32 {
+    c
+}
+
 #[inline]
 fn px(f: &Fb, x: u32, y: u32, color: u32) {
     if x >= f.w || y >= f.h {
@@ -309,7 +335,7 @@ fn px(f: &Fb, x: u32, y: u32, color: u32) {
     }
     let off = (y * f.stride + x * 4) as u64;
     unsafe {
-        core::ptr::write_volatile((f.base + off) as *mut u32, color);
+        core::ptr::write_volatile((f.base + off) as *mut u32, native(color));
     }
 }
 
@@ -334,7 +360,7 @@ pub fn write_px(x: u32, y: u32, color: u32) {
         return;
     }
     let off = (y * f.stride + x * 4) as u64;
-    unsafe { core::ptr::write_volatile((f.base + off) as *mut u32, color) }
+    unsafe { core::ptr::write_volatile((f.base + off) as *mut u32, native(color)) }
 }
 
 /// 16x16 位图，fill 为实心、edge 为 1px 描边（鼠标箭头用）

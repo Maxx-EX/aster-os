@@ -12,10 +12,15 @@ QEMU      := qemu-system-aarch64
 IMG       := build/aster.img
 IMG_MB    := 8
 
-ifeq ($(BOARD),rpi4)
+ifeq ($(BOARD),rpi3)
+  BDEF      := -DASTER_BOARD_RPI3
+  LOAD_BASE := 0x80000
+  KERN_BASE := 0x800000
+  CARGO_FEAT := --features rpi3
+else ifeq ($(BOARD),rpi4)
   BDEF      := -DASTER_BOARD_RPI4
   LOAD_BASE := 0x80000
-  KERN_BASE := 0x200000
+  KERN_BASE := 0x800000
   CARGO_FEAT := --features rpi4
 else
   BDEF      :=
@@ -244,6 +249,16 @@ rpi4:
 	$(MAKE) BOARD=rpi4 image
 	@cp $(B)/aster-boot.bin $(B)/kernel8.img
 	@echo "生成 $(B)/kernel8.img —— 拷到 SD 卡 boot 分区即可"
+
+rpi3: img
+	$(MAKE) BOARD=rpi3 image
+	@cp $(B)/aster-boot.bin $(B)/kernel8.img
+	@echo "生成 $(B)/kernel8.img（Raspberry Pi 3B）"
+
+# 在没有树莓派 4 机型的环境里，用 QEMU 的 raspi3b 跑同一套驱动
+run-rpi3: rpi3
+	qemu-system-aarch64 -M raspi3b -m 1G -kernel $(B)/aster-boot.elf \
+	  -drive if=sd,format=raw,file=$(IMG) -serial stdio -display none
 
 clean:
 	rm -rf $(B)

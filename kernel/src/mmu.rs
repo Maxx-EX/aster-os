@@ -23,6 +23,7 @@ struct PageTable([u64; 512]);
 
 static mut L1_TABLE: PageTable = PageTable([0; 512]);
 static mut L2_RAM: PageTable = PageTable([0; 512]);
+static mut L2_LOW: PageTable = PageTable([0; 512]);
 static mut L3_USER_A: PageTable = PageTable([0; 512]);
 static mut L3_USER_B: PageTable = PageTable([0; 512]);
 
@@ -97,13 +98,35 @@ pub fn init() {
             *e = 0;
         }
 
-        // [0, 1 GiB) 设备：只有 EL1 能碰，EL0 连读都不行
-        l1[0] = desc(0, 0b01, ATTR_DEVICE, AP_EL1_RW, 0, 1);
+        // [0, 1 GiB)
+        // QEMU virt：这一段全是 MMIO（fw_cfg、virtio、GIC、ramfb），按 device 映射。
+        // 树莓派：内核自己就在 0 起的 RAM 里，必须按 normal 映射才能取指，
+        //         只把外设窗口（0x3F00_0000 起 16 MiB）单独标成 device。
+        #[cfg(not(any(feature = "rpi3", feature = "rpi4")))]
+        {
+            l1[0] = desc(0, 0b01, ATTR_DEVICE, AP_EL1_RW, 0, 1);
+        }
+        #[cfg(any(feature = "rpi3", feature = "rpi4"))]
+        {
+            let low = &mut L2_LOW.0;
+            l1[0] = table_desc(low.as_ptr() as u64);
+            for i in 0..512usize {
+                let a = (i as u64) << 21;
+                if a >= 0x3F00_0000 {
+                    low[i] = desc(a, 0b01, ATTR_DEVICE, AP_EL1_RW, 1, 1);
+                } else {
+                    low[i] = desc(a, 0b01, ATTR_NORMAL, AP_EL1_RW, 0, 0);
+                }
+            }
+        }
         // [1, 2 GiB) 走 L2，为了能细拆用户段
         l1[1] = table_desc(l2.as_ptr() as u64);
-        // [2, 4 GiB) 预留 RAM
-        l1[2] = desc(2 << 30, 0b01, ATTR_NORMAL, AP_EL1_RW, 0, 1);
-        l1[3] = desc(3 << 30, 0b01, ATTR_NORMAL, AP_EL1_RW, 0, 1);
+        // [2, 4 GiB) 预留 RAM（树莓派没有这段，映射了也不会去碰）
+        #[cfg(not(any(feature = "rpi3", feature = "rpi4")))]
+        {
+            l1[2] = desc(2 << 30, 0b01, ATTR_NORMAL, AP_EL1_RW, 0, 1);
+            l1[3] = desc(3 << 30, 0b01, ATTR_NORMAL, AP_EL1_RW, 0, 1);
+        }
 
         // RAM 段：512 个 2 MiB 块，全程 EL1-only
         for i in 0..512 {

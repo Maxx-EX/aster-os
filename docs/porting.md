@@ -7,7 +7,8 @@
 | 目标 | 状态 | 命令 |
 | --- | --- | --- |
 | QEMU virt（cortex-a72） | 可跑，有图形与磁盘 | `make run-gfx` / `make run-disk` |
-| 树莓派 4（BCM2711） | 能编译出镜像，未在真机验证 | `make BOARD=rpi4 image` |
+| 树莓派 3B（BCM2837） | **已在 QEMU raspi3b 上启动到 shell，mailbox 拿到 framebuffer** | `make run-rpi3` |
+| 树莓派 4（BCM2711） | 同一套代码，改板级地址，未在真机验证 | `make BOARD=rpi4 image` |
 
 板级事实集中在 `kernel/src/board.rs`。加一块新板子就是加一条 `const XXX: Board`，然后用一个 cargo feature 选中它，`ACTIVE` 会自动指向新板。
 
@@ -58,6 +59,17 @@ uart_2ndstage=1
 ```
 
 串口 115200 8N1，GPIO14(TX)/GPIO15(RX)。
+
+## 5.1 现在做到哪一步
+
+- ✅ 内核 8 MiB 基址（避开 QEMU 分配的 framebuffer，真机同样安全）
+- ✅ 页表把 `[0,1GiB)` 拆成 normal RAM + `0x3F00_0000` 起 16 MiB device
+- ✅ 页帧池按板子取址（QEMU `0x4800_0000`，树莓派 `0x3000_0000`）
+- ✅ mailbox framebuffer（property 通道 8，拿到 1024×768，读回校验一致）
+- ⬜ EMMC（SDHCI）读写扇区
+- ⬜ USB HID 键鼠
+
+注意 `screendump` 在 `-M raspi3b` 上拿到的是白屏：QEMU 6.2 不把 guest 的 framebuffer 同步到显示 surface。要看画面直接 `-display gtk` 起窗口，或者上真机接 HDMI。判断驱动是否工作用内核自检那行 `[FB] mailbox 拿到 framebuffer ... 自检读回 0x141619`。
 
 ## 6. 已知的坑
 

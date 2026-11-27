@@ -518,6 +518,28 @@ pub fn run() -> ! {
                 crate::fb::close_win(i);
                 println!("  [WIN] {} 关闭", i);
             }
+            "fbinfo" => {
+                if !crate::fb::available() {
+                    println!("  没有 framebuffer");
+                } else {
+                    let (w, h) = (crate::fb::width(), crate::fb::height());
+                    let base = crate::fb::base_addr();
+                    println!("  板级   {}", crate::board::ACTIVE.name);
+                    println!("  显示   {}x{} @ {:#x}", w, h, base);
+                    println!(
+                        "  自检   (0,0)={:#x}  中心={:#x}  ({}, {})",
+                        crate::fb::read_px(0, 0),
+                        crate::fb::read_px(w / 2, h / 2),
+                        w / 2,
+                        h / 2
+                    );
+                    if crate::board::ACTIVE.mailbox.is_some() {
+                        println!("  来源   VideoCore mailbox property 通道");
+                    } else {
+                        println!("  来源   fw_cfg / etc/ramfb");
+                    }
+                }
+            }
             "wins" => {
                 for (n, x, y, w, h, o) in crate::fb::dump_wins() {
                     println!("  {} ({},{}) {}x{} open={}", n, x, y, w, h, o);

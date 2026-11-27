@@ -45,6 +45,13 @@ pub struct Board {
     pub virtio_mmio: Option<u64>,
     /// PL031 RTC，真机没有就是 None（时间从 RTC 芯片或网络取）
     pub rtc: Option<u64>,
+    /// VideoCore mailbox 基址（树莓派才有）
+    pub mailbox: Option<u64>,
+    /// ARM 物理地址 → 总线地址（VC DMA 看到的地址）的偏移
+    pub bus_offset: u64,
+    /// 页帧池区间
+    pub pool_base: u64,
+    pub pool_end: u64,
     pub fb: FbKind,
     pub input: InputKind,
     pub blk: BlkKind,
@@ -64,6 +71,10 @@ pub const QEMU_VIRT: Board = Board {
     gicc: Some(0x0801_0000),
     virtio_mmio: Some(0x0a00_0000),
     rtc: Some(0x0901_0000),
+    mailbox: None,
+    bus_offset: 0,
+    pool_base: 0x4800_0000,
+    pool_end: 0x5000_0000,
     fb: FbKind::Ramfb,
     input: InputKind::VirtioMmio,
     blk: BlkKind::VirtioMmio,
@@ -77,7 +88,7 @@ pub const RPI4: Board = Board {
     // 4 GiB 版的低 1 GiB 一定可用；再往上要读 mailbox 的 ARM memory 属性
     ram_size: 0x3B00_0000,
     boot_load: 0x0008_0000,
-    kernel_load: 0x0020_0000,
+    kernel_load: 0x0080_0000,
     // PL011（GPIO14/15）；miniUART 在 0xFE21_5000，早期固件默认用它
     uart: 0xFE20_1000,
     // BCM2711 带 GIC-400
@@ -85,6 +96,10 @@ pub const RPI4: Board = Board {
     gicc: Some(0xFF84_2000),
     virtio_mmio: None,
     rtc: None,
+    mailbox: Some(0xFE00_B880),
+    bus_offset: 0xC000_0000,
+    pool_base: 0x3000_0000,
+    pool_end: 0x3800_0000,
     fb: FbKind::Mailbox,
     input: InputKind::UsbHid,
     blk: BlkKind::SdHost,
@@ -92,9 +107,33 @@ pub const RPI4: Board = Board {
     notes: "无 virtio、无 PL031；显示走 mailbox，键鼠走 USB，磁盘走 EMMC",
 };
 
+pub const RPI3: Board = Board {
+    name: "Raspberry Pi 3B (BCM2837)",
+    ram_base: 0x0000_0000,
+    ram_size: 0x3E00_0000,
+    boot_load: 0x0008_0000,
+    kernel_load: 0x0080_0000,
+    uart: 0x3F20_1000,
+    gicd: Some(0x3F00_4000),
+    gicc: Some(0x3F00_5000),
+    virtio_mmio: None,
+    rtc: None,
+    mailbox: Some(0x3F00_B880),
+    bus_offset: 0x4000_0000,
+    pool_base: 0x3000_0000,
+    pool_end: 0x3800_0000,
+    fb: FbKind::Mailbox,
+    input: InputKind::UsbHid,
+    blk: BlkKind::SdHost,
+    has_avp: false,
+    notes: "外设窗口 0x3F000000；QEMU 有 raspi3b 机型，可先在这里跑通同一套驱动",
+};
+
+#[cfg(feature = "rpi3")]
+pub const ACTIVE: &Board = &RPI3;
 #[cfg(feature = "rpi4")]
 pub const ACTIVE: &Board = &RPI4;
-#[cfg(not(feature = "rpi4"))]
+#[cfg(not(any(feature = "rpi4", feature = "rpi3")))]
 pub const ACTIVE: &Board = &QEMU_VIRT;
 
 /// 当前板子缺哪些能力（给 shell / 系统窗显示用）

@@ -2,12 +2,19 @@
 #ifndef ASTER_BOARD_H
 #define ASTER_BOARD_H
 
-#if defined(ASTER_BOARD_RPI4)
+#if defined(ASTER_BOARD_RPI3)
+   /* 树莓派 3B（BCM2837，外设窗口在 0x3F000000）——QEMU 有 raspi3b 机型，可先在这里跑通 */
+#  define ASTER_UART_BASE   0x3F201000UL
+#  define ASTER_RAM_BASE    0x00000000UL
+#  define ASTER_LOAD_ADDR   0x00080000UL
+#  define ASTER_KERNEL_ADDR 0x00800000UL
+#  define ASTER_BOARD_NAME  "Raspberry Pi 3B (BCM2837)"
+#elif defined(ASTER_BOARD_RPI4)
    /* 树莓派 4/5（Pi 5 的 PL011 也在同一个地址段），运行在 EL2 时要先降到 EL1 */
 #  define ASTER_UART_BASE   0xFE201000UL
 #  define ASTER_RAM_BASE    0x00000000UL
 #  define ASTER_LOAD_ADDR   0x00080000UL
-#  define ASTER_KERNEL_ADDR 0x00200000UL
+#  define ASTER_KERNEL_ADDR 0x00800000UL
 #  define ASTER_BOARD_NAME  "Raspberry Pi 4/5"
 #else
    /* QEMU virt（默认） */

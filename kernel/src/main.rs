@@ -18,6 +18,7 @@ mod input;
 mod mmu;
 mod blk;
 mod board;
+mod mailbox;
 mod disk;
 mod cache;
 mod afs;

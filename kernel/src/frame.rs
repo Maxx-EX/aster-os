@@ -14,10 +14,12 @@ use core::arch::asm;
 
 pub const PAGE_SIZE: u64 = 4096;
 
-const POOL_BASE: u64 = 0x4800_0000;
-const POOL_END: u64 = 0x5000_0000;
-const POOL_BYTES: u64 = POOL_END - POOL_BASE;
-const NPAGES: usize = (POOL_BYTES / PAGE_SIZE) as usize; // 32768
+fn po() -> (u64, u64) {
+    (crate::board::ACTIVE.pool_base, crate::board::ACTIVE.pool_end)
+}
+
+const POOL_BYTES_MAX: u64 = 128 << 20;
+const NPAGES: usize = (POOL_BYTES_MAX / PAGE_SIZE) as usize; // 32768
 const WORDS: usize = NPAGES / 64;
 
 static mut BITMAP: [u64; WORDS] = [0; WORDS];
@@ -70,7 +72,7 @@ pub fn alloc() -> Option<u64> {
                 if !is_busy(i) {
                     set_bit(i, true);
                     USED += 1;
-                    let pa = POOL_BASE + (i as u64) * PAGE_SIZE;
+                    let pa = po().0 + (i as u64) * PAGE_SIZE;
                     zero_page(pa);
                     return Some(pa);
                 }
@@ -93,10 +95,10 @@ pub fn alloc_pages(n: usize) -> Option<u64> {
                     let start = i + 1 - n;
                     for k in start..=i {
                         set_bit(k, true);
-                        zero_page(POOL_BASE + (k as u64) * PAGE_SIZE);
+                        zero_page(po().0 + (k as u64) * PAGE_SIZE);
                     }
                     USED += n;
-                    return Some(POOL_BASE + (start as u64) * PAGE_SIZE);
+                    return Some(po().0 + (start as u64) * PAGE_SIZE);
                 }
             }
         }
@@ -105,10 +107,10 @@ pub fn alloc_pages(n: usize) -> Option<u64> {
 }
 
 pub fn free(pa: u64) {
-    if pa < POOL_BASE || pa >= POOL_END || (pa - POOL_BASE) % PAGE_SIZE != 0 {
+    if pa < po().0 || pa >= po().1 || (pa - po().0) % PAGE_SIZE != 0 {
         return;
     }
-    let i = ((pa - POOL_BASE) / PAGE_SIZE) as usize;
+    let i = ((pa - po().0) / PAGE_SIZE) as usize;
     unsafe {
         if is_busy(i) {
             set_bit(i, false);
@@ -124,5 +126,5 @@ pub fn stats() -> (usize, usize, u64) {
 
 /// 物理地址是否落在池内且已分配（给调试用）
 pub fn owns(pa: u64) -> bool {
-    pa >= POOL_BASE && pa < POOL_END && is_busy(((pa - POOL_BASE) / PAGE_SIZE) as usize)
+    pa >= po().0 && pa < po().1 && is_busy(((pa - po().0) / PAGE_SIZE) as usize)
 }

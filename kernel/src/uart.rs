@@ -3,10 +3,12 @@
 
 use core::fmt::{self, Write};
 
-#[cfg(not(feature = "rpi4"))]
+#[cfg(all(not(feature = "rpi4"), not(feature = "rpi3")))]
 pub const UART_BASE: usize = 0x0900_0000;
 #[cfg(feature = "rpi4")]
 pub const UART_BASE: usize = 0xFE20_1000;
+#[cfg(feature = "rpi3")]
+pub const UART_BASE: usize = 0x3F20_1000;
 
 const DR: usize = 0x00;
 const FR: usize = 0x18;

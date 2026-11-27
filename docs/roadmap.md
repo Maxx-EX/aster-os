@@ -86,7 +86,10 @@
 | UI-7 | **窗口管理** | ✅ | 拖拽标题栏 + 脏矩形（静态层缓存 3 MiB，拖动只擦并集区域）；三窗口（终端/系统/网络）、Z 序、焦点、每窗口独立拖拽、侧栏开窗 |
 | UI-9 | 时钟与权限提示 | ✅ | RTC(PL031) 读 UTC+8 显示到分钟、横幅一行化、提示符按 Extreme 权限在 `$`/`#` 切换 |
 | BOARD-1 | 板级描述表 | ✅ | `kernel/src/board.rs` 收录 QEMU virt 与 RPi4，feature 选中；`make BOARD=rpi4 image` 可编译 |
-| BOARD-2 | 树莓派真机驱动 | 🔄 | mailbox framebuffer / xHCI HID / EMMC 三件，移植指南见 `docs/porting.md` |
+| BOARD-2 | 树莓派启动路径 | ✅ | 内核改 8 MiB 基址、页表拆 RAM/device、页帧池按板取址；QEMU raspi3b 上完整启动到 shell |
+| BOARD-3 | mailbox framebuffer | ✅ | property 通道 8 + 五个 tag + 总线/物理地址判定；拿到 1024×768 并读回校验一致 |
+| BOARD-4 | EMMC（SDHCI） | ⬜ | 初始化 CMD0/8/41/2/3/7/16，PIO 读扇区，接进 `disk` |
+| BOARD-5 | USB HID（xHCI） | ⬜ | 枚举 + HID boot 协议，接进 `input` |
 | UI-9 | 交互可测 | ✅ | `sim move/click/drag` 内核内注入，与真实事件同一状态机；拖拽、置顶、侧栏开窗均已实拍验证 |
 | UI-8 | 过渡与反馈 | ✅ 部分 | 窗口淡入淡出（alpha 逐帧）、悬停变亮、按钮按下态、光标闪烁、托盘图标动效 |
 
