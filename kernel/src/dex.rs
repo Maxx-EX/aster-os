@@ -221,7 +221,55 @@ struct ObjState {
 const NOBJ: usize = 8;
 static mut HEAP: [ObjState; NOBJ] = [ObjState { used: false, class_idx: 0, fields: [0; 8] }; NOBJ];
 
+// —— 数组（APK-6）——
+// 寄存器里对象用 0..NOBJ，数组用 0x100+i 这一段，两者不会撞车。
+#[derive(Clone, Copy)]
+struct Arr {
+    len: u32,
+    d: [i32; 8],
+}
+
+const NARR: usize = 4;
+const ARR_TAG: i32 = 0x100;
+static mut ARRS: [Arr; NARR] = [Arr { len: 0, d: [0; 8] }; NARR];
+static mut NARR_USED: usize = 0;
+
+fn arr_new(len: u32) -> Result<i32, &'static str> {
+    unsafe {
+        if NARR_USED >= NARR {
+            return Err("数组堆满（最多 4 个）");
+        }
+        if len > 8 {
+            return Err("数组超过 8 个元素（v0 上限）");
+        }
+        let i = NARR_USED;
+        ARRS[i] = Arr { len, d: [0; 8] };
+        NARR_USED += 1;
+        Ok(ARR_TAG + i as i32)
+    }
+}
+
+fn arr_idx(v: i32) -> Result<usize, &'static str> {
+    let i = v - ARR_TAG;
+    if i < 0 || i as usize >= unsafe { NARR_USED } {
+        return Err("不是有效的数组引用");
+    }
+    Ok(i as usize)
+}
+
+fn arr_reset() {
+    unsafe {
+        NARR_USED = 0;
+        let mut i = 0;
+        while i < NARR {
+            ARRS[i] = Arr { len: 0, d: [0; 8] };
+            i += 1;
+        }
+    }
+}
+
 fn heap_reset() {
+    arr_reset();
     let mut i = 0;
     while i < NOBJ {
         unsafe {
@@ -345,6 +393,68 @@ fn exec(
                 let type_idx = unit(pc as usize + 1) as u32;
                 type_desc(d, h, type_idx)?;
                 regs[a] = heap_new(type_idx)? as i32;
+                pc += 2;
+            }
+            0x21 => {
+                // array-length vA, vB  (12x)
+                let a = ((u >> 8) & 0xf) as usize;
+                let b = ((u >> 12) & 0xf) as usize;
+                let i = arr_idx(regs[b])?;
+                regs[a] = unsafe { ARRS[i].len } as i32;
+                pc += 1;
+            }
+            0x23 => {
+                // new-array vA, vB, type@CCCC  (22c)
+                let a = ((u >> 8) & 0xf) as usize;
+                let b = ((u >> 12) & 0xf) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("new-array 被截断");
+                }
+                let ty = unit(pc as usize + 1) as u32;
+                let td = type_desc(d, h, ty)?;
+                if !td.starts_with('[') {
+                    return Err("new-array 的 type 不是数组描述符");
+                }
+                if regs[b] < 0 {
+                    return Err("数组长度是负数");
+                }
+                regs[a] = arr_new(regs[b] as u32)?;
+                pc += 2;
+            }
+            0x44 => {
+                // aget vA, vB, vC  (23x)
+                let a = ((u >> 8) & 0xff) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("aget 被截断");
+                }
+                let w = unit(pc as usize + 1);
+                let b = (w & 0xff) as usize;
+                let c = ((w >> 8) & 0xff) as usize;
+                let i = arr_idx(regs[b])?;
+                let k = regs[c];
+                let len = unsafe { ARRS[i].len } as i32;
+                if k < 0 || k >= len {
+                    return Err("数组下标越界（aget）");
+                }
+                regs[a] = unsafe { ARRS[i].d[k as usize] };
+                pc += 2;
+            }
+            0x4b => {
+                // aput vA, vB, vC  (23x)
+                let a = ((u >> 8) & 0xff) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("aput 被截断");
+                }
+                let w = unit(pc as usize + 1);
+                let b = (w & 0xff) as usize;
+                let c = ((w >> 8) & 0xff) as usize;
+                let i = arr_idx(regs[b])?;
+                let k = regs[c];
+                let len = unsafe { ARRS[i].len } as i32;
+                if k < 0 || k >= len {
+                    return Err("数组下标越界（aput）");
+                }
+                unsafe { ARRS[i].d[k as usize] = regs[a] };
                 pc += 2;
             }
             0x28 => pc += sx8((u >> 8) & 0xff),

@@ -54,10 +54,11 @@ def mbr(part_sectors: int) -> bytes:
 
 def main() -> int:
     if len(sys.argv) < 3:
-        print("用法: python3 tools/mksdcard.py <kernel8.img> <out.img> [size_mb]")
+        print("用法: python3 tools/mksdcard.py <kernel8.img> <out.img> [size_mb] [fw_dir]")
         return 2
     kern, out = sys.argv[1], sys.argv[2]
     size_mb = int(sys.argv[3]) if len(sys.argv) > 3 else 64
+    fw = sys.argv[4] if len(sys.argv) > 4 else None
     if not os.path.exists(kern):
         print(f"找不到 {kern}（先 make rpi3）")
         return 1
@@ -72,6 +73,13 @@ def main() -> int:
         f.write(CONFIG)
     sh("mcopy", "-i", tmp, kern, "::kernel8.img")
     sh("mcopy", "-i", tmp, tmp + ".cfg", "::config.txt")
+    extra = 0
+    if fw and os.path.isdir(fw):
+        for name in ("bootcode.bin", "start.elf", "fixup.dat"):
+            p = os.path.join(fw, name)
+            if os.path.exists(p):
+                sh("mcopy", "-i", tmp, p, "::" + name)
+                extra += 1
 
     with open(out, "wb") as f:
         f.truncate(total)
@@ -86,6 +94,7 @@ def main() -> int:
 
     st = os.stat(out)
     print(f"[SDCARD] {out}  {st.st_size // (1024*1024)} MiB  分区 @ sector {MBR_PART_OFF}  kernel8.img {os.path.getsize(kern)} 字节")
+    print(f"[SDCARD] 固件：{extra} 个（VideoCore boot，闭源，不入 git）")
     print(f"[SDCARD] 写入： sudo dd if={out} of=/dev/sdX bs=4M status=progress")
     return 0
 

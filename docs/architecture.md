@@ -1269,3 +1269,59 @@ sector 2048 起  FAT16「ASTERBOOT」分区
 为什么 FAT16 而不是 FAT32：64 MiB 上 FAT32 的 cluster 数低于规范建议，mtools 直接读不了（`Error reading FAT`）。树莓派固件 FAT16/FAT32 都认，小镜像用 16 更稳。
 
 为什么 MP4 里不做 ISO：ARM64 没有 PC 的 El Torito/CD 引导路径，对树莓派它就是一个 FAT 分区。硬做 `.iso` 只是换个后缀，不解决任何问题。要 ISO 的话，等 UEFI 那条线（QEMU `virt` 目前走 `-kernel`）。
+
+---
+
+## 43. APK-6：DEX 数组
+
+前五个 APK 步骤之后，解释器缺的下一块是数组。Java 的 `int[]` 在 DEX 里是三条指令的组合：`new-array` 开、`array-length` 量、`aget`/`aput` 读写，数组对象本身在寄存器里只存一个引用号。
+
+### 43.1 内核侧：数组堆
+
+`kernel/src/dex.rs` 新增一块静态数组堆，和对象堆并列：
+
+```rust
+#[derive(Clone, Copy)]
+struct Arr { len: u32, d: [i32; 8] }
+static mut ARRS: [Arr; 4] = ...;
+const ARR_TAG: u32 = 0x100;
+```
+
+寄存器里放 `0x100 + 槽号`，和对象堆的 `0x000 + 索引` 靠区间分开，不会撞。为什么不复用对象堆：对象堆的 `ObjState` 是 8 个"字段"（语义上是成员变量），数组是 `len` + 连续元素，两者的边界检查和越界行为都不一样，混在一起会让 `iget` 越界和 `aget` 越界共用一套错误判断，反而更难查错。
+
+四个新 opcode：
+
+| opcode | 名称 | 格式 | 语义 |
+|---|---|---|---|
+| `0x21` | `array-length` | 12x | `vA = len(vB)`，非数组报错 |
+| `0x23` | `new-array` | 22c | `vA = new [I(vB)`，长度上限 8，type 必须以 `[` 开头 |
+| `0x44` | `aget` | 23x | `vA = vB[vC]`，越界报错而不是读脏数据 |
+| `0x4b` | `aput` | 23x | `vB[vC] = vA`，越界报错 |
+
+23x 的寄存器全在 unit1：`C = unit1 >> 8`，`B = unit1 & 0xff`，A 在 unit0 的 bits 8-15。越界一律返回 `Err("数组越界")`，不静默截断——这和 `zip::extract` 那次修的毛病是同一条原则。
+
+### 43.2 fixture（第四版，`tools/mkdex.py`）
+
+```java
+int[] a = new int[5];
+int sum = 0;
+for (int i = 0; i < 5; i++) { a[i] = i * 3; sum += a[i]; }
+Log.i("array ok"); Log.n(sum);
+```
+
+期望 30（0+3+6+9+12）。29 个 code unit，dex 950 字节，`demo3.apk` 855 字节。实拍 `[DEX] 30`，51 条指令。
+
+### 43.3 这次踩的四个编码坑（都是"格式对了但字节序写反"）
+
+1. **`const/4` 的 lit 在高 4 位，A 在 bits 8-11。** 想写 `v5, #3` 写成 `0x5312`，实际被解成 `v3, #5`——寄存器 `v3` 恰好是求和累加器，于是第一版直接打印 `5`。正确：`0x3512`。
+2. **`22b`（`add-int/lit8`）的 unit1 是 `B` 在高字节、`lit` 在低字节。** 写成 `0x0102` 被解成 `B=v1, lit=2`，`i` 一步从 0 跳到 258（`v1` 是数组引用 `0x100`），循环立刻出错。
+3. **`0x93` 是 `div-int` 不是 `add-int`。** 想把 `add-int` 写成 `0x0393`，跑出来报"整数除零"——那一刻才意识到自己把 add 的 opcode 记成了 0x93。`add-int` 是 `0x90`。
+4. **`30t` 分支偏移相对当前指令的 pc，不是下一条。** 出口在 pc 20、分支在 pc 7，偏移就是 13 而不是 12。这条 APK-4 已经记过，这次又"顺手"算错了一次方向：写成 `if-lt` 想表达"继续循环"，实际 `if-lt v2, v4` 成立就跳出口，第一次进来 `0 < 5` 恒真，直接退出得 0。改成 `if-ge`（`0x34`）。
+
+四条合起来的教训很朴素：手搓 DEX 时，先让 `mkdex.py` 把自己生成的 code unit 反汇编打印一遍，人工对一遍再上机。现在脚本末尾就是这么做的，出问题先看那三行反汇编。
+
+### 43.4 断言与回归
+
+`make test` 的 DEX 断言从 `[DEX] 11` 换成 `[DEX] 30`，名称改为"数组：new-array + aput/aget + 循环求和 30"，总数仍是 18 项全 PASS。旧的 11 是 APK-5 对象 fixture 的产物，两个 fixture 都在仓库里（`demo3.apk` 是当前 `dex run` 用的默认包），断言跟着默认包走。
+
+APK 主线下一站是 `StringBuilder` 与静态字段；数组本身够用了，但 `new-array` 现在固定上限 8 个元素、4 个槽——真要跑有意义的 APK，得改成按需分配，那要等页帧分配器给用户态开口子。

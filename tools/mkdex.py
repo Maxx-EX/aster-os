@@ -54,6 +54,8 @@ STRINGS = [
     "V",
     "VI",
     "VL",
+    "[I",
+    "array ok",
     "hello",
     "i",
     "loop done",
@@ -64,10 +66,15 @@ STRINGS = [
     "v",
 ]
 assert STRINGS == sorted(STRINGS), "string_ids 必须升序"
-S_INIT, S_HELLO, S_I_T, S_COUNTER, S_LOG, S_MAIN, S_STRING, S_V, S_VI, S_VL, \
-    S_HELLO_M, S_I_M, S_LOOPDONE, S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = range(18)
+IDX = {s: i for i, s in enumerate(STRINGS)}
+S_INIT, S_HELLO = IDX["<init>"], IDX["Hello from Aster, this string lives in a real DEX"]
+S_I_T, S_COUNTER, S_LOG, S_MAIN = IDX["I"], IDX["Lcom/aster/Counter;"], IDX["Lcom/aster/Log;"], IDX["Lcom/aster/Main;"]
+S_STRING, S_V, S_VI, S_VL = IDX["Ljava/lang/String;"], IDX["V"], IDX["VI"], IDX["VL"]
+S_ARR, S_ARRAYOK = IDX["[I"], IDX["array ok"]
+S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
+S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
 
-T_STRING, T_MAIN, T_V, T_LOG, T_INT, T_COUNTER = 0, 1, 2, 3, 4, 5
+T_STRING, T_MAIN, T_V, T_LOG, T_INT, T_COUNTER, T_ARR = 0, 1, 2, 3, 4, 5, 6
 # proto：0=(String)V 1=()V 2=(I)V 3=()I
 P_STR, P_VOID, P_INT_V, P_INT_I = 0, 1, 2, 3
 F_V = 0
@@ -88,7 +95,7 @@ def build():
         buf += b"\0\0\0\0"
 
     type_ids_off = len(buf)
-    for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER):
+    for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER, S_ARR):
         buf += struct.pack("<I", t)
 
     proto_ids_off = len(buf)
@@ -152,36 +159,46 @@ def build():
     buf += struct.pack("<HHHHII", 2, 1, 0, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
-    # Main.run()V   regs=5 ins=0 outs=2
-    # 0  new-instance v0, Counter        (0x0022, type 5)
-    # 2  const/4 v1, #10                 (0xa112)
-    # 3  invoke-direct {v0, v1}, <init>  (0x2070, m2, C=0 D=1)
-    # 6  invoke-virtual {v0}, next       (0x106e, m3, C=0)
-    # 9  move-result v2                  (0x020a)
-    # 10 invoke-virtual {v0}, next
-    # 13 move-result v3                  (0x030a)
-    # 14 invoke-static {v2}, Log.n       (0x1071, m1, C=2)
-    # 17 invoke-static {v3}, Log.n       (0x1071, m1, C=3)
-    # 20 const-string v4, "objects ok"   (0x041a, s15)
-    # 22 invoke-static {v4}, Log.i       (0x1071, m0, C=4)
-    # 25 return-void
+    # Main.run()V   regs=6 ins=0 outs=2   —— APK-6：数组
+    # 0  const/4 v0, #5                  环长
+    # 1  new-array v1, v0, [I           建一个 5 元素 int 数组
+    # 3  const/4 v2, #0                  i = 0
+    # 4  const/4 v3, #0                  sum = 0
+    # 5  const/4 v5, #3                  常数 3
+    # 6  array-length v4, v1
+    # 7  if-ge v2, v4 -> 20              循环出口
+    # 9  mul-int v4, v2, v5              a[i] = i*3
+    # 11 aput v4, v1, v2
+    # 13 aget v4, v1, v2
+    # 15 add-int v3, v3, v4             sum += a[i]
+    # 17 add-int/lit8 v2, v2, #1
+    # 19 goto 6
+    # 20 invoke-static {v3}, Log.n
+    # 23 const-string v0, "array ok"
+    # 25 invoke-static {v0}, Log.i
+    # 28 return-void
     code_run = len(buf)
     ins = [
-        0x0022, T_COUNTER,        # new-instance v0
-        0x0113, 0x000a,           # const/16 v1, #10（const/4 只装得下 -8..7）
-        0x2070, M_INIT, 0x0010,   # invoke-direct {v0, v1}, <init>
-        0x106e, M_NEXT, 0x0000,   # invoke-virtual {v0}, next
-        0x020a,                   # move-result v2
-        0x106e, M_NEXT, 0x0000,
-        0x030a,                   # move-result v3
-        0x1071, M_N, 0x0002,      # Log.n(v2)
-        0x1071, M_N, 0x0003,      # Log.n(v3)
-        0x041a, S_OBJOK,          # const-string v4, "objects ok"
-        0x1071, M_I, 0x0004,      # Log.i(v4)
-        0x000e,                   # return-void
+        0x5012,                  # const/4 v0, #5
+        0x0123, T_ARR,           # new-array v1, v0, [I
+        0x0212,                  # const/4 v2, #0
+        0x0312,                  # const/4 v3, #0
+        0x3512,                  # const/4 v5, #3（lit 在高 4 位、A 在 bits8-11）
+        0x1421,                  # array-length v4, v1
+        0x4234, 0x0D00,          # if-ge v2, v4 -> +13（end 在 pc 20）
+        0x0492, 0x0205,          # mul-int v4, v2, v5（unit1 = B<<8 | C）
+        0x044b, 0x0201,          # aput v4, v1, v2
+        0x0444, 0x0201,          # aget v4, v1, v2
+        0x0390, 0x0403,          # add-int v3, v3, v4（0x90 是 add，0x93 是 div）
+        0x02d8, 0x0201,          # add-int/lit8 v2, v2, #1（22b：B 在高字节、lit 在低字节）
+        0xF328,                  # goto -13 -> 6
+        0x1071, M_N, 0x0003,     # Log.n(v3)
+        0x001a, S_ARRAYOK,       # const-string v0, "array ok"
+        0x1071, M_I, 0x0000,     # Log.i(v0)
+        0x000e,                  # return-void
     ]
-    assert len(ins) == 27, len(ins)
-    buf += struct.pack("<HHHHII", 5, 0, 2, 0, 0, len(ins))
+    assert len(ins) == 29, len(ins)
+    buf += struct.pack("<HHHHII", 6, 0, 2, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
     # Main.hello()V  regs=1 ins=0 outs=1
@@ -217,7 +234,7 @@ def build():
     items = [
         (0x0000, 1, 0),
         (0x0001, len(STRINGS), string_ids_off),
-        (0x0002, 6, type_ids_off),
+        (0x0002, 7, type_ids_off),
         (0x0003, 4, proto_ids_off),
         (0x0004, 1, field_ids_off),
         (0x0005, 6, method_ids_off),
@@ -237,7 +254,7 @@ def build():
     return buf, dict(
         file_size=len(buf), map_off=map_off,
         string_ids=(len(STRINGS), string_ids_off),
-        type_ids=(6, type_ids_off),
+        type_ids=(7, type_ids_off),
         proto_ids=(4, proto_ids_off),
         field_ids=(1, field_ids_off),
         method_ids=(6, method_ids_off),

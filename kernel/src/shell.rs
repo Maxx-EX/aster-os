@@ -606,8 +606,12 @@ fn cmd_help() {
     println!("  bootframe <ms>  把动画某一时刻静态画出来（取证用）");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
     println!("  ex off    关闭 Extreme 权限");
-    println!("  peek A    读 8 字节（仅 Extreme）");
-    println!("  poke A V  写 8 字节（仅 Extreme）");
+    println!("  sim       sim move x y | sim click x y | sim drag x1 y1 x2 y2（无头交互）");
+    println!("  wins      多窗口状态（位置/层序/焦点）");
+    println!("  win on|off <n>  打开/关闭第 n 个窗口（0 终端 1 系统 2 网络）");
+    println!("  fbinfo    framebuffer 基址/尺寸/stride");
+    println!("  peek A    读 8 字节（需 Extreme + Device Lock 解锁）");
+    println!("  poke A V  写 8 字节（需 Extreme + Device Lock 解锁）");
     println!("  clear     清屏");
     println!("  reboot    复位整机 (PSCI)");
     println!("  halt      停机");

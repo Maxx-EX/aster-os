@@ -216,7 +216,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\nhalt\n' | timeout 45 \
+	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\nxce\nxce run\nupdate check\nhalt\n' | timeout 55 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -226,8 +226,11 @@ test: image
 	@grep -q "数据中止(低 EL)" $(B)/test.log && echo "[TEST] PASS 用户越权被 MMU 拦下" || (echo "[TEST] FAIL 隔离失效" && exit 1)
 	@grep -q "TASK 2" $(B)/test.log && echo "[TEST] PASS 双任务轮转" || (echo "[TEST] FAIL 无多任务输出" && exit 1)
 	@grep -q "Hello from Aster, this string lives in a real DEX" $(B)/test.log && echo "[TEST] PASS DEX 解释器：const-string + invoke-static" || (echo "[TEST] FAIL DEX hello" && exit 1)
-	@grep -q "\[DEX\] 11" $(B)/test.log && echo "[TEST] PASS DEX 解释器：new-instance + 构造器 + 虚方法返回 11/12" || (echo "[TEST] FAIL DEX obj" && exit 1)
+	@grep -q "\[DEX\] 30" $(B)/test.log && echo "[TEST] PASS DEX 数组：new-array + aput/aget + 循环求和 30" || (echo "[TEST] FAIL DEX array" && exit 1)
 	@grep -q "deflate 解压正确" $(B)/test.log && echo "[TEST] PASS inflate（deflate 条目还原）" || (echo "[TEST] FAIL deflate" && exit 1)
+	@grep -q "XCE ok: native program, EL0, Aster" $(B)/test.log && echo "[TEST] PASS XCE：原生程序装载 + EL0 执行 + SVC exit" || (echo "[TEST] FAIL XCE" && exit 1)
+	@grep -q "Device Lock 锁定" $(B)/test.log && echo "[TEST] PASS Device Lock 默认锁定" || (echo "[TEST] FAIL DL" && exit 1)
+	@grep -q "可以应用" $(B)/test.log && echo "[TEST] PASS 更新包校验（CRC32 + EX3 绑定）" || (echo "[TEST] FAIL AUP" && exit 1)
 	@awk '/BUSY start/{s=NR} /TASK 2/{t=NR} /BUSY end/{e=NR} END{if (s>0 && t>s && e>t) print "[TEST] PASS 抢占：纯计算期间另一任务仍在跑"; else {print "[TEST] FAIL 抢占未生效"; exit 1}}' $(B)/test.log
 	# 隔离：两个任务写同一 VA，各自读回自己写的值（打印 '.'，不是 'X'）
 	@grep -q "ISO 1: ." $(B)/test.log && grep -q "ISO 2: ." $(B)/test.log && \
@@ -269,7 +272,8 @@ SCARD := $(B)/aster-sdcard.img
 
 # 可直接 dd 到 SD 卡的镜像（MBR + FAT32 启动分区 + kernel8.img + config.txt）
 sdcard: rpi3
-	python3 tools/mksdcard.py build/kernel8.img $(SCARD) 64
+	sh tools/fetch-fw.sh build/fw
+	python3 tools/mksdcard.py build/kernel8.img $(SCARD) 96 build/fw
 
 rpi3: img
 	$(MAKE) BOARD=rpi3 image
