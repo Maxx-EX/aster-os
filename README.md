@@ -21,6 +21,10 @@
 
 ![boot animation](docs/boot-anim.png)
 
+| 生长 | 散场 |
+|---|---|
+| ![grow](docs/boot-anim-grow.png) | ![out](docs/boot-anim-out.png) |
+
 无头环境下用 `bootframe <ms>` 定格任意时刻取证（`-display none` 下运行中抓屏必撕裂，不能用）。
 已经验证能跑的部分
 
