@@ -53,6 +53,8 @@ static mut MS_OK: bool = false;
 
 const EV_REL: u16 = 2;
 const BTN_LEFT: u16 = 0x110;
+const BTN_RIGHT: u16 = 0x111;
+const BTN_MIDDLE: u16 = 0x112;
 
 static mut MX: i32 = 760;
 static mut MY: i32 = 600;
@@ -483,4 +485,41 @@ pub fn inject_move_to(x: i32, y: i32) {
 
 pub fn inject_btn(down: bool) {
     mouse_event(EV_KEY, BTN_LEFT, if down { 1 } else { 0 });
+}
+
+// —— 真实 HID 设备（树莓派 DWC2）用这几条注入 ——
+// 比 `sim` 那套更进一步：键码走 Linux input event 同一套编码，位移走相对量。
+
+static mut USB_BTN: u8 = 0;
+
+pub fn inject_key(linux_code: u16, down: bool) {
+    key_event(linux_code, if down { 1 } else { 0 });
+}
+
+pub fn inject_move_rel(dx: i32, dy: i32) {
+    if dx != 0 {
+        mouse_event(EV_REL, 0, dx as u32);
+    }
+    if dy != 0 {
+        mouse_event(EV_REL, 1, dy as u32);
+    }
+    crate::cursor::invalidate();
+}
+
+/// idx: 0=左 1=右 2=中。UI 目前只响应左键，其余仍记录状态。
+pub fn inject_btn_any(idx: u8, down: bool) {
+    match idx {
+        0 => mouse_event(EV_KEY, BTN_LEFT, if down { 1 } else { 0 }),
+        1 => mouse_event(EV_KEY, BTN_RIGHT, if down { 1 } else { 0 }),
+        2 => mouse_event(EV_KEY, BTN_MIDDLE, if down { 1 } else { 0 }),
+        _ => {}
+    }
+}
+
+pub fn usb_btn_state() -> u8 {
+    unsafe { USB_BTN }
+}
+
+pub fn usb_set_btn(v: u8) {
+    unsafe { USB_BTN = v };
 }

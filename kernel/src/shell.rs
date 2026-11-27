@@ -389,6 +389,7 @@ fn cmd_help() {
     println!("  apk       读内置示例 APK：zip 目录 / classes.dex 头 / 二进制 XML");
     println!("  apk2      deflate 混合包：apk2 dex / apk2 cat <条目>（走 inflate）");
     println!("  dex       DEX 头/结构；dex run 执行 Main->run()V（非零 opcode 解释器）");
+    println!("  usb       DWC2 主机状态与设备描述符（树莓派键鼠走这条）");
     println!("  bootanim  重播开机动画（2.4s）");
     println!("  bootframe <ms>  把动画某一时刻静态画出来（取证用）");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
@@ -584,6 +585,11 @@ pub fn run() -> ! {
             "apk" => cmd_apk(""),
             "apk2" => cmd_apk2(""),
             "dex" => cmd_dex(""),
+            "usb" => crate::usb::probe(),
+            "usb poll" => {
+                let n = crate::usb::poll_hid();
+                println!("  轮询 1 次：{} 个事件（累计 {}）", n, crate::usb::events());
+            }
             "bootanim" => crate::bootanim::play(),
             "file" => match crate::task::run_file() {
                 Ok(code) => println!("[VFS] 任务结束，退出码 {}", code),

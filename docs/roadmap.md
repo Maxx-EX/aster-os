@@ -89,7 +89,7 @@
 | BOARD-2 | 树莓派启动路径 | ✅ | 内核改 8 MiB 基址、页表拆 RAM/device、页帧池按板取址；QEMU raspi3b 上完整启动到 shell |
 | BOARD-3 | mailbox framebuffer | ✅ | property 通道 8 + 五个 tag + 总线/物理地址判定；拿到 1024×768 并读回校验一致 |
 | BOARD-4 | EMMC（SDHCI） | ⬜ | 初始化 CMD0/8/41/2/3/7/16，PIO 读扇区，接进 `disk` |
-| BOARD-5 | USB HID（xHCI） | ⬜ | 枚举 + HID boot 协议，接进 `input` |
+| BOARD-5 | USB HID（DWC2） | 🟡 | 主机模式 + 端口复位 + 标准枚举 + HID boot 报告 + 注入 `input` 已落地；轮询未挂定时器，真机未验 |
 | UI-9 | 交互可测 | ✅ | `sim move/click/drag` 内核内注入，与真实事件同一状态机；拖拽、置顶、侧栏开窗均已实拍验证 |
 | UI-8 | 过渡与反馈 | ✅ 部分 | 窗口淡入淡出（alpha 逐帧）、悬停变亮、按钮按下态、光标闪烁、托盘图标动效 |
 

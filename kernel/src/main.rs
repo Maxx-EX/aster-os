@@ -27,6 +27,7 @@ mod vfs;
 mod zip;
 mod inflate;
 mod dex;
+mod usb;
 mod net;
 mod rtc;
 mod sched;
@@ -207,6 +208,16 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
     if fb::init() {
         println!("[KERNEL] 图形输出已就绪：ramfb {}x{} XRGB8888 @ {:#x}", fb::width(), fb::height(), fb::base_addr());
         println!("[BOOT] 开机动画 2.4s（星芒生长 → 归位），shell 里 bootanim 可重播");
+        if crate::board::ACTIVE.usb.is_some() {
+            match crate::usb::init() {
+                crate::usb::Status::Ready => println!("[USB] DWC2 主机就绪：端口已复位并完成枚举"),
+                crate::usb::Status::Idle => println!("[USB] DWC2 主机已配置，端口空闲（没插键鼠）"),
+                crate::usb::Status::NoResponse => {
+                    println!("[USB] {:#x} 上的 DWC2 无响应（QEMU 的 raspi 没建 USB 模型）", crate::board::ACTIVE.usb.unwrap_or(0))
+                }
+                crate::usb::Status::NoController => println!("[USB] 此板无 DWC2 控制器"),
+            }
+        }
         bootanim::play();
     } else {
         println!("[KERNEL] 未检测到 ramfb 设备，本次仅串口输出");

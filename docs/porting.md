@@ -27,7 +27,7 @@
 
 1. **串口**：`kernel/src/uart.rs`。QEMU 用 PL011 `0x0900_0000`；树莓派 4 的 PL011 在 `0xFE20_1000`，但默认 GPIO14/15 被蓝牙占了，`config.txt` 里要加 `dtoverlay=disable-bt`，否则串口没输出。
 2. **framebuffer**：`kernel/src/fb.rs`。QEMU 走 fw_cfg 的 ramfb；树莓派要走 VideoCore mailbox（属性通道 `0xFE00B810`），先 `SET_PHYS_WH` 再 `SET_VIRT_WH` 再 `ALLOCATE_BUFFER`，拿回总线地址后要减 `0xC000_0000` 才是 ARM 视角的物理地址。
-3. **输入**：`kernel/src/input.rs`。QEMU 是 virtio-input（事件 8 字节 evdev 格式）；树莓派要接 USB，最省事的是 xHCI + HID boot protocol 键盘鼠标。事件格式不用改，往里灌 `(type, code, value)` 就行。
+3. **输入**：`kernel/src/input.rs` + `kernel/src/usb.rs`。QEMU 是 virtio-input（事件 8 字节 evdev 格式）；树莓派没有 virtio，走 SoC 的 DWC2 主机控制器，自己跑 USB 枚举 + HID boot 协议，事件格式不变，解析完往 `inject_key / inject_move_rel` 灌。详见 `architecture.md` §37。
 4. **块设备**：`kernel/src/blk.rs` + `disk.rs`。QEMU 是 virtio-blk；树莓派是 EMMC（`0xFE34_0000`）。只要实现"读一个 512 字节扇区、写一个扇区"，上层 `disk`/`afs`/`cache` 全不用动。
 5. **中断与定时器**：`kernel/src/gic.rs` + `timer.rs`。BCM2711 带 GIC-400（`0xFF84_1000`），PPI 30 的 generic timer 与 QEMU 一致，`cntfrq_el0` 运行时读，不要写死。
 
@@ -67,7 +67,7 @@ uart_2ndstage=1
 - ✅ 页帧池按板子取址（QEMU `0x4800_0000`，树莓派 `0x3000_0000`）
 - ✅ mailbox framebuffer（property 通道 8，拿到 1024×768，读回校验一致）
 - ⬜ EMMC（SDHCI）读写扇区
-- ⬜ USB HID 键鼠
+- ⚠️ USB HID 键鼠：DWC2 主机模式、端口复位、标准枚举、HID boot 报告解析都写完了（`kernel/src/usb.rs`），QEMU 的 raspi 机器没有 DWC2 模型，所以本地只能验到"状态诚实、不崩"，真机待验
 
 注意 `screendump` 在 `-M raspi3b` 上拿到的是白屏：QEMU 6.2 不把 guest 的 framebuffer 同步到显示 surface。要看画面直接 `-display gtk` 起窗口，或者上真机接 HDMI。判断驱动是否工作用内核自检那行 `[FB] mailbox 拿到 framebuffer ... 自检读回 0x141619`。
 

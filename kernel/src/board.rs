@@ -47,6 +47,7 @@ pub struct Board {
     pub rtc: Option<u64>,
     /// VideoCore mailbox 基址（树莓派才有）
     pub mailbox: Option<u64>,
+    pub usb: Option<u64>,
     /// ARM 物理地址 → 总线地址（VC DMA 看到的地址）的偏移
     pub bus_offset: u64,
     /// 页帧池区间
@@ -72,6 +73,7 @@ pub const QEMU_VIRT: Board = Board {
     virtio_mmio: Some(0x0a00_0000),
     rtc: Some(0x0901_0000),
     mailbox: None,
+    usb: None,
     bus_offset: 0,
     pool_base: 0x4800_0000,
     pool_end: 0x5000_0000,
@@ -97,6 +99,7 @@ pub const RPI4: Board = Board {
     virtio_mmio: None,
     rtc: None,
     mailbox: Some(0xFE00_B880),
+    usb: Some(0xFE98_0000),
     bus_offset: 0xC000_0000,
     pool_base: 0x3000_0000,
     pool_end: 0x3800_0000,
@@ -119,6 +122,7 @@ pub const RPI3: Board = Board {
     virtio_mmio: None,
     rtc: None,
     mailbox: Some(0x3F00_B880),
+    usb: Some(0x3F98_0000),
     bus_offset: 0x4000_0000,
     pool_base: 0x3000_0000,
     pool_end: 0x3800_0000,

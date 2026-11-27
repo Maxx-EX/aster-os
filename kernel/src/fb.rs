@@ -518,8 +518,10 @@ pub fn rounded_rect(x: i32, y: i32, w: u32, h: u32, r: u32, color: u32) {
 
 /// 柔和投影：三层递减，只露在窗口边缘外
 pub fn drop_shadow(x: i32, y: i32, w: u32, h: u32, r: u32) {
-    for i in 0..3u32 {
-        let d = 4 + i * 4;
+    // 从外到内四层：外层半径大、透明度高，内层收紧、加深。
+    // 四层同 alpha 会在边缘留下一圈圈台阶，分层后过渡是连续的。
+    const SPEC: [(u32, u32); 4] = [(13, 5), (9, 9), (5, 14), (2, 20)];
+    for (d, a) in SPEC {
         rounded_rect_alpha(
             x - d as i32,
             y - (d / 2) as i32 + 2,
@@ -527,7 +529,7 @@ pub fn drop_shadow(x: i32, y: i32, w: u32, h: u32, r: u32) {
             h + d * 2,
             r + d,
             0x000000,
-            16,
+            a,
         );
     }
 }
@@ -1323,6 +1325,9 @@ fn draw_one(i: usize) {
     let bar = if active { WIN_BAR } else { 0x262a31 };
     rounded_rect(w.x + 1, w.y + 1, w.w - 2, TITLE_H as u32, 13, bar);
     fill_rect((w.x + 3) as u32, (w.y + 24) as u32, w.w - 6, 20, bar);
+    // 窗口上沿一道极淡高光：玻璃感来自这道边缘，不靠渐变堆出来。
+    // 两端留出圆角宽度，避免高光穿出圆角。
+    blend_rect((w.x + 16) as u32, w.y as u32, (w.w - 32) as u32, 1, 0xffffff, 12);
     // 当前工作窗口：标题栏底边一条偏蓝的细线 + 左侧 3 px 竖条（非焦点保持中性灰）
     fill_rect(
         (w.x + 1) as u32,

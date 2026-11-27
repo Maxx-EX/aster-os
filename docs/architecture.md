@@ -1075,3 +1075,77 @@ static void run() {
 4. 附带：`const/4` 只装得下 -8..7，给构造器传 10 必须用 `const/16`（占 2 个 code unit，后面所有 pc 跟着挪）。
 
 第 3 条和第 4 条都是"编码错了但格式校验不报错"，只有真的执行才会露出来。所以 fixture 每次生成都会打印反汇编，人工对照语义 —— 这一步省不得。
+
+## 37. USB：DWC2 主机模式与 HID 键鼠
+
+树莓派没有 PCI 也没有 virtio，键鼠只能挂在 SoC 自带的 USB OTG 控制器上。BCM2837 用的是 Synopsys DWC2（`dwc_otg`），BCM2711 是同一颗 IP 的另一个地址。`kernel/src/usb.rs` 自己把这条链路走完，不借用任何现有内核的 USB 栈。
+
+### 37.1 从设备模式切到主机模式
+
+上电时 DWC2 默认是设备（peripheral）身份。要当主机用，顺序不能乱：
+
+1. **核心软复位**：`GRSTCTL` 置 `CSftRst`，等它自己清零（最多 50ms）。这一步把所有 FIFO、通道、端点状态清干净，不做的话后面写 `HCCHAR` 全是未定义行为。
+2. **强制主机模式**：`GUSBCFG` 清 `FDEV`（bit30）、置 `FHMOD`（bit29），`TRDT`（bits10..13）写 9 —— PHY 收发器转向时间，48MHz 下这个值才够。
+3. **PHY 时钟**：BCM2837 给 OTG 的就是固定 48MHz，`HCFG` 选 0 即可。这一位选错会表现为"端口有连接但永远复位不完"。
+4. **端口供电**：`HPRT0` 置 `PrtPwr`。规范要求 20ms 稳定时间，之后才能判连接。
+5. **判连接**：轮询 `HPRT0.PrtConnSts`，最多 300ms。没插设备就到这儿停住，返回 `Idle`。
+
+### 37.2 判断"这个地址上到底有没有控制器"
+
+QEMU 的 raspi 机器没有给 USB 建模型，`0x3F98_0000` 读回来是别的外设的别名值。如果只靠"复位位能清掉"来判存在性，会误报成"初始化成功、端口空闲"—— 用户看到的是一个根本不存在的控制器状态。
+
+判据用两个寄存器：`GSNPSID`（0x40，控制器版本号，真芯片永远不为 0）和 `GRSTCTL`（真芯片的 AHB Idle 位恒为 1）。两者都读回 0 才认定"这里没东西"，直接返回 `NoResponse` 并把地址打出来。这比猜更诚实：`usb` 命令会明说"QEMU 没建模型，真机上这个地址是真的"。
+
+### 37.3 控制传输：手写 SETUP / IN / 状态三阶段
+
+DWC2 不做 DMA 也能跑，全走 FIFO 模式，省掉地址映射和一致性问题。一次 `control()` 的流程：
+
+| 阶段 | 动作 |
+| --- | --- |
+| SETUP | `HCTSIZ` = XFERSIZ 8 / PKTCNT 1 / PID=SETUP；`HCCHAR` = 控制端点 0 + ChEna + ChMPS；8 字节 setup 分两个 32 位手写进 `DFIFO0` |
+| IN | 清通道 → `HCTSIZ` = 长度 / PKTCNT 1 / PID=DATA1 → `HCCHAR` 置 `ChDir` → 等 `HCINT.ChXferCompl` → 按字从 `DFIFO0` 读回 |
+| 状态 | 零长 OUT，PID=DATA1，只等握手；失败不影响数据已经拿到 |
+
+三个易错点：`PKTCNT` 在 bit19（不是 bit29），`PID` 在 bit29；`HCTSIZ` 的 PID 字段是"下一次要发的令牌"，不是刚发过的；`HCINT` 全部是写 1 清零，读改写会把别人的中断一起清掉。
+
+### 37.4 枚举
+
+拿到的设备直接走标准流程，地址固定分配 1：
+
+- `GET_DESCRIPTOR(device, 18)` → VID / PID / `bDeviceClass`
+- `SET_ADDRESS(1)` + 3ms 恢复等待
+- `GET_DESCRIPTOR(config, 9)` 读 `wTotalLength`，再按这个长度读全量
+- 逐条走描述符链：接口描述符里 `bInterfaceClass == 0x03` 的就是 HID，紧跟其后的端点描述符里 `bmAttributes & 3 == 3`（中断）且方向 IN 的，就是报告端点
+- `SET_CONFIGURATION(1)`
+- 类请求：`SET_PROTOCOL(boot, 1)` + `SET_IDLE(0)`，失败不致命（有些设备不实现）
+
+### 37.5 HID boot 报告
+
+只做 boot 协议，不做 report descriptor 解释 —— 这是覆盖率和代码量的最优解，市面上键鼠 99% 支持 boot 模式。
+
+- 键盘 8 字节：`[modifier, 保留, key0..key5]`。按下/抬起靠"这一帧和上一帧的差集"算：上一帧有、这一帧没有 = 抬起；反之 = 按下。modifier 单独比对四个位（LCtrl/LShift/LAlt/LGui）。
+- 鼠标 4 字节：`[按键位, dx, dy, wheel]`，位移是 `i8` 相对量。
+
+键码要转成 Linux input event code（`input.rs` 的事件格式从 virtio 那会儿就定了，不因为换了通道而改）。`HID2LINUX` 是一张 67 项的查表：a..z、1..0、Enter/Esc/Backspace/Tab/Space、标点、F1..F11、小键盘。表外一律丢弃。
+
+注入走 `input::inject_key(code, down)` / `inject_move_rel(dx, dy)` / `inject_btn_any(idx, down)`。位移用相对量是因为真实鼠标只报相对量；`sim` 的 `inject_move_to` 是绝对坐标，两者共存，走的都是同一个 `mouse_event()` 状态机，所以置顶、拖拽、开窗逻辑完全一致。
+
+### 37.6 验证边界（必须说清楚）
+
+QEMU 的 raspi3b 没有 DWC2 模型，所以**这一层在本地只能验到"不崩、状态诚实"**：
+
+- QEMU virt：`usb` 打印"这块板子没有 DWC2 控制器"（`board.usb == None`）
+- QEMU raspi3b：走完复位流程，`HPRT0` 没有 `PrtConnSts`，状态落到 `Idle`，`usb` 显示"端口 空闲 未使能"，`usb poll` 返回 0 事件
+- 真机（RPi3B/4B + 键鼠）：`Ready` + VID/PID + HID 端点，尚未验证
+
+未接的缺口：报告轮询还没挂到定时器/中断（现在要手动 `usb poll`）；只支持 boot 协议；滚轮没接；热插拔（拔出后 `PrtConnSts` 掉）没有重新枚举；低速/全速以外的速度没处理。
+
+## 38. UI 微调（阴影分层与边缘高光）
+
+这一轮只做了三处，都在 `fb.rs`：
+
+1. **阴影从"四层同 alpha"改成"外层大半径淡、内层小半径深"**：`SPEC = [(13,5),(9,9),(5,14),(2,20)]`。原来的写法四层都是 alpha 16，叠加后在边缘留下四道可见台阶；分层后过渡连续，窗口看起来是真的浮起来的。
+2. **窗口上沿一道 1px、alpha 12 的白光**，两端各留 16px 避开圆角。玻璃感靠这道边缘，不靠大面积渐变堆。
+3. **侧栏 hover 底色 alpha 26 → 32**，在 `#212328` 窗底上更容易和选中态的 accent pill 区分。
+
+跳过的四项（连字、字重区分、平滑滚动、输入区微亮底色）仍然跳过，理由没变：在 8×16 固定点阵上做这些只会变糊。
