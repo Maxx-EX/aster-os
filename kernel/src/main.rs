@@ -26,6 +26,7 @@ mod afs;
 mod vfs;
 mod zip;
 mod inflate;
+mod dex;
 mod net;
 mod rtc;
 mod sched;

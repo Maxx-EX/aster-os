@@ -19,6 +19,12 @@
 
 `apk` 列目录、取 `classes.dex` 头、校验二进制 XML；`apk2` 走 DEFLATE 解压（stored / 固定 Huffman / 动态 Huffman 三条路径 + LZ77 回拷），`assets/demo2.apk` 里 6036 字节的 dex 压到 153 字节，解回来长度与 FNV-1a 指纹都对得上。
 
+## 跑一个 APK
+
+`dex` 打印 DEX 结构（字符串、类型、方法、类，带 adler32 校验）；`dex run` 真正执行 `Lcom/aster/Main;->run()`：const-string 取字符串、invoke-static 桥接到内核打印、return-void 收尾。
+
+样例 DEX 不是 dx/d8 产物，是 `tools/mkdex.py` 按规范手拼的 536 字节文件（header / map_list / ids / class_defs / data 全手写，checksum 与 sha1 最后回填）。
+
 ## 开机动画
 
 冷启动后先播 2.4s 的星芒动画：六个尖依次从黑场里长出来（尖端跟一个光点），缓转，字标淡入上浮，最后六瓣各自散开、画面融到桌面色 —— 全程无外部素材，用内核自带的光栅原语逐像素画。

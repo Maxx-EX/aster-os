@@ -388,6 +388,7 @@ fn cmd_help() {
     println!("  file      用 fd 系统调用读 /motd（EL0 + openat/read/close）");
     println!("  apk       读内置示例 APK：zip 目录 / classes.dex 头 / 二进制 XML");
     println!("  apk2      deflate 混合包：apk2 dex / apk2 cat <条目>（走 inflate）");
+    println!("  dex       DEX 头/结构；dex run 执行 Main->run()V（非零 opcode 解释器）");
     println!("  bootanim  重播开机动画（2.4s）");
     println!("  bootframe <ms>  把动画某一时刻静态画出来（取证用）");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
@@ -517,6 +518,10 @@ pub fn run() -> ! {
             println!("  已画到第 {} ms 并停在屏幕上", ms);
             continue;
         }
+        if let Some(a) = line.strip_prefix("dex ") {
+            cmd_dex(a);
+            continue;
+        }
         if let Some(a) = line.strip_prefix("apk2 ") {
             cmd_apk2(a);
             continue;
@@ -578,6 +583,7 @@ pub fn run() -> ! {
             "vfw" => cmd_vfw(),
             "apk" => cmd_apk(""),
             "apk2" => cmd_apk2(""),
+            "dex" => cmd_dex(""),
             "bootanim" => crate::bootanim::play(),
             "file" => match crate::task::run_file() {
                 Ok(code) => println!("[VFS] 任务结束，退出码 {}", code),
@@ -685,6 +691,7 @@ fn cmd_net() {
 
 static DEMO_APK: &[u8] = include_bytes!("../../assets/demo.apk");
 static DEMO2_APK: &[u8] = include_bytes!("../../assets/demo2.apk");
+static DEMO3_APK: &[u8] = include_bytes!("../../assets/demo3.apk");
 /// inflate 的输出缓冲。APK 里的 dex 通常几百 KB，这里给 128 KiB；
 /// 超出会明确报"输出超出缓冲"，不会越界写。
 static mut INFL_BUF: [u8; 131072] = [0; 131072];
@@ -697,6 +704,34 @@ fn fnv1a64(data: &[u8]) -> u64 {
         h = h.wrapping_mul(0x1_0000_0001_b3);
     }
     h
+}
+
+fn cmd_dex(a: &str) {
+    let t = a.trim();
+    let buf = unsafe { &mut INFL_BUF[..] };
+    let n = match crate::zip::extract(DEMO3_APK, "classes.dex", buf) {
+        Ok(n) => n,
+        Err(e) => {
+            println!("  {}", e);
+            return;
+        }
+    };
+    let d = &buf[..n];
+    if t == "run" {
+        match crate::dex::header(d) {
+            Ok(h) => match crate::dex::run(d, &h, "Lcom/aster/Main;", "run") {
+                Ok(steps) => println!("  run() 执行完（{} 条指令），正常 return-void", steps),
+                Err(e) => println!("  {}", e),
+            },
+            Err(e) => println!("  {}", e),
+        }
+    } else {
+        match crate::dex::dump(d) {
+            Ok(_) => {}
+            Err(e) => println!("  {}", e),
+        }
+        println!("  → dex run：执行 Main->run()V");
+    }
 }
 
 fn cmd_apk2(a: &str) {

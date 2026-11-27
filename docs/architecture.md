@@ -983,3 +983,34 @@ LZ77 回拷就是逐字节 `dst[out] = dst[out - dist]`，天然处理 dist < le
 复查中改掉一个真问题：`zip::extract` 的 stored 分支原来用 `min(out.len())` 静默截断 —— `apk cat` 拿 512 字节缓冲去读 6 KB 的 dex 会"成功返回"半个文件。现在改成超过缓冲直接报错。`apk2` 列表里解压失败原来显示 `→ 0`，改成打错误信息或"与原始大小不符"，免得把失败伪装成正常。
 
 一处已知但暂不修的：VFS 句柄表仍是全局一份，不是每任务一份。现在只有一个 shell 持有句柄，等进程模型落地再改成 per-task。
+
+## 35. DEX 解析与最小解释器（APK-3）
+
+能解压出 `classes.dex` 只是把文件搬出来了。这一节是第一次真正"跑" APK：内核读 DEX 结构，执行一个方法，让 APK 里的字符串出现在 Aster 的终端里。
+
+**结构遍历**（`kernel/src/dex.rs`）：header（魔数 / 版本 / file_size / endian_tag / adler32 checksum）→ `string_ids`（每项指向 string_data，uleb128 长度 + 0x00 结尾）→ `type_ids`（描述符索引）→ `proto_ids`（shorty / 返回类型 / 参数表）→ `method_ids`（class_idx / proto_idx / name_idx）→ `class_defs`（找 class_data_off）→ class_data（static/instance fields 跳过，direct methods 的 method_idx_diff 累加）→ code_item（registers_size / insns）。
+
+**解释器**只认六个 opcode，但足够跑通一条完整链路：
+
+| opcode | 语义 |
+|--------|------|
+| 0x00 nop | 跳过 |
+| 0x12 const/4 | 4 位字面量入寄存器（含符号扩展） |
+| 0x13 const/16 | 16 位字面量 |
+| 0x1a const-string | 寄存器里存字符串索引，用时才解引用 |
+| 0x71 invoke-static | 35c 格式，按 C/D/E/F/G 取参数寄存器；只桥接 `Lcom/aster/Log;->i(String)` 到内核 `println` |
+| 0x0e return-void | 结束，返回已执行指令数 |
+
+不认识的方法和 opcode 都打印出来并返回错误，不会"假装执行成功"。
+
+**DEX 是自己拼的，不是 dx/d8 产物**（`tools/mkdex.py`）：按格式规范逐段写 header / map_list / ids / class_defs / data（string_data、type_list、class_data、code_item），最后回填 sha1 与 adler32。536 字节，任何校验器都能过。写进 `classes.dex` 的字节码就是三条：
+
+```
+const-string v0, "Hello from Aster, this string lives in a real DEX"
+invoke-static {v0}, Lcom/aster/Log;->i(Ljava/lang/String;)V
+return-void
+```
+
+**取证**：`dex` 打印结构（8 字符串 / 4 类型 / 2 原型 / 2 方法 / 1 类，checksum PASS）；`dex run` 打印那段字符串并报"2 条指令，正常 return-void"。已加进 `make test` 作为第 7 项断言。
+
+到这一步，`APK → deflate 解压 → DEX 结构 → 字节码执行 → 内核输出` 整条链路是通的。剩下的解释器工作（算术、分支、字段、对象、`new-instance`、异常）是在这套骨架上加 opcode，不是重做。
