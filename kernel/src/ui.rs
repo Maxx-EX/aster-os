@@ -71,7 +71,7 @@ fn handle_mouse() -> bool {
                     2 => 2,
                     _ => 1,
                 };
-                fb::raise(which);
+                fb::show_win(which);
                 want = true;
                 continue;
             }

@@ -85,6 +85,9 @@
 | UI-6 | **鼠标** | ✅ | virtio-mouse（DeviceID 18 第二实例，EV_REL + EV_KEY），16×16 光标图层（存底-贴图-还原，移动不重绘桌面），点击环形队列，拖拽标题栏 |
 | UI-7 | **窗口管理** | ✅ | 拖拽标题栏 + 脏矩形（静态层缓存 3 MiB，拖动只擦并集区域）；三窗口（终端/系统/网络）、Z 序、焦点、每窗口独立拖拽、侧栏开窗 |
 | UI-9 | 时钟与权限提示 | ✅ | RTC(PL031) 读 UTC+8 显示到分钟、横幅一行化、提示符按 Extreme 权限在 `$`/`#` 切换 |
+| BOARD-1 | 板级描述表 | ✅ | `kernel/src/board.rs` 收录 QEMU virt 与 RPi4，feature 选中；`make BOARD=rpi4 image` 可编译 |
+| BOARD-2 | 树莓派真机驱动 | 🔄 | mailbox framebuffer / xHCI HID / EMMC 三件，移植指南见 `docs/porting.md` |
+| UI-9 | 交互可测 | ✅ | `sim move/click/drag` 内核内注入，与真实事件同一状态机；拖拽、置顶、侧栏开窗均已实拍验证 |
 | UI-8 | 过渡与反馈 | ✅ 部分 | 窗口淡入淡出（alpha 逐帧）、悬停变亮、按钮按下态、光标闪烁、托盘图标动效 |
 
 **验收**

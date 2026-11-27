@@ -17,6 +17,7 @@ mod gic;
 mod input;
 mod mmu;
 mod blk;
+mod board;
 mod disk;
 mod cache;
 mod afs;
@@ -188,6 +189,14 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
 
     frame::init();
     timer::mark_boot();
+
+    println!(
+        "[KERNEL] 板级 {}  加载 {:#x}  内核 {:#x}  AVP={}",
+        board::ACTIVE.name,
+        board::ACTIVE.boot_load,
+        board::ACTIVE.kernel_load,
+        if board::ACTIVE.has_avp { "有" } else { "无" }
+    );
 
     if fb::init() {
         println!("[KERNEL] 图形输出已就绪：ramfb {}x{} XRGB8888 @ {:#x}", fb::width(), fb::height(), fb::base_addr());

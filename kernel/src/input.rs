@@ -468,3 +468,19 @@ pub fn take_click() -> Option<(i32, i32, bool)> {
         Some(e)
     }
 }
+
+// —— 调试注入 ——
+// 事件与真实设备走同一个 `mouse_event()` 状态机，因此能真实驱动置顶/拖拽/开窗逻辑。
+// 用途：无显示环境下对 UI 交互做自动化回归（`sim` 命令）。
+
+pub fn inject_move_to(x: i32, y: i32) {
+    unsafe {
+        MX = x.clamp(0, 1023);
+        MY = y.clamp(0, 767);
+    }
+    crate::cursor::invalidate();
+}
+
+pub fn inject_btn(down: bool) {
+    mouse_event(EV_KEY, BTN_LEFT, if down { 1 } else { 0 });
+}

@@ -107,6 +107,64 @@ fn cmd_peek(a: &str) {
     }
 }
 
+fn wait_ms(ms: u64) {
+    let t0 = crate::timer::now_ms();
+    while crate::timer::now_ms().saturating_sub(t0) < ms {
+        core::hint::spin_loop();
+    }
+}
+
+/// 内核内鼠标注入：与真实事件同一个状态机，用于无显示环境下的交互回归
+fn cmd_sim(a: &str) {
+    let mut it = a.split_whitespace();
+    let op = it.next().unwrap_or("");
+    let n = |s: Option<&str>| s.and_then(|v| v.parse::<i32>().ok());
+    match op {
+        "move" => match (n(it.next()), n(it.next())) {
+            (Some(x), Some(y)) => {
+                crate::input::inject_move_to(x, y);
+                crate::ui::tick();
+                println!("  [SIM] 光标 ({}, {})", x, y);
+            }
+            _ => println!("  用法: sim move x y"),
+        },
+        "click" => match (n(it.next()), n(it.next())) {
+            (Some(x), Some(y)) => {
+                crate::input::inject_move_to(x, y);
+                crate::ui::tick();
+                wait_ms(90);
+                crate::input::inject_btn(true);
+                crate::ui::tick();
+                wait_ms(90);
+                crate::input::inject_btn(false);
+                crate::ui::tick();
+                println!("  [SIM] 点击 ({}, {})", x, y);
+            }
+            _ => println!("  用法: sim click x y"),
+        },
+        "drag" => match (n(it.next()), n(it.next()), n(it.next()), n(it.next())) {
+            (Some(x1), Some(y1), Some(x2), Some(y2)) => {
+                crate::input::inject_move_to(x1, y1);
+                crate::ui::tick();
+                wait_ms(90);
+                crate::input::inject_btn(true);
+                crate::ui::tick();
+                wait_ms(120);
+                for i in 1..=6 {
+                    crate::input::inject_move_to(x1 + (x2 - x1) * i / 6, y1 + (y2 - y1) * i / 6);
+                    crate::ui::tick();
+                    wait_ms(90);
+                }
+                crate::input::inject_btn(false);
+                crate::ui::tick();
+                println!("  [SIM] 拖拽 ({},{}) -> ({},{})", x1, y1, x2, y2);
+            }
+            _ => println!("  用法: sim drag x1 y1 x2 y2"),
+        },
+        _ => println!("  用法: sim move x y | sim click x y | sim drag x1 y1 x2 y2"),
+    }
+}
+
 fn cmd_poke(a: &str) {
     if !unsafe { EXTREME } {
         println!("  需要 Extreme 权限：先输入 ex");
@@ -441,10 +499,30 @@ pub fn run() -> ! {
             cmd_wr(a);
             continue;
         }
+        if let Some(a) = line.strip_prefix("sim ") {
+            cmd_sim(a);
+            continue;
+        }
 
         match line {
             "help" | "?" => cmd_help(),
             "disk" => cmd_disk(),
+            "sim" => cmd_sim(""),
+            "win on 1" | "win on 2" | "win on 0" => {
+                let i = (line.as_bytes()[7] - b'0') as usize;
+                crate::fb::show_win(i);
+                println!("  [WIN] {} 打开并置顶", i);
+            }
+            "win off 0" | "win off 1" | "win off 2" => {
+                let i = (line.as_bytes()[8] - b'0') as usize;
+                crate::fb::close_win(i);
+                println!("  [WIN] {} 关闭", i);
+            }
+            "wins" => {
+                for (n, x, y, w, h, o) in crate::fb::dump_wins() {
+                    println!("  {} ({},{}) {}x{} open={}", n, x, y, w, h, o);
+                }
+            }
             "fmt" => cmd_fmt(),
             "mkfs" => cmd_mkfs(),
             "ls" => cmd_ls(),

@@ -977,7 +977,7 @@ pub fn draw_sidebar() {
             rounded_rect_alpha(SIDE_X as i32, y as i32, TILE, TILE, 12, 0xffffff, 26);
         }
         let fg = if active {
-            ACCENT
+            TEXT
         } else if hover {
             TEXT
         } else {
@@ -1230,6 +1230,25 @@ pub fn move_window(i: usize, nx: i32, ny: i32) {
     draw_sidebar();
     draw_all();
     crate::cursor::invalidate();
+}
+
+/// 调试：打印三个窗口的状态
+pub fn dump_wins() -> [(&'static str, i32, i32, u32, u32, bool); 3] {
+    unsafe {
+        [
+            ("终端", WINS[0].x, WINS[0].y, WINS[0].w, WINS[0].h, WINS[0].open),
+            ("系统", WINS[1].x, WINS[1].y, WINS[1].w, WINS[1].h, WINS[1].open),
+            ("网络", WINS[2].x, WINS[2].y, WINS[2].w, WINS[2].h, WINS[2].open),
+        ]
+    }
+}
+
+/// 侧栏点击语义：该窗口没开就打开，已开就只抬到最上层（不切换关闭）
+pub fn show_win(i: usize) {
+    unsafe {
+        WINS[i].open = true;
+    }
+    raise(i);
 }
 
 pub fn draw_all() {
