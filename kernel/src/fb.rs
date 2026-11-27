@@ -1104,7 +1104,7 @@ pub fn cache_wall(ex3_short: &str) {
     fill_rect(0, 36, W, 1, 0x26292f);
     let mut hx = draw_text_ui(16, 10, "Aster", TEXT) + 10;
     hx = draw_text_ui(hx, 10, "星芒", TEXT2) + 14;
-    draw_text_ui(hx, 11, "v0.6  ARM64", DIM);
+    draw_text_ui(hx, 11, "v0.8  ARM64", DIM);
     let right = text_len_ui("EX3 ") + text_len_ui(ex3_short);
     draw_text_ui(W - right - 16, 11, "EX3 ", DIM);
     draw_text_ui(W - text_len_ui(ex3_short) - 16, 11, ex3_short, OK);
@@ -1390,7 +1390,7 @@ fn draw_sys_body(w: Win) {
     let mut y = (w.y + TITLE_H as i32 + 18) as u32;
     let (tasks, kernel_kb) = unsafe { (LAST_TASKS, LAST_KB) };
     let (used_pages, _t, _) = crate::frame::stats();
-    kv(x, y, "版本", "Aster 0.7  ARM64", TEXT);
+    kv(x, y, "版本", "Aster 0.8  ARM64", TEXT);
     y += 26;
     let kb_b = num_str(kernel_kb);
     kv(x, y, "内核", s_of(&kb_b), TEXT);

@@ -85,29 +85,52 @@ fn tri(ax: i32, ay: i32, bx: i32, by: i32, cx: i32, cy: i32, color: u32, a: u32)
     }
 }
 
-/// 单根光针：根部在中心，尖端在 r，中段略宽、尖端极细
-fn blade(cx: i32, cy: i32, ang: i32, r: i32, color: u32, a: u32) {
+/// 一段花瓣：沿半径 r0→r1，半宽从 w0 收到 w1
+fn seg(cx: i32, cy: i32, ang: i32, r0: i32, r1: i32, w0: i32, w1: i32, color: u32, a: u32) {
+    if a == 0 || r1 <= r0 {
+        return;
+    }
     let c = cos_deg(ang);
     let s = sin_deg(ang);
     let nx = -s;
     let ny = c;
-    let w_tip = (r / 34).max(1);
-    let w_mid = (r / 13).max(2);
-    let tipx = cx + r * c / 1000;
-    let tipy = cy + r * s / 1000;
-    let mx = cx + r * 55 / 100 * c / 1000;
-    let my = cy + r * 55 / 100 * s / 1000;
-    let t1x = tipx + w_tip * nx / 1000;
-    let t1y = tipy + w_tip * ny / 1000;
-    let t2x = tipx - w_tip * nx / 1000;
-    let t2y = tipy - w_tip * ny / 1000;
-    let m1x = mx + w_mid * nx / 1000;
-    let m1y = my + w_mid * ny / 1000;
-    let m2x = mx - w_mid * nx / 1000;
-    let m2y = my - w_mid * ny / 1000;
-    tri(cx, cy, m1x, m1y, t1x, t1y, color, a);
-    tri(cx, cy, t1x, t1y, t2x, t2y, color, a);
-    tri(cx, cy, t2x, t2y, m2x, m2y, color, a);
+    let ax = cx + r0 * c / 1000;
+    let ay = cy + r0 * s / 1000;
+    let bx = cx + r1 * c / 1000;
+    let by = cy + r1 * s / 1000;
+    let a1x = ax + w0 * nx / 1000;
+    let a1y = ay + w0 * ny / 1000;
+    let a2x = ax - w0 * nx / 1000;
+    let a2y = ay - w0 * ny / 1000;
+    let b1x = bx + w1 * nx / 1000;
+    let b1y = by + w1 * ny / 1000;
+    let b2x = bx - w1 * nx / 1000;
+    let b2y = by - w1 * ny / 1000;
+    tri(a1x, a1y, b1x, b1y, b2x, b2y, color, a);
+    tri(a1x, a1y, b2x, b2y, a2x, a2y, color, a);
+}
+
+/// 一层瓣：从 r0 到 r1，宽度沿半径连续收窄，按半径切段绘制避免长条填充误差
+fn layer(cx: i32, cy: i32, ang: i32, r0: i32, r1: i32, wmid: i32, color: u32, a: u32) {
+    let len = r1 - r0;
+    if len <= 2 || a == 0 {
+        return;
+    }
+    let w0 = wmid.max(1);
+    let w1 = (wmid / 6).max(1);
+    seg(cx, cy, ang, r0, r1, w0, w1, color, a);
+}
+
+/// 一根完整的尖：宽光晕 + 主色 + 细亮芯，三层叠加出边缘柔和、中心发亮的效果
+fn blade_at(cx: i32, cy: i32, ang: i32, r0: i32, r1: i32, k: u32) {
+    let len = r1 - r0;
+    if len <= 2 || k == 0 {
+        return;
+    }
+    let wb = (len / 11).max(4);
+    layer(cx, cy, ang, r0, r1, wb * 2, 0x4f7ec0, (52 * k) / 255);
+    layer(cx, cy, ang, r0, r1, wb, fb::ACCENT, (150 * k) / 255);
+    layer(cx, cy, ang, r0, r1, (wb / 2).max(1), 0xdaeaff, (80 * k) / 255);
 }
 
 fn grad(top: u32, bot: u32, y: i32, y0: i32, h: i32) -> u32 {
@@ -133,24 +156,26 @@ fn frame(el: i32, w: u32, h: u32, cx: i32, cy: i32, bs: i32) {
         grad(0x080b10, 0x121419, by, by, bs),
         grad(0x080b10, 0x121419, by + bs, by, bs),
     );
-    // 只留贴身的一小团光雾：大半径同心圆会有可见台阶，反而掉质感
-    fb::circle(cx, cy, 64, 0x456fb0, 7);
-    fb::circle(cx, cy, 40, 0x5a86c8, 12);
+    // 贴身一小团光雾，随动画轻微呼吸
+    let pulse = sin_deg(el * 180 / 2400) + 1000;
+    let pa = (6 + pulse * 5 / 2000) as u32;
+    fb::circle(cx, cy, 64, 0x456fb0, pa);
+    fb::circle(cx, cy, 40, 0x5a86c8, pa + 6);
 
-    // 六个尖依次生长
+    // 六个尖依次生长；生长中尖端带一个光点当"笔尖"，长完后光点收掉
     let mut k = 0;
     while k < 6 {
-        let t_k = ((el - 200 - k * 90).clamp(0, 640) as i32) * 1000 / 640;
-        if t_k > 0 {
+        let t_k = ((el - 200 - k * 90).clamp(0, 660) as i32) * 1000 / 660;
+        if t_k > 0 && el < 2100 {
             let ease = 1000 - (1000 - t_k) * (1000 - t_k) / 1000;
             let rk = 6 + 126 * ease / 1000;
             let ang = k * 60 + el * 22 / 1000;
-            blade(cx, cy, ang, rk * 108 / 100, 0x6f9cf0, 55);
-            blade(cx, cy, ang, rk, fb::ACCENT, 178);
-            blade(cx, cy, ang, rk, 0xdceaff, 42);
-            // 尖端一小段提亮，让"光"有方向
-            if rk > 40 {
-                blade(cx, cy, ang, rk, 0xf4f8ff, 46);
+            blade_at(cx, cy, ang, 0, rk, 255);
+            if t_k < 950 && rk > 10 {
+                let tipx = cx + rk * cos_deg(ang) / 1000;
+                let tipy = cy + rk * sin_deg(ang) / 1000;
+                fb::circle(tipx, tipy, 5, 0x9dc0ff, 46);
+                fb::circle(tipx, tipy, 2, 0xffffff, 215);
             }
         }
         k += 1;
@@ -162,15 +187,23 @@ fn frame(el: i32, w: u32, h: u32, cx: i32, cy: i32, bs: i32) {
     fb::circle(cx, cy, (core + 10) as u32, 0xcfdfff, 105);
     fb::circle(cx, cy, core as u32, 0xffffff, 245);
 
-    // 散开
+    // 最后 200ms 让背景逐渐融到桌面色，切换时不硬跳
+    if el > 2200 {
+        let fa = ((el - 2200).clamp(0, 200) * 200 / 200) as u32;
+        fb::blend_rect(0, 0, w, h, 0x1a1d22, fa);
+    }
+
+    // 收尾：六瓣各自沿自己的方向抽出去，同时缩短、淡出 —— 比整体放大更像"散开"
     if el > 2100 {
-        let s = (el - 2100).clamp(0, 240) as i32 * 1000 / 240;
-        let r2 = 132 + 150 * s / 1000;
-        let a2 = (175 - 175 * s / 1000) as u32;
-        if a2 > 3 {
+        let s = (el - 2100).clamp(0, 300) as i32 * 1000 / 300;
+        let travel = 210 * s / 1000;
+        let len = 132 * (1000 - s) / 1000;
+        let k_a = 255 - 255 * s / 1000;
+        if k_a > 3 && len > 2 {
             let mut k = 0;
             while k < 6 {
-                blade(cx, cy, k * 60 + el * 22 / 1000, r2, fb::ACCENT, a2);
+                let ang = k * 60 + el * 22 / 1000;
+                blade_at(cx, cy, ang, travel, travel + len, k_a as u32);
                 k += 1;
             }
         }
@@ -180,7 +213,8 @@ fn frame(el: i32, w: u32, h: u32, cx: i32, cy: i32, bs: i32) {
     let t_a1 = ((el - 1600).clamp(0, 360) as i32 * 255 / 360) as u32;
     let t_a2 = ((el - 1820).clamp(0, 360) as i32 * 255 / 360) as u32;
     if t_a1 > 3 {
-        let ty = (h as i32 - 150) as u32;
+        let up = (8 * (255 - t_a1) / 255) as i32;
+        let ty = (h as i32 - 150 + up) as u32;
         let bg1 = grad(0x080b10, 0x121419, ty as i32, 0, h as i32);
         let name = "Aster";
         let tw = fb::text_len(name, 2);

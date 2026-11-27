@@ -66,9 +66,9 @@ fn banner() {
     println!();
     match crate::rtc::local() {
         Some((y, mo, d, h, mi, _s)) => {
-            println!("  Aster 0.6   ARM64   {:04}-{:02}-{:02} {:02}:{:02} CST", y, mo, d, h, mi)
+            println!("  Aster 0.8   ARM64   {:04}-{:02}-{:02} {:02}:{:02} CST", y, mo, d, h, mi)
         }
-        None => println!("  Aster 0.6   ARM64"),
+        None => println!("  Aster 0.8   ARM64"),
     }
 }
 
@@ -221,7 +221,8 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
         boot_trusted: info.trusted == 1,
     });
 
-    fb::cache_wall(&ex3::EX3_TAG[..13]);
+    let tag = ex3::EX3_TAG;
+    fb::cache_wall(&tag[tag.len().saturating_sub(8)..]);
     shell::render_dashboard();
     shell::run()
 }
