@@ -45,11 +45,23 @@ fn handle_mouse() -> bool {
     }
     let mut want = false;
 
+    // 侧栏悬停：鼠标停在哪一项，就把哪一项的背景点亮
+    let (mx, my) = input::mouse_pos();
+    if fb::set_side_hover(fb::sidebar_item_at(mx, my)) {
+        want = true;
+    }
+
     while let Some((x, y, pressed)) = input::take_click() {
         if pressed {
+            // 点侧栏 → 切换选中项
+            if let Some(i) = fb::sidebar_item_at(x, y) {
+                fb::set_side_active(i);
+                want = true;
+                continue;
+            }
             let (wx, wy) = fb::win_pos();
             // 点在标题栏（不用拖边框，整条都能拖）
-            if x >= wx && x < wx + 840 && y >= wy && y < wy + TITLE_H {
+            if x >= wx && x < wx + 748 && y >= wy && y < wy + TITLE_H {
                 unsafe {
                     DRAGGING = true;
                     OFF_X = x - wx;
@@ -64,8 +76,8 @@ fn handle_mouse() -> bool {
     if unsafe { DRAGGING } {
         let (mx, my) = input::mouse_pos();
         let (wx, wy) = fb::win_pos();
-        let nx = (mx - unsafe { OFF_X }).clamp(-560, 980);
-        let ny = (my - unsafe { OFF_Y }).clamp(34, 660);
+        let nx = (mx - unsafe { OFF_X }).clamp(-360, 268);
+        let ny = (my - unsafe { OFF_Y }).clamp(40, 212);
         if nx != wx || ny != wy {
             // 只重绘窗口扫过的那块，不整屏重画
             fb::move_window_to(nx, ny);

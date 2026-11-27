@@ -10,7 +10,6 @@
 //! inode 64 B：type / mode / size / parent / mtime / 10 个直接块指针
 //! 目录项 32 B：名字 24 B / inode / 类型
 
-use crate::blk;
 use crate::disk;
 
 pub const BS: usize = 4096;
@@ -109,31 +108,29 @@ fn base() -> Option<u64> {
 }
 
 fn rd(b: u32, out: &mut [u8; BS]) -> bool {
-    let b0 = match base() {
-        Some(x) => x,
-        None => return false,
-    };
-    let lba = b0 + b as u64 * SPB;
-    for i in 0..SPB as usize {
-        if !blk::read(lba + i as u64, &mut out[i * SEC..(i + 1) * SEC]) {
-            return false;
+    match crate::cache::get(b) {
+        Some(s) => {
+            out.copy_from_slice(s);
+            true
         }
+        None => false,
     }
-    true
 }
 
 fn wr(b: u32, inp: &[u8; BS]) -> bool {
-    let b0 = match base() {
-        Some(x) => x,
-        None => return false,
-    };
-    let lba = b0 + b as u64 * SPB;
-    for i in 0..SPB as usize {
-        if !blk::write(lba + i as u64, &inp[i * SEC..(i + 1) * SEC]) {
-            return false;
+    match crate::cache::get(b) {
+        Some(s) => {
+            s.copy_from_slice(inp);
+            crate::cache::mark_dirty(b);
+            true
         }
+        None => false,
     }
-    true
+}
+
+/// 把缓存里的脏块写回磁盘
+pub fn sync() -> u32 {
+    crate::cache::flush()
 }
 
 fn zero(x: &mut [u8; BS]) {
@@ -539,6 +536,8 @@ pub fn stat() -> Option<Stat> {
 }
 
 pub fn format(name: &str) -> bool {
+    crate::cache::invalidate();
+    crate::cache::reset_base();
     let info = match disk::probe() {
         Some(i) => i,
         None => return false,
@@ -631,5 +630,6 @@ pub fn format(name: &str) -> bool {
             return false;
         }
     }
+    crate::cache::flush();
     true
 }

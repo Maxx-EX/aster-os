@@ -260,9 +260,25 @@ fn cmd_wr(a: &str) {
         None => (t, ""),
     };
     match crate::afs::write_file(name, text.as_bytes()) {
-        Ok(n) => println!("  {}  {} 字节", name, n),
+        Ok(n) => {
+            crate::afs::sync();
+            println!("  {}  {} 字节", name, n);
+        }
         Err(e) => println!("  {}", e),
     }
+}
+
+fn cmd_cache() {
+    let (h, m, used, dirty) = crate::cache::stats();
+    let total = h + m;
+    let pct = if total == 0 { 0 } else { (h * 100) / total };
+    println!("  块缓存  8 槽 / 用 {} / 脏 {}", used, dirty);
+    println!("  命中 {}/{}  = {}%   写回 {} 块", h, total, pct, crate::cache::writes());
+}
+
+fn cmd_sync() {
+    let n = crate::afs::sync();
+    println!("  写回 {} 个脏块", n);
 }
 
 fn cmd_df() {
@@ -302,6 +318,8 @@ fn cmd_help() {
     println!("  cat <文件> 显示文件内容");
     println!("  wr <文件> <内容>  写入文件（覆盖或新建）");
     println!("  df        文件系统用量");
+    println!("  cache     块缓存命中率");
+    println!("  sync      强制写回脏块");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
     println!("  ex off    关闭 Extreme 权限");
     println!("  peek A    读 8 字节（仅 Extreme）");
@@ -428,6 +446,8 @@ pub fn run() -> ! {
             "cat" => cmd_cat(""),
             "wr" => cmd_wr(""),
             "df" => cmd_df(),
+            "cache" => cmd_cache(),
+            "sync" => cmd_sync(),
             "info" => cmd_info(),
             "ex3" => cmd_ex3(),
             "hash" => cmd_hash(),

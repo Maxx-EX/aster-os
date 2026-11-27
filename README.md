@@ -38,6 +38,7 @@
 | **GICv2 + PPI 30** 中断通路 | 通过 | `run` 的切换计数随运行时长增长 |
 | **Extreme 权限**（等同安卓 root：`ex` 开启，`peek/poke` 读写内核 RAM） | 通过 | 提示符 `$`→`#`，`peek 0x40200000` 读到内核首条指令 |
 | **AsterDisk 磁盘格式** + virtio-blk 驱动 | 通过 | `make run-disk` 后 `fmt` 格式化，重启 `disk` 回读 CRC 一致 |
+| **界面视觉体系**：JetBrains Mono + Inter 双层字体、中性色板、线性图标、悬停/选中态 | 通过 | 截图；`make test-gfx` 断言颜色与布局 |
 | **AsterFS v0 文件系统**：`mkfs / ls / cat / wr / df` | 通过 | 写 `cn.txt` 中文内容，重启后 `ls` `cat` 原样读回 |
 | **ramfb framebuffer**（fw_cfg DMA 配置 1024×768 XRGB8888） | 通过 | `make test-gfx` 三项断言 |
 | **图形界面**：卡片面板、中英文点阵混排、实时状态 | 通过 | `make shot` 生成 `build/screen.png` |
