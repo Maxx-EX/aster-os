@@ -9,6 +9,7 @@ use crate::{fb, input, timer};
 const MIN_INTERVAL_MS: u64 = 70;
 
 static mut LAST: u64 = 0;
+static mut BLINK: bool = true;
 static mut DRAG: usize = usize::MAX;
 static mut OFF_X: i32 = 0;
 static mut OFF_Y: i32 = 0;
@@ -17,6 +18,19 @@ pub fn tick() {
     if !fb::available() {
         return;
     }
+
+    // 光标闪烁是唯一"没有输入也要重画"的理由：500 ms 一个相位，相位一变就整屏重绘
+    let now0 = timer::now_ms();
+    let blink = (now0 / 500) % 2 == 0;
+    if blink != unsafe { BLINK } {
+        unsafe {
+            BLINK = blink;
+            LAST = now0;
+        }
+        redraw();
+        crate::cursor::invalidate();
+    }
+
     let want = handle_mouse();
     let now = timer::now_ms();
     let dirty = crate::term::dirty();

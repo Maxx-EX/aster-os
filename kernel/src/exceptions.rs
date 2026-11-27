@@ -294,9 +294,64 @@ pub extern "C" fn svc_handler(esr: u64, frame: *mut u64) -> u64 {
         let a2 = f[2];
 
         let ret: i64 = match nr {
+            56 => {
+                let mut pb = [0u8; 64];
+                if !mmu::user_ptr_ok(a1, 1) {
+                    println!("[SVC] openat(path={:#x}) → EFAULT", a1);
+                    -14
+                } else {
+                    match user_cstr(a1, &mut pb) {
+                        None => -14,
+                        Some(0) => -22,
+                        Some(len) => {
+                            let path = core::str::from_utf8(&pb[..len]).unwrap_or("");
+                            let wr = (a2 & 0o1) != 0 || (a2 & 0x40) != 0;
+                            match crate::vfs::open(path, wr) {
+                                Ok(fd) => {
+                                    println!("[SVC] openat(\"{}\") → fd {}", path, fd);
+                                    fd as i64
+                                }
+                                Err(e) => {
+                                    println!("[SVC] openat(\"{}\") → {}", path, e);
+                                    e
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            57 => {
+                let r = crate::vfs::close(a0 as i32);
+                if r < 0 {
+                    println!("[SVC] close({}) → {}", a0, r);
+                } else {
+                    println!("[SVC] close({}) → 已释放", a0);
+                }
+                r
+            }
+            63 => {
+                if a0 == 0 {
+                    0
+                } else if !mmu::user_ptr_ok(a1, a2) {
+                    println!("[SVC] read(fd={}, buf={:#x}) → EFAULT", a0, a1);
+                    -14
+                } else {
+                    let out = core::slice::from_raw_parts_mut(a1 as *mut u8, a2 as usize);
+                    let r = crate::vfs::read(a0 as i32, out);
+                    println!("[SVC] read(fd={}, {}) → {} 字节", a0, a2, r);
+                    r
+                }
+            }
             64 => {
                 let fd = a0;
-                if fd != 1 && fd != 2 {
+                if fd >= 3 {
+                    if !mmu::user_ptr_ok(a1, a2) {
+                        -14
+                    } else {
+                        let s = core::slice::from_raw_parts(a1 as *const u8, a2 as usize);
+                        crate::vfs::write(fd as i32, s)
+                    }
+                } else if fd != 1 && fd != 2 {
                     println!("[SVC] write(fd={}) → EBADF", fd);
                     -9
                 } else if !mmu::user_ptr_ok(a1, a2) {
@@ -371,4 +426,21 @@ fn ec_name(ec: u64) -> &'static str {
         0x3C => "断点",
         _ => "其他",
     }
+}
+
+/// 从用户地址读一个以 0 结尾的字符串，逐字节校验页权限（最多 64 字节）
+unsafe fn user_cstr(ptr: u64, out: &mut [u8; 64]) -> Option<usize> {
+    let mut i = 0usize;
+    while i < 64 {
+        if !mmu::user_ptr_ok(ptr + i as u64, 1) {
+            return None;
+        }
+        let b = core::ptr::read_volatile((ptr + i as u64) as *const u8);
+        if b == 0 {
+            return Some(i);
+        }
+        out[i] = b;
+        i += 1;
+    }
+    Some(64)
 }

@@ -139,3 +139,21 @@ pub fn run_yield() -> Result<u64, &'static str> {
     let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
     Ok(code)
 }
+
+/// 单任务：走 fd 系统调用读文件，验证 VFS 的 open/read/close
+pub fn run_file() -> Result<u64, &'static str> {
+    sched::reset();
+    let s = make_space(USER_FILE, USER_FILE_SIZE)?;
+    if sched::spawn(s).is_none() {
+        return Err("任务表已满");
+    }
+    crate::vfs::reset();
+    crate::println!(
+        "[VFS] fd 表 {} 槽就绪（0/1/2 留给标准流），切 EL0 执行 openat → read → close",
+        crate::vfs::MAX_FD
+    );
+    timer::arm();
+    mmu::activate(&s);
+    let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
+    Ok(code)
+}

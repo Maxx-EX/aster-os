@@ -193,4 +193,12 @@ pub fn render(x: u32, y: u32) {
             }
         }
     }
+
+    // 光标：画在下一个输入格上，500 ms 一个相位反相 —— 让人一眼看出"这里在等输入"
+    let (r, c) = unsafe { (ROW, COL) };
+    if r < ROWS && c < COLS && (crate::timer::now_ms() / 500) % 2 == 0 {
+        let cx = x + (c as u32) * 8;
+        let cy = y + (r as u32) * LH + 2;
+        crate::fb::fill_rect(cx, cy, 2, 14, crate::fb::TEXT);
+    }
 }

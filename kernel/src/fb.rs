@@ -1317,13 +1317,23 @@ fn draw_one(i: usize) {
     let bar = if active { WIN_BAR } else { 0x262a31 };
     rounded_rect(w.x + 1, w.y + 1, w.w - 2, TITLE_H as u32, 13, bar);
     fill_rect((w.x + 3) as u32, (w.y + 24) as u32, w.w - 6, 20, bar);
+    // 当前工作窗口：标题栏底边一条偏蓝的细线 + 左侧 3 px 竖条（非焦点保持中性灰）
     fill_rect(
         (w.x + 1) as u32,
         (w.y + TITLE_H as i32 - 1) as u32,
         w.w - 2,
         1,
-        WIN_LINE,
+        if active { 0x4a72b0 } else { WIN_LINE },
     );
+    if active {
+        fill_rect(
+            (w.x + 5) as u32,
+            (w.y + 9) as u32,
+            3,
+            TITLE_H as u32 - 18,
+            ACCENT,
+        );
+    }
 
     let mut hx = draw_text_ui((w.x + 18) as u32, (w.y + 14) as u32, title, if active { TEXT } else { TEXT2 }) + 8;
     let sub = ["TERMINAL", "SYSTEM", "NETWORK"][i.min(2)];

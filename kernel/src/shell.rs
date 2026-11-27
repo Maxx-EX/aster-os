@@ -383,6 +383,10 @@ fn cmd_help() {
     println!("  df        文件系统用量");
     println!("  cache     块缓存命中率");
     println!("  sync      强制写回脏块");
+    println!("  fd        查看 VFS 的 fd 表（open/read/write 计数）");
+    println!("  vfw       测 fd 写路径：open(O_CREAT) → write → close 落盘");
+    println!("  file      用 fd 系统调用读 /motd（EL0 + openat/read/close）");
+    println!("  apk       读内置示例 APK：zip 目录 / classes.dex 头 / 二进制 XML");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
     println!("  ex off    关闭 Extreme 权限");
     println!("  peek A    读 8 字节（仅 Extreme）");
@@ -503,6 +507,10 @@ pub fn run() -> ! {
             cmd_sim(a);
             continue;
         }
+        if let Some(a) = line.strip_prefix("apk ") {
+            cmd_apk(a);
+            continue;
+        }
 
         match line {
             "help" | "?" => cmd_help(),
@@ -552,6 +560,13 @@ pub fn run() -> ! {
             "wr" => cmd_wr(""),
             "df" => cmd_df(),
             "cache" => cmd_cache(),
+            "fd" => cmd_fd(),
+            "vfw" => cmd_vfw(),
+            "apk" => cmd_apk(""),
+            "file" => match crate::task::run_file() {
+                Ok(code) => println!("[VFS] 任务结束，退出码 {}", code),
+                Err(e) => println!("[TASK] 无法运行: {}", e),
+            },
             "sync" => cmd_sync(),
             "info" => cmd_info(),
             "ex3" => cmd_ex3(),
@@ -648,4 +663,135 @@ fn cmd_net() {
     let (ver, st, av, us, is) = crate::net::debug_info();
     println!("  设备版本  : {}   状态: {:#x}   RX avail={} used={}  intstatus={:#x}", ver, st, av, us, is);
     println!("  网关 MAC  : {}", if crate::net::gw_known() { "已学习" } else { "未知（ARP 未回）" });
+}
+
+// ---------- APK / zip 容器 ----------
+
+static DEMO_APK: &[u8] = include_bytes!("../../assets/demo.apk");
+
+fn cmd_fd() {
+    crate::vfs::dump();
+}
+
+fn hex8(b: &[u8]) -> () {
+    for (i, x) in b.iter().enumerate() {
+        if i > 0 {
+            print!(" ");
+        }
+        print!("{:02x}", x);
+    }
+}
+
+fn cmd_apk(a: &str) {
+    let t = a.trim();
+    let total = DEMO_APK.len();
+
+    if t == "dex" {
+        let mut buf = [0u8; 128];
+        match crate::zip::extract(DEMO_APK, "classes.dex", &mut buf) {
+            Ok(n) => {
+                if n >= 44 && &buf[..4] == b"dex\n" {
+                    let ver = core::str::from_utf8(&buf[4..7]).unwrap_or("?");
+                    let u32at = |o: usize| -> u32 {
+                        u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]])
+                    };
+                    println!("  classes.dex  {} 字节，魔数 dex\\n{}", n, ver);
+                    println!(
+                        "  file_size {}  header_size {:#x}  endian {:#010x}",
+                        u32at(32),
+                        u32at(36),
+                        u32at(40)
+                    );
+                    println!("  → DEX 头能原样取出来，解释器是下一阶段的事");
+                } else {
+                    println!("  classes.dex 的魔数不是 dex\\n");
+                }
+            }
+            Err(e) => println!("  {}", e),
+        }
+        return;
+    }
+
+    if t == "axml" {
+        let mut buf = [0u8; 64];
+        match crate::zip::extract(DEMO_APK, "AndroidManifest.xml", &mut buf) {
+            Ok(n) => {
+                print!("  AndroidManifest.xml {} 字节，头 ", n);
+                hex8(&buf[..8]);
+                println!();
+                if buf[0] == 0x03 && buf[1] == 0x00 && buf[2] == 0x08 && buf[3] == 0x00 {
+                    println!("  → 是二进制 XML（AXML，type 0x0003 / header 8）：资源表解析器的输入格式");
+                } else {
+                    println!("  → 不是 AXML（可能是明文 XML）");
+                }
+            }
+            Err(e) => println!("  {}", e),
+        }
+        return;
+    }
+
+    if let Some(name) = t.strip_prefix("cat ") {
+        let mut buf = [0u8; 512];
+        match crate::zip::extract(DEMO_APK, name.trim(), &mut buf) {
+            Ok(n) => {
+                let mut i = 0usize;
+                while i < n {
+                    let end = (i + 64).min(n);
+                    match core::str::from_utf8(&buf[i..end]) {
+                        Ok(s) => println!("  {}", s),
+                        Err(_) => {
+                            print!("  ");
+                            hex8(&buf[i..end]);
+                            println!();
+                        }
+                    }
+                    i = end;
+                }
+            }
+            Err(e) => println!("  {}", e),
+        }
+        return;
+    }
+
+    // 默认：列目录
+    println!("  demo.apk  {} 字节", total);
+    match crate::zip::summarize(DEMO_APK) {
+        Ok(s) => {
+            println!(
+                "  {} 个条目：{} stored / {} deflate / {} 其他，解压后共 {} 字节",
+                s.entries, s.stored, s.deflated, s.others, s.raw
+            );
+            let _ = crate::zip::walk(DEMO_APK, |name, method, csize, usize_, _off| {
+                let m = if method == 0 { "stored" } else { "deflate" };
+                println!("    {:<8} {:>6} {:>6}  {}", m, usize_, csize, name);
+            });
+            println!("  → 能直接取的是 stored；deflate 需要 inflate，下一步做");
+        }
+        Err(e) => println!("  {}", e),
+    }
+}
+
+/// 写路径：新建 / 打开 → 写 → close 时整体落盘，再用 afs 读回校验
+fn cmd_vfw() {
+    let text = b"vfs: open(O_CREAT) -> write -> close -> sync";
+    match crate::vfs::open("/vfs.txt", true) {
+        Ok(fd) => {
+            let n = crate::vfs::write(fd, text);
+            if n < 0 {
+                println!("  write 失败: {}", n);
+            }
+            let c = crate::vfs::close(fd);
+            println!("  fd {} 写入 {} 字节，close={}（close 时落盘并 sync）", fd, n, c);
+            let mut buf = [0u8; 64];
+            match crate::afs::read_file("vfs.txt", &mut buf) {
+                Ok(m) => println!(
+                    "  读回 {} 字节：{}",
+                    m,
+                    core::str::from_utf8(&buf[..m]).unwrap_or("<非 UTF-8>")
+                ),
+                Err(e) => println!("  读回失败: {}", e),
+            }
+        }
+        Err(e) => println!("  open 失败: {}（先 ex + fmt + mkfs）", e),
+    }
 }

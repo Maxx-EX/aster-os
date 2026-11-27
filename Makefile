@@ -50,10 +50,11 @@ ISO_BIN   := $(B)/user/iso.bin
 FP_BIN    := $(B)/user/fp.bin
 WX_BIN    := $(B)/user/wx.bin
 YL_BIN    := $(B)/user/yield.bin
+FILE_BIN  := $(B)/user/file.bin
 FAULT_BIN := $(B)/user/fault.bin
 BUSY_BIN  := $(B)/user/busy.bin
 
-user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN)
+user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN) $(FILE_BIN)
 
 $(B)/user/%.o: user/%.S
 	@mkdir -p $(B)/user
@@ -90,6 +91,10 @@ $(FAULT_BIN): $(B)/user/fault.elf
 $(BUSY_BIN): $(B)/user/busy.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 busy: $$(stat -c%s $@) bytes"
+
+$(FILE_BIN): $(B)/user/file.elf
+	$(CROSS)-objcopy -O binary $< $@
+	@echo "[BUILD] 用户程序 file: $$(stat -c%s $@) bytes"
 
 # ---------- 1. 内核（Rust + C） ----------
 kernel: $(KBIN)

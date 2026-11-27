@@ -40,13 +40,19 @@ p = subprocess.Popen(Q, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(9)
 s = socket.create_connection(("127.0.0.1", SPORT), timeout=3)
 s.settimeout(1.5)
+log = []
 for c in cmds:
     s.sendall(c.encode() + b"\n")
     time.sleep(1.7)
     try:
-        s.recv(65536)
+        d = s.recv(65536)
+        if d:
+            log.append(d.decode("utf-8", "replace"))
     except socket.timeout:
         pass
+if os.environ.get("LOG") and log:
+    print("--- 串口 ---")
+    print("".join(log))
 
 m = socket.socket(socket.AF_UNIX)
 for _ in range(40):

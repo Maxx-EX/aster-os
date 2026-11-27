@@ -60,6 +60,7 @@ fn main() {
         ("ASTER_USER_FP_BIN",    "USER_FP",    "../build/user/fp.bin"),
         ("ASTER_USER_WX_BIN",    "USER_WX",    "../build/user/wx.bin"),
         ("ASTER_USER_YIELD_BIN", "USER_YIELD", "../build/user/yield.bin"),
+        ("ASTER_USER_FILE_BIN",  "USER_FILE",  "../build/user/file.bin"),
     ] {
         let path = env::var(env_key).map(PathBuf::from).unwrap_or_else(|_| manifest.join(default));
         let size_name = format!("{}_SIZE", static_name);

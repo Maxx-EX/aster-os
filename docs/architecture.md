@@ -844,3 +844,62 @@ inode 只留 10 个直接块指针，没有间接块。一个文件最大 40 KiB
 **现状**。raspi3b 上整条链路是通的：引导器三级 AVP 校验 PASS、EX3 生成、内核进 EL1、MMU 与 GICv2 起来、`board.rs` 认出 BCM2837、mailbox 拿到 `1024×768` 的 framebuffer、`clear()` 之后读回 `0x141619` 与写入一致、进入 shell。**QEMU 6.2 的 raspi3b 不会把这块内存同步到 `screendump`**，所以截图仍是白的 —— 这是 QEMU 的显示层限制，真机是 HDMI 直出，不经过 QEMU。
 
 EMMC（SDHCI）和 USB HID（xHCI）还没接，`board.rs` 里已经占好位（`BlkKind::SdHost` / `InputKind::UsbHid`），下次从这里往下做。
+
+---
+
+## 29. VFS 与 fd 系统调用
+
+用户程序原来只会 `write / exit / getpid`，读文件只能在 shell 里做。这一层补上"程序自己能打开文件读"。
+
+**fd 表**（`kernel/src/vfs.rs`）。16 槽，0/1/2 留给标准流，3..15 给用户。每个 fd 记 inode、当前偏移、长度、读写位、文件名，外加一块 4 KiB 的页缓冲 —— open 时把文件内容读进这块缓冲，之后 read 只往前拷，不再碰磁盘；close 时若可写就整体写回并 `sync`。
+
+**路径解析**。`/motd` 与 `motd` 等价，逐段走 `afs::dir_find`，`apps/demo/classes.dex` 这种多级路径也能走。段名上限 24 字节，与 AsterFS 的目录项一致。
+
+**系统调用**。56 openat（dirfd 忽略，`O_WRONLY`/`O_CREAT` 映射成 vfs 的写位）、57 close、63 read、64 write（fd≥3 走 vfs，1/2 仍走串口）。用户指针逐个过 `mmu::user_ptr_ok`，字符串逐字节读，不跨页越界。
+
+EL0 跑 `file` 程序（openat → read → 打印 → close）的串口实录：
+
+```
+[VFS] fd 表 16 槽就绪（0/1/2 留给标准流），切 EL0 执行 openat → read → close
+[SVC] openat("/motd") → fd 3
+[SVC] read(fd=3, 96) → 30 字节
+Aster VFS openat read close OK
+[SVC] close(3) → 已释放
+[VFS] 任务结束，退出码 0
+```
+
+写路径另用 `vfw` 验：新建 → 写 44 字节 → close 落盘 → `read_file` 读回一致，`fd` 显示 `open 1 / read 0 / write 1`。
+
+**没做的**：fd 表还是全局一份，不是每任务一份；`lseek` / `fstat` / `readdir` 没有；单文件上限仍 4096 字节（AsterFS v0 只有 10 个直接块，等间接块做完再放宽）。
+
+## 30. APK 容器：先能取出来
+
+要跑 APK，第一块不是 DEX 解释器，是从 zip 里把 `classes.dex` 原样取出来。
+
+EOCD 在文件尾部，注释最长 65535 字节，所以倒扫最后 64 KiB + 22。找到后从中央目录偏移开始逐条目读：名字、压缩方式、压缩/原始大小、本地头偏移。**数据真正开始的偏移必须按本地头重算** —— 本地头的名字/扩展字段长度和中央目录可能不同，直接用中央目录的长度会读到别人家的数据。
+
+现在支持 method 0（stored）。method 8（deflate）明确返回"需要 inflate"而不是静默出错：inflate 是独立几百行，单独做。
+
+内置 `assets/demo.apk`（891 字节、5 条目全 stored）做自检：
+
+```
+$ apk
+  demo.apk  891 字节
+  5 个条目：5 stored / 0 deflate，解压后共 331 字节
+    stored       64     64  AndroidManifest.xml
+    stored      112    112  classes.dex
+$ apk dex
+  classes.dex  112 字节，魔数 dex\n035
+  file_size 112  header_size 0x70  endian 0x12345678
+$ apk axml
+  AndroidManifest.xml 64 字节，头 03 00 08 00 40 00 00 00
+  → 是二进制 XML（AXML，type 0x0003 / header 8）
+```
+
+## 31. 界面：让静态的东西动一点
+
+两处改动，都不改布局，只改"这一帧属于谁"。
+
+**光标闪烁**。`term::render` 在下一个输入格画 2×14 的竖条，500 ms 一个相位反相。`read_line` 的轮询里本来就有 `ui::tick()`，所以桌面空闲时也有心跳：相位一变就整屏重绘一次。之前界面只在"有输入/鼠标动了"才动，看起来像张图片。
+
+**焦点窗口**。选中窗口的标题栏底边换成偏蓝的细线（`0x4a72b0`），左侧加一条 3 px 竖条（`ACCENT`）；非焦点保持中性灰。切窗口时这两笔跟着走，一眼能看出"现在哪个在接键盘"。

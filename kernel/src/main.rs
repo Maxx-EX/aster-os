@@ -22,6 +22,8 @@ mod mailbox;
 mod disk;
 mod cache;
 mod afs;
+mod vfs;
+mod zip;
 mod net;
 mod rtc;
 mod sched;

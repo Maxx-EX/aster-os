@@ -119,8 +119,8 @@
 | AF-2 ✅ | virtio-blk 驱动（Rust） | DeviceID 2，复用 `virtio.rs` 的 modern 队列；一次请求三段：请求头（16 B：类型/保留/sector/数据长度）+ 数据 + 状态字节。读走只读请求（类型 0），写走类型 1 |
 | AF-3 ✅ | **AsterFS v0** | 4 KiB 块；块 0 超级块（`AFS1` magic + 块大小 + 块数 + inode 数 + 根 inode + CRC32）；块 1..N inode 表（每 inode 64 B：类型/大小/直接块指针 12 个/时间）；位图块；数据块。**目录项就是 inode 里的 `名字→inode` 列表**，不做 B 树 |
 | AF-4 | 块缓存 | 32 个 4 KiB 缓冲 + LRU，读命中直接返回，写标脏，`sync` 刷盘。内存从页帧池要（`alloc_pages`） |
-| AF-5 | VFS 薄层 | `mount / lookup / open / read / write / close / readdir / stat`，fd 表每任务一份（放在 `Space` 旁边），路径解析最多 8 层 |
-| AF-6 | syscall 接上 | 56 openat / 57 close / 62 lseek / 63 read / 80 fstat，编号与 Linux 一致 |
+| AF-5 🔶 | VFS 薄层 | **已做**：内核一份 fd 表 16 槽（0/1/2 留标准流），每 fd 4 KiB 页缓冲，路径逐段解析（24 字节段名）。**待做**：每任务一份、`readdir`、`lseek`、>4 KiB 长文件 |
+| AF-6 🔶 | syscall 接上 | **已做**：56 openat（O_WRONLY/O_CREAT）、57 close、63 read，64 write 扩到 fd≥3。**待做**：62 lseek、80 fstat |
 | AF-7 | shell 命令 | `ls / cat / load / sync / df`。`load <名字>` 把盘上程序读进新地址空间并跑起来 |
 | AF-8 | 用户程序脱离内嵌 | 删掉 `build.rs` 里的 `include_bytes!`，六个测试程序改为 `mkdisk.py` 打包进镜像；`iso / fp / wx / yield` 全部改成从盘加载，**这一条是"从盘加载"的真正验收点** |
 
@@ -219,6 +219,10 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 ---
 
 ## 阶段七：跑 APK（v0.9）
+
+### APK-1 ✅ 容器读取（已做）
+
+APK 是 zip，目录在文件尾的 EOCD。`kernel/src/zip.rs` 会倒扫 EOCD、遍历中央目录、按本地头重算数据偏移，把 stored 条目原样取出；deflate 条目明确报"需要 inflate"。内置 `assets/demo.apk` 做自检，`apk / apk dex / apk axml / apk cat <条目>` 四个命令能看到 `classes.dex` 的 `dex\n035` 魔数和 `AndroidManifest.xml` 的 AXML 头 `03 00 08 00`。**这是 DEX 解释器的前置：先能把 dex 取出来，才谈得上解析它。**
 
 ### APK 到底需要什么
 
