@@ -8,8 +8,8 @@
 pub const CW: i32 = 320;
 pub const CH: i32 = 200;
 
-const MAXC: usize = 48;
-const MAXSTR: usize = 12;
+const MAXC: usize = 128;
+const MAXSTR: usize = 32;
 const STRMAX: usize = 48;
 const SCALE: u32 = 2;
 
@@ -160,18 +160,18 @@ pub fn draw_if_active() {
     );
 }
 
-// —— 触摸（APK-10/11）——
-// 画布上的点击由 ui::handle_mouse 转进来，APK 用 touchX()/touchY() 取；
-// 拖动由 push_move() 进单独的 move 队列，APK 用 moveX()/moveY() 取。
-const MAXT: usize = 8;
-static mut DQ: [(i32, i32); MAXT] = [(0, 0); MAXT];
-static mut DQN: usize = 0;
-static mut DQR: usize = 0;
-static mut MQ: [(i32, i32); MAXT] = [(0, 0); MAXT];
-static mut MQN: usize = 0;
-static mut MQR: usize = 0;
+// —— 触摸（APK-10/11/12）——
+// 一条事件队列，每条记 (x, y, kind)：0=按下 1=拖动 2=抬起。
+// APK 两种取法：老的 touchX()/moveX() 按 kind 过滤，新的 next_event() 按 FIFO 全取。
+const MAXEV: usize = 16;
+static mut EV: [(i32, i32, u8); MAXEV] = [(0, 0, 0); MAXEV];
+static mut EVN: usize = 0;
 static mut LASTT: (i32, i32) = (0, 0);
 static mut LASTMV: (i32, i32) = (0, 0);
+
+const K_DOWN: u8 = 0;
+const K_MOVE: u8 = 1;
+const K_UP: u8 = 2;
 
 fn origin() -> (i32, i32) {
     let sw = crate::fb::width() as i32;
@@ -191,56 +191,87 @@ pub fn screen_to_canvas(sx: i32, sy: i32) -> Option<(i32, i32)> {
     }
 }
 
-/// 按下/抬起都压进 down 队列（take_touch 只取按下）
+fn push(kind: u8, x: i32, y: i32) {
+    unsafe {
+        if EVN >= MAXEV {
+            // 满了丢最老的：拖动是连续状态，留新的更合理
+            let mut i = 0;
+            while i + 1 < EVN {
+                EV[i] = EV[i + 1];
+                i += 1;
+            }
+            EVN -= 1;
+        }
+        EV[EVN] = (x, y, kind);
+        EVN += 1;
+    }
+}
+
+fn remove_at(i: usize) {
+    unsafe {
+        let mut j = i;
+        while j + 1 < EVN {
+            EV[j] = EV[j + 1];
+            j += 1;
+        }
+        EVN -= 1;
+    }
+}
+
 pub fn push_touch(x: i32, y: i32, down: bool) {
-    if !down {
-        return; // 抬起不关心：抬到画布外也照样结束拖动
-    }
-    unsafe {
-        if DQN - DQR >= MAXT {
-            return; // 队列满就丢，别让 UI 线程卡住
-        }
-        DQ[DQN % MAXT] = (x, y);
-        DQN += 1;
-    }
+    push(if down { K_DOWN } else { K_UP }, x, y);
 }
 
-/// 拖动：满队时就丢最老的，永远保留最新位置
 pub fn push_move(x: i32, y: i32) {
+    push(K_MOVE, x, y);
+}
+
+/// FIFO 取一条（onTouch 分发用）
+pub fn next_event() -> Option<(u8, i32, i32)> {
     unsafe {
-        if MQN - MQR >= MAXT {
-            MQR += 1;
+        if EVN == 0 {
+            return None;
         }
-        MQ[MQN % MAXT] = (x, y);
-        MQN += 1;
+        let (x, y, k) = EV[0];
+        remove_at(0);
+        if k == K_DOWN || k == K_MOVE {
+            LASTT = (x, y);
+        }
+        Some((k, x, y))
     }
 }
 
-/// 取下一条"按下"事件
+/// 取第一条按下事件（老 API）
 pub fn take_touch() -> Option<(i32, i32)> {
     unsafe {
-        if DQR >= DQN {
-            return None;
+        let mut i = 0;
+        while i < EVN {
+            let (x, y, k) = EV[i];
+            if k == K_DOWN {
+                remove_at(i);
+                LASTT = (x, y);
+                return Some((x, y));
+            }
+            i += 1;
         }
-        let i = DQR % MAXT;
-        DQR += 1;
-        let (x, y) = DQ[i];
-        LASTT = (x, y);
-        Some((x, y))
+        None
     }
 }
 
-/// 取下一条"拖动"事件（无则 None）
+/// 取第一条拖动事件（老 API）
 pub fn take_move() -> Option<(i32, i32)> {
     unsafe {
-        if MQR >= MQN {
-            return None;
+        let mut i = 0;
+        while i < EVN {
+            let (x, y, k) = EV[i];
+            if k == K_MOVE {
+                remove_at(i);
+                LASTMV = (x, y);
+                return Some((x, y));
+            }
+            i += 1;
         }
-        let i = MQR % MAXT;
-        MQR += 1;
-        let (x, y) = MQ[i];
-        LASTMV = (x, y);
-        Some((x, y))
+        None
     }
 }
 

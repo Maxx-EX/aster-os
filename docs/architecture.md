@@ -1737,3 +1737,87 @@ Canvas 句柄存进静态字段是这版的一个小技巧：`new-instance` 只�
 ### 48.7 下一步
 
 到这里"APK 能画、能点、能拖、能活着"四件都齐了。下一站建议是**把画布让给真正的 Activity 语义**：`onCreate` 一次、`frame` 循环、`onTouch` 事件分发，再加上 `Intent` 那种最简的启动参数——这是"跑真实 APK"的最后一块拼图。同时顺手把 `new-array`/对象堆的上限放开（页帧分配器已经就绪，缺的只是把它接给解释器）。
+
+---
+
+## 49. APK-12：Activity 生命周期与事件分发
+
+APK-11 里 APK 是"自己轮询"的：每帧问一次 `moveX()`。这节把它翻过来——**内核主动调 APK**，生命周与事件分发都由内核驱动，APK 只实现回调。
+
+### 49.1 三个回调
+
+| 回调 | 何时 | 签名 |
+|---|---|---|
+| `onCreate` | `app start` 一次 | `()V` |
+| `frame` | 每 30 ms | `()V` |
+| `onTouch` | 事件到达时 | `(III)V`，kind 0=按下 1=拖动 2=抬起 |
+| `onDestroy` | `app stop` | `()V` |
+
+`onCreate` / `onDestroy` 是可选的：`dex::has_method()` 用 `code_of` 试一下，没有就跳过。`frame` 是必需的，没有直接报错。
+
+`app start` 的流程变成：`heap_reset` → `call_reset` → `load_statics`（装初值）→ `onCreate` → 校验 `frame` 存在。`app stop` 先调 `onDestroy`，再把 `APP_ON` 置 false。
+
+### 49.2 事件队列统一
+
+APK-11 的 down / move 双队列合并成一条 `EV: [(x, y, kind); 16]`，三条取法：
+
+- `next_event()` — FIFO 全取，供 `onTouch` 分发
+- `take_touch()` / `take_move()` — 扫描队列挑出对应 kind 的那条，保留老的 `touchX()` / `moveX()` API（对 APK-10/11 的写法兼容）
+
+队列满（16 条）时丢最老的。`push_touch` 现在把**抬起**也入队（kind 2），因为 `onTouch` 需要它。
+
+`shell::app_frame()` 每 30 ms 做两件事：先把队列里所有事件 `dex::app_touch(kind, x, y)` 投递掉，再 `apkcanvas::reset()` + `app_step("frame")`。一次事件一次 `exec`，最多 16 次/拍，代价可接受。
+
+### 49.3 上限放开
+
+demo 级限制在这节统一往上抬一档：
+
+| 资源 | APK-11 | APK-12 |
+|---|---|---|
+| 对象堆 | 8 | 32 |
+| 数组槽 | 4 | 16 |
+| 单数组长度 | 8 | 32 |
+| 画布命令 | 48 | 128 |
+| 文字槽 | 12 | 32 |
+| 事件队列 | 8 + 8（分开） | 16（合一） |
+
+内存代价很小（对象堆 32×8 个 i32 ≈ 1 KiB，数组 16×33 个 i32 ≈ 2 KiB），但"8 帧就爆"的坑没了。
+
+### 49.4 fixture 第十版
+
+`Main` 现在有 5 个静态字段（`cvh`、`hits`、`px`、`py`、`taps`）、6 个 direct 方法（`run`、`hello`、`frame`、`onCreate`、`onTouch`、`onDestroy`），dex 3118 字节、`demo3.apk` 1896 字节。
+
+```java
+static void onCreate() { cvh = new Canvas(); Log.i("onCreate ok"); }
+static void frame() { /* 画背景/标题/方块，107 code unit */ }
+static void onTouch(int kind, int x, int y) {
+    if (kind > 1) { Log.n(taps); return; }   // 抬起：报累计次数
+    px = x - 16; py = y - 16; taps++;
+    Log.n(taps);
+}
+static void onDestroy() { Log.i("onDestroy ok"); }
+```
+
+实拍：`app start` 打 `[DEX] onCreate ok` 并报 "已画 53 帧，命令 3 条（丢弃 0）"；`sim drag 400 400 → 600 460` 期间串口连续 `[DEX] 4..9`（每一步触摸都进了 `onTouch`），方块最终落在 (188,122)；`app stop` 打 `[DEX] onDestroy ok` 并报 "onDestroy 已调用"。
+
+### 49.5 这轮唯一的大坑：`ins_size` 的参数位置
+
+DEX 的方法参数**不放在 v0 开始**，而是放在寄存器窗口的**最后 `ins_size` 个**。`onTouch(III)V` 的 `regs_size=4, ins_size=3`，于是 `kind→v1`、`x→v2`、`y→v3`，**v0 是空闲临时寄存器**。
+
+第一版我按 `v0=kind, v1=x, v2=y` 写，结果是：`if-gt v0, v3` 拿未初始化的 v0 去比 y，`add-int/lit8 v1` 减的是 kind。表现很诡异——日志里 taps 稳定递增（说明 `onTouch` 确实被调用了、`sput` 生效），但方块完全不动（`px/py` 被写进错误的位置）。
+
+顺带一个小坑：`if-gt` 的 22t 编码里 **A 在 bits8-11、B 在 bits12-15**，我写成 `0x0035` 等于 A=B=v0，`v0 > v0` 恒 false，条件分支静默失效。正确是 `0x1035`（A=v1, B=v0）。
+
+这已经是这个项目里第 N 次被 DEX 的"寄存器窗口"绊倒了：**实例方法第一个参数是 this 也在这个窗口里**，`invoke-virtual` 的 argc 同样含 this。写 fixture 时的第一条自检应该是"我要用的参数到底落在哪几个寄存器"。
+
+### 49.6 限制
+
+- 没有 `onPause` / `onResume` / `onRestart`：只有 create → frame… → destroy。
+- `onTouch` 没有事件时间戳、没有 `MotionEvent` 的 action 位掩码，kind 是简化后的三态。
+- 没有手势识别（点击 vs 拖动的判定在 APK 侧自己做）。
+- 仍然是单实例、单类 `Main`；没有 `Intent`、没有 `startActivity`。
+- 对象堆 32 槽仍是固定的：真实 APK 每帧 new 对象就会溢出，必须有 GC 或页帧分配器接进来。
+
+### 49.7 下一步
+
+"能跑自制子集 APK"这条路，只差最后两块：**Intent 化启动**（`app start <参数>` 把参数塞给 APK，`App.arg()` 取回）和**对象分配接到页帧分配器**（现在 32 槽静态堆是硬顶）。之后才是 `android.graphics` 真实 API 的映射，那是另一个量级的工作。

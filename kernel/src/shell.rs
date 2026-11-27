@@ -1002,15 +1002,15 @@ fn app_dex() -> Result<(&'static [u8], crate::dex::Header), &'static str> {
     Ok((d, h))
 }
 
-fn app_start() -> Result<(), &'static str> {
+fn app_start() -> Result<bool, &'static str> {
     let (d, h) = app_dex()?;
-    crate::dex::app_begin(d, &h, "Lcom/aster/Main;")?;
+    let (_steps, created) = crate::dex::app_begin(d, &h, "Lcom/aster/Main;")?;
     unsafe {
         APP_ON = true;
         APP_FRAMES = 0;
     }
     crate::apkcanvas::set_active(true);
-    Ok(())
+    Ok(created)
 }
 
 /// 一帧：失败返回错误串并自动停机，免得每帧都刷同一条错误
@@ -1025,6 +1025,19 @@ pub fn app_frame() -> Option<&'static str> {
             return Some(e);
         }
     };
+    // 先把这一拍攒下的触摸事件全部分给 onTouch(kind, x, y)
+    loop {
+        match crate::apkcanvas::next_event() {
+            Some((kind, x, y)) => {
+                if let Err(e) = crate::dex::app_touch(d, &h, "Lcom/aster/Main;", kind as i32, x, y) {
+                    unsafe { APP_ON = false };
+                    return Some(e);
+                }
+            }
+            None => break,
+        }
+    }
+
     // 每帧从空命令表开始：APK 画什么就是什么，不叠昨天的帧
     crate::apkcanvas::reset();
     match crate::dex::app_step(d, &h, "Lcom/aster/Main;", "frame") {
@@ -1053,7 +1066,7 @@ fn cmd_app(line: &str) {
             // 手动跑一帧：无显示环境（-nographic）也能验证 frame() 能出命令
             if !app_active() {
                 match app_start() {
-                    Ok(()) => {}
+                    Ok(_) => {}
                     Err(e) => {
                         println!("  [APP] 起动失败: {}", e);
                         return;
@@ -1069,12 +1082,27 @@ fn cmd_app(line: &str) {
             }
         }
         "app off" | "app stop" => {
+            let was_on = app_active();
+            let mut destroyed = false;
+            if was_on {
+                if let Ok((d, h)) = app_dex() {
+                    match crate::dex::app_end(d, &h, "Lcom/aster/Main;") {
+                        Ok((_, has)) => destroyed = has,
+                        Err(e) => println!("  [APP] onDestroy 失败: {}", e),
+                    }
+                }
+            }
             unsafe { APP_ON = false };
-            println!("  [APP] 已停止，画布保留最后一帧（{} 帧）", app_frames());
+            println!(
+                "  [APP] 已停止，画布保留最后一帧（{} 帧）{}",
+                app_frames(),
+                if destroyed { "，onDestroy 已调用" } else { "" }
+            );
         }
         _ => match app_start() {
-            Ok(()) => println!(
-                "  [APP] 起动 Main.frame()V：画布 320x200，点击落点定位、按住拖动跟手。app stop 停止"
+            Ok(created) => println!(
+                "  [APP] 起动：{}onCreate()，之后每 30ms 一帧 Main.frame()V；触摸走 onTouch(kind,x,y)。app stop 停止",
+                if created { "" } else { "无" }
             ),
             Err(e) => println!("  [APP] 起动失败: {}", e),
         },

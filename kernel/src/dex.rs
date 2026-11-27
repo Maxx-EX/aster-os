@@ -258,7 +258,7 @@ struct ObjState {
     fields: [i32; 8],
 }
 
-const NOBJ: usize = 8;
+const NOBJ: usize = 32;
 static mut HEAP: [ObjState; NOBJ] = [ObjState { used: false, class_idx: 0, fields: [0; 8] }; NOBJ];
 
 // —— 数组（APK-6）——
@@ -266,24 +266,24 @@ static mut HEAP: [ObjState; NOBJ] = [ObjState { used: false, class_idx: 0, field
 #[derive(Clone, Copy)]
 struct Arr {
     len: u32,
-    d: [i32; 8],
+    d: [i32; 32],
 }
 
-const NARR: usize = 4;
+const NARR: usize = 16;
 const ARR_TAG: i32 = 0x100;
-static mut ARRS: [Arr; NARR] = [Arr { len: 0, d: [0; 8] }; NARR];
+static mut ARRS: [Arr; NARR] = [Arr { len: 0, d: [0; 32] }; NARR];
 static mut NARR_USED: usize = 0;
 
 fn arr_new(len: u32) -> Result<i32, &'static str> {
     unsafe {
         if NARR_USED >= NARR {
-            return Err("数组堆满（最多 4 个）");
+            return Err("数组堆满（最多 16 个）");
         }
-        if len > 8 {
-            return Err("数组超过 8 个元素（v0 上限）");
+        if len > 32 {
+            return Err("数组超过 32 个元素（v0 上限）");
         }
         let i = NARR_USED;
-        ARRS[i] = Arr { len, d: [0; 8] };
+        ARRS[i] = Arr { len, d: [0; 32] };
         NARR_USED += 1;
         Ok(ARR_TAG + i as i32)
     }
@@ -302,7 +302,7 @@ fn arr_reset() {
         NARR_USED = 0;
         let mut i = 0;
         while i < NARR {
-            ARRS[i] = Arr { len: 0, d: [0; 8] };
+            ARRS[i] = Arr { len: 0, d: [0; 32] };
             i += 1;
         }
     }
@@ -1052,13 +1052,53 @@ pub fn load_statics(d: &[u8], h: &Header, class_desc: &str) -> Result<(), &'stat
     Ok(())
 }
 
-/// 启动 app：清堆、清静态、装初值、确认 frame 存在（APK-11）
-pub fn app_begin(d: &[u8], h: &Header, class_desc: &str) -> Result<u32, &'static str> {
+pub fn has_method(d: &[u8], h: &Header, class_desc: &str, name: &str) -> bool {
+    code_of(d, h, class_desc, name).is_ok()
+}
+
+/// 启动 app：清堆、清静态、装初值、调 onCreate（若有）、确认 frame 存在（APK-11/12）
+pub fn app_begin(d: &[u8], h: &Header, class_desc: &str) -> Result<(u32, bool), &'static str> {
     heap_reset();
     call_reset();
     unsafe { THROW_VAL = 0 };
     load_statics(d, h, class_desc)?;
-    code_of(d, h, class_desc, "frame")
+    let mut steps = 0u32;
+    let has_create = has_method(d, h, class_desc, "onCreate");
+    if has_create {
+        let coff = code_of(d, h, class_desc, "onCreate")?;
+        exec(d, h, coff, &[], 0, &mut steps)?;
+    }
+    code_of(d, h, class_desc, "frame")?;
+    Ok((steps, has_create))
+}
+
+/// 投递一次触摸给 onTouch(int kind, int x, int y)（kind: 0=按下 1=拖动 2=抬起）
+pub fn app_touch(
+    d: &[u8],
+    h: &Header,
+    class_desc: &str,
+    kind: i32,
+    x: i32,
+    y: i32,
+) -> Result<u32, &'static str> {
+    if !has_method(d, h, class_desc, "onTouch") {
+        return Ok(0);
+    }
+    let coff = code_of(d, h, class_desc, "onTouch")?;
+    let mut steps = 0u32;
+    exec(d, h, coff, &[kind, x, y], 0, &mut steps)?;
+    Ok(steps)
+}
+
+/// 停止 app：调 onDestroy（若有）
+pub fn app_end(d: &[u8], h: &Header, class_desc: &str) -> Result<(u32, bool), &'static str> {
+    if !has_method(d, h, class_desc, "onDestroy") {
+        return Ok((0, false));
+    }
+    let coff = code_of(d, h, class_desc, "onDestroy")?;
+    let mut steps = 0u32;
+    exec(d, h, coff, &[], 0, &mut steps)?;
+    Ok((steps, true))
 }
 
 /// 跑一帧（不重置任何状态，静态字段/对象堆跨帧保留）
