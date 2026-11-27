@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkdex.py — 手搓一个合法 DEX（第五版）：数组 + 静态字段 + StringBuilder。
+"""mkdex.py — 手搓一个合法 DEX（第六版）：继承 + invoke-super + throw/catch。
 
 类与代码：
 
@@ -8,6 +8,9 @@
         Counter(int x) { v = x; }
         int next() { v = v + 1; return v; }
     }
+
+    class Base { int v; Base(int x){v=x;} int get(){return v;} }
+    class Child extends Base { Child(int x){ super(x); } }
 
     static void run() {
         int[] a = new int[5];
@@ -18,11 +21,15 @@
         sb.append("sum="); sb.append(sum);
         sb.append(" hits="); sb.append(hits);
         Log.i(sb.toString());           // sum=30 hits=1
+        Child c = new Child(7);
+        Log.n(c.get());                 // 7，方法解析上溯到 Base
+        try { throw new RuntimeException(); } catch (Throwable t) { Log.i("caught"); }
+        Log.i("apk8 ok");
     }
 
 用到的 opcode：new-instance、new-array、array-length、aget、aput、iget、iput、sget、sput、
-invoke-direct(<init>)、invoke-virtual、invoke-static、move-result、const/4、const-string、
-mul-int、add-int、add-int/lit8、if-ge、goto、return/return-void。
+invoke-direct(<init>)、invoke-virtual、invoke-static、invoke-super、move-result、move-exception、
+throw、const/4、const-string、mul-int、add-int、add-int/lit8、if-ge、goto、return/return-void。
 这要求解释器有对象堆、能递归调用方法、能把返回值塞回调用者的 move-result。
 
 DEX 结构仍按规范逐字段拼（header / map_list / 全部 ids / class_defs / data），
@@ -51,22 +58,35 @@ def align(buf, n=4):
 STRINGS = [
     " hits=",
     "<init>",
+    "Base",
+    "Boom",
+    "Child",
     "Hello from Aster, this string lives in a real DEX",
     "I",
     "L",
     "LI",
     "LL",
+    "Lcom/aster/Base;",
+    "Lcom/aster/Boom;",
+    "Lcom/aster/Child;",
     "Lcom/aster/Counter;",
     "Lcom/aster/Log;",
     "Lcom/aster/Main;",
+    "Ljava/lang/RuntimeException;",
     "Ljava/lang/String;",
     "Ljava/lang/StringBuilder;",
+    "RuntimeException",
     "V",
     "VI",
     "VL",
     "[I",
+    "apk8 ok",
     "append",
     "array ok",
+    "caught",
+    "caught local",
+    "caught xmethod",
+    "get",
     "hello",
     "hits",
     "i",
@@ -90,18 +110,23 @@ S_SB, S_APPEND, S_STRM, S_SUM, S_HITS_S, S_TOSTR = (
     IDX["sum="], IDX[" hits="], IDX["toString"])
 S_HITS_F = IDX["hits"]
 S_L, S_LI, S_LL = IDX["L"], IDX["LI"], IDX["LL"]
+S_BASE, S_CHILD, S_RTE = IDX["Lcom/aster/Base;"], IDX["Lcom/aster/Child;"], IDX["Ljava/lang/RuntimeException;"]
+S_GET, S_CAUGHT, S_APK8 = IDX["get"], IDX["caught local"], IDX["apk8 ok"]
+S_BOOM, S_CAUGHTX = IDX["Lcom/aster/Boom;"], IDX["caught xmethod"]
 S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
 S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
 
 T_STRING, T_MAIN, T_V, T_LOG, T_INT, T_COUNTER, T_ARR, T_SB = 0, 1, 2, 3, 4, 5, 6, 7
+T_BASE, T_CHILD, T_RTE, T_BOOM = 8, 9, 10, 11
 # proto：0=(String)V 1=()V 2=(I)V 3=()I 4=(String)SB 5=(I)SB 6=()SB
 P_STR, P_VOID, P_INT_V, P_INT_I = 0, 1, 2, 3
 P_APP_STR, P_APP_INT, P_SB_VOID = 4, 5, 6
-F_V, F_HITS = 0, 1
+F_V, F_HITS, F_BASE_V = 0, 1, 2
 # method：0=Log.i 1=Log.n 2=Counter.<init> 3=Counter.next 4=Main.run 5=Main.hello
 #        6=SB.<init> 7=SB.append(String) 8=SB.append(I) 9=SB.toString
 M_I, M_N, M_INIT, M_NEXT, M_RUN, M_HELLO = 0, 1, 2, 3, 4, 5
 M_SB_INIT, M_SB_APP_S, M_SB_APP_I, M_SB_STR = 6, 7, 8, 9
+M_BASE_INIT, M_BASE_GET, M_CHILD_INIT, M_BOOM_INIT = 10, 11, 12, 13
 
 
 def build():
@@ -117,7 +142,8 @@ def build():
         buf += b"\0\0\0\0"
 
     type_ids_off = len(buf)
-    for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER, S_ARR, S_SB):
+    for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER, S_ARR, S_SB,
+              S_BASE, S_BOOM, S_CHILD, S_RTE):
         buf += struct.pack("<I", t)
 
     proto_ids_off = len(buf)
@@ -132,6 +158,7 @@ def build():
     field_ids_off = len(buf)
     buf += struct.pack("<HHI", T_COUNTER, T_INT, S_V_F)
     buf += struct.pack("<HHI", T_MAIN, T_INT, S_HITS_F)
+    buf += struct.pack("<HHI", T_BASE, T_INT, S_V_F)
 
     method_ids_off = len(buf)
     buf += struct.pack("<HHI", T_LOG, P_STR, S_I_M)
@@ -144,11 +171,23 @@ def build():
     buf += struct.pack("<HHI", T_SB, P_APP_STR, S_APPEND)      # 7 append(String)SB
     buf += struct.pack("<HHI", T_SB, P_APP_INT, S_APPEND)      # 8 append(I)SB
     buf += struct.pack("<HHI", T_SB, P_SB_VOID, S_TOSTR)       # 9 toString()SB
+    buf += struct.pack("<HHI", T_BASE, P_INT_V, S_INIT)        # 10 Base.<init>(I)V
+    buf += struct.pack("<HHI", T_BASE, P_INT_I, S_GET)         # 11 Base.get()I
+    buf += struct.pack("<HHI", T_CHILD, P_INT_V, S_INIT)       # 12 Child.<init>(I)V
+    buf += struct.pack("<HHI", T_BOOM, P_VOID, S_INIT)         # 13 Boom.<init>()V（直接抛）
 
     class_defs_off = len(buf)
     main_def_pos = len(buf)
     buf += b"\0" * 32
     counter_def_pos = len(buf)
+    buf += b"\0" * 32
+    base_def_pos = len(buf)
+    buf += b"\0" * 32
+    child_def_pos = len(buf)
+    buf += b"\0" * 32
+    rte_def_pos = len(buf)
+    buf += b"\0" * 32
+    boom_def_pos = len(buf)
     buf += b"\0" * 32
 
     data_off = len(buf)
@@ -265,16 +304,71 @@ def build():
         0x106e, M_SB_STR, 0x0006,    # invoke-virtual {v6}, toString()
         0x000a,                  # move-result v0
         0x1071, M_I, 0x0000,     # Log.i(v0)
+        # —— APK-8：继承 + 跨方法 throw + 本方法 throw ——
+        0x7512,                  # const/4 v5, #7（const/4 只装 -8..7）
+        0x0622, T_CHILD,         # new-instance v6, Child
+        0x2070, M_CHILD_INIT, 0x0056,  # invoke-direct {v6,v5}, Child.<init>(I)V
+        0x106e, M_BASE_GET, 0x0006,    # invoke-virtual {v6}, Base.get()I（解析上溯）
+        0x000a,                  # move-result v0
+        0x1071, M_N, 0x0000,     # Log.n(v0) -> 7
+        # try#1 覆盖 [75,80)：Boom.<init> 在子方法里抛
+        0x0722, T_BOOM,          # new-instance v7, Boom
+        0x1070, M_BOOM_INIT, 0x0007,   # invoke-direct {v7}, Boom.<init>()V（在这里抛）
+        # handler#1（pc 80）
+        0x000d,                  # move-exception v0
+        0x001a, S_CAUGHTX,       # const-string v0, "caught xmethod"
+        0x1071, M_I, 0x0000,     # Log.i(v0)
+        # try#2 覆盖 [86,89)：本方法直接 throw
+        0x0722, T_RTE,           # new-instance v7, RuntimeException
+        0x0727,                  # throw v7
+        # handler#2（pc 89）
+        0x000d,                  # move-exception v0
+        0x001a, S_CAUGHT,        # const-string v0, "caught local"
+        0x1071, M_I, 0x0000,     # Log.i(v0)
+        0x001a, S_APK8,          # const-string v0, "apk8 ok"
+        0x1071, M_I, 0x0000,     # Log.i(v0)
         0x000e,                  # return-void
     ]
-    assert len(ins) == 63, len(ins)
-    buf += struct.pack("<HHHHII", 8, 0, 2, 0, 0, len(ins))
+    assert len(ins) == 101, len(ins)
+    # tries_size=1：throw 在 pc 77，try 覆盖 [75, 78)
+    buf += struct.pack("<HHHHII", 8, 0, 3, 2, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
+    if len(ins) % 2 == 1:
+        buf += b"\0\0"                       # insns 奇数条时补到 4 字节对齐
+    # try#1：Boom 构造器（76..81），try#2：本地 throw（87..90）
+    buf += struct.pack("<IHH", 75, 5, 0)
+    buf += struct.pack("<IHH", 86, 3, 2)
+    buf += b"\x00" + uleb(80)                  # handler#1：catch-all -> 80
+    buf += b"\x00" + uleb(89)                  # handler#2：catch-all -> 89
 
     # Main.hello()V  regs=1 ins=0 outs=1
     code_hello = len(buf)
     ins = [0x001a, S_HELLO, 0x1071, M_I, 0x0000, 0x000e]
     buf += struct.pack("<HHHHII", 1, 0, 1, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
+    # Base.<init>(I)V  regs=2 ins=2
+    code_base_init = len(buf)
+    ins = [0x0159, F_BASE_V, 0x000e]
+    buf += struct.pack("<HHHHII", 2, 2, 0, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
+    # Base.get()I  regs=2 ins=1（this 在 v1）
+    code_base_get = len(buf)
+    ins = [0x1052, F_BASE_V, 0x000f]
+    buf += struct.pack("<HHHHII", 2, 1, 0, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
+    # Child.<init>(I)V  regs=2 ins=2：invoke-super {v0,v1}, Base.<init>(I)V
+    code_child_init = len(buf)
+    ins = [0x206f, M_BASE_INIT, 0x0010, 0x000e]
+    buf += struct.pack("<HHHHII", 2, 2, 0, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
+    # Boom.<init>()V  regs=2 ins=1：造一个 RuntimeException 立刻抛
+    code_boom_init = len(buf)
+    ins = [0x0022, T_RTE, 0x0027]
+    buf += struct.pack("<HHHHII", 2, 1, 0, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
     # Counter 的 class_data：1 个实例字段，1 个 direct，1 个 virtual
@@ -292,6 +386,23 @@ def build():
     buf += uleb(M_RUN - 0) + uleb(0x0009) + uleb(code_run)
     buf += uleb(M_HELLO - M_RUN) + uleb(0x0009) + uleb(code_hello)
 
+    # Base 的 class_data：1 实例字段 + 1 direct + 1 virtual
+    cd_base = len(buf)
+    buf += uleb(0) + uleb(1) + uleb(1) + uleb(1)
+    buf += uleb(F_BASE_V - 0) + uleb(0x0002)
+    buf += uleb(M_BASE_INIT - 0) + uleb(0x10001) + uleb(code_base_init)
+    buf += uleb(M_BASE_GET - 0) + uleb(0x0001) + uleb(code_base_get)
+
+    # Child 的 class_data：0 字段 + 1 direct
+    cd_child = len(buf)
+    buf += uleb(0) + uleb(0) + uleb(1) + uleb(0)
+    buf += uleb(M_CHILD_INIT - 0) + uleb(0x10001) + uleb(code_child_init)
+
+    # Boom 的 class_data：0 字段 + 1 direct
+    cd_boom = len(buf)
+    buf += uleb(0) + uleb(0) + uleb(1) + uleb(0)
+    buf += uleb(M_BOOM_INIT - 0) + uleb(0x10001) + uleb(code_boom_init)
+
     for pos, off in zip(str_off_pos, str_offsets):
         struct.pack_into("<I", buf, pos, off)
 
@@ -299,21 +410,29 @@ def build():
                      T_MAIN, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_main, 0)
     struct.pack_into("<IIIIIIII", buf, counter_def_pos,
                      T_COUNTER, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_counter, 0)
+    struct.pack_into("<IIIIIIII", buf, base_def_pos,
+                     T_BASE, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_base, 0)
+    struct.pack_into("<IIIIIIII", buf, child_def_pos,
+                     T_CHILD, 0x0001, T_BASE, 0, 0xFFFFFFFF, 0, cd_child, 0)
+    struct.pack_into("<IIIIIIII", buf, rte_def_pos,
+                     T_RTE, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0)
+    struct.pack_into("<IIIIIIII", buf, boom_def_pos,
+                     T_BOOM, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_boom, 0)
 
     data_size = len(buf) - data_off
 
     items = [
         (0x0000, 1, 0),
         (0x0001, len(STRINGS), string_ids_off),
-        (0x0002, 8, type_ids_off),
+        (0x0002, 12, type_ids_off),
         (0x0003, 7, proto_ids_off),
-        (0x0004, 2, field_ids_off),
-        (0x0005, 10, method_ids_off),
-        (0x0006, 2, class_defs_off),
+        (0x0004, 3, field_ids_off),
+        (0x0005, 14, method_ids_off),
+        (0x0006, 6, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
-        (0x2000, 2, cd_counter),
-        (0x2001, 4, code_init),
+        (0x2000, 5, cd_counter),
+        (0x2001, 8, code_init),
         (0x2002, len(STRINGS), str_offsets[0]),
     ]
     items.sort(key=lambda x: x[0])
@@ -325,14 +444,16 @@ def build():
     return buf, dict(
         file_size=len(buf), map_off=map_off,
         string_ids=(len(STRINGS), string_ids_off),
-        type_ids=(8, type_ids_off),
+        type_ids=(12, type_ids_off),
         proto_ids=(7, proto_ids_off),
-        field_ids=(2, field_ids_off),
-        method_ids=(10, method_ids_off),
-        class_defs=(2, class_defs_off),
+        field_ids=(3, field_ids_off),
+        method_ids=(14, method_ids_off),
+        class_defs=(6, class_defs_off),
         data=(data_size, data_off),
         code_init=code_init, code_next=code_next,
         code_run=code_run, code_hello=code_hello,
+        code_base_init=code_base_init, code_base_get=code_base_get,
+        code_child_init=code_child_init, code_boom_init=code_boom_init,
     )
 
 
@@ -365,7 +486,8 @@ def main():
     finish(buf)
     assert struct.unpack_from("<I", buf, 8)[0] == zlib.adler32(bytes(buf[12:])) & 0xffffffff
     assert buf[12:32] == hashlib.sha1(bytes(buf[32:])).digest()
-    for name in ("code_init", "code_next", "code_run", "code_hello"):
+    for name in ("code_init", "code_next", "code_run", "code_hello",
+                 "code_base_init", "code_base_get", "code_child_init", "code_boom_init"):
         off = info[name]
         regs, ins_n, outs, tries, dbg, n = struct.unpack_from("<HHHHII", buf, off)
         insns = [struct.unpack_from("<H", buf, off + 16 + 2 * i)[0] for i in range(n)]

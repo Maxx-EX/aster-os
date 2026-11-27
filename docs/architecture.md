@@ -1397,3 +1397,105 @@ static void run() {
 `append` 只支持 `String` 和 `int` 两种重载。`append(char)`、`append(long)`、`append(Object)` 都没有；`StringBuilder` 只支持一个实例（缓冲是静态单份）；动态字符串槽只有 4 个、单个 96 字节。
 
 这些限制都写在代码注释里。下一步是 `invoke-super` 与异常（`throw` / `try-catch` 的 handler 表），有了异常才能真正跑一个会失败、会 catch 的 APK；再往后是屏幕绘制桥接，把那 1024×768 的 framebuffer 从 `Log` 后面拉出来。
+
+---
+
+## 45. APK-8：继承与异常
+
+到 APK-7 为止，解释器只会"直线执行 + 自己递归调用自己写的方法"。真实 APK 有两件事绕不开：**继承**（子类只声明自己新增的方法，其余上溯父类）和**异常**（构造器可能抛、库方法可能抛，handler 在别的帧里）。
+
+### 45.1 方法解析上溯
+
+`code_of` 原来只在本类里找同名方法。`Child extends Base` 时，`Child` 只有 `<init>`，`get()` 声明在 `Base` 上——`invoke-virtual {child}, Base.get()` 的 `method_id` 指向 `Base`，直接命中；但若代码写的是 `invoke-virtual` 且 `method_id` 指向 `Child`，就找不到。
+
+改为沿 `superclass_idx` 链上溯，最多 4 层：
+
+```rust
+loop {
+    match code_in_class(d, h, desc, name) {
+        Ok(c) => return Ok(c),
+        Err(e) if e != "没有这个类" => {
+            let sup = u32le(d, class_def_pos(d, h, desc)? + 8);
+            if sup == u32::MAX { return Err("类里没有这个方法（已到根类）"); }
+            desc = type_desc(d, h, sup)?;
+        }
+        Err(e) => return Err(e),
+    }
+}
+```
+
+`superclass_idx = 0xFFFFFFFF` 表示根（`java.lang.Object` 我们没建模，就用 MAX 当根）。
+
+### 45.2 `invoke-super`（0x6f）
+
+格式与 `invoke-virtual` 相同（35c），差别只在语义：调父类的同名方法。因为我们不解 `method_id` 里"声明类"以外的信息，`0x6f` 直接并进同一分支，走 `code_of(m.class, m.name)`——`m.class` 本来就指向父类。
+
+fixture 里 `Child.<init>(I)` 就是 `invoke-super {v0,v1}, Base.<init>(I)V`：子类构造器不自己写字段，交给父类写。`Base.<init>` 里 `iput v1, v0, field@2` 把 7 写进对象的字段槽，`Base.get()` 再 `iget` 出来。实拍 `[DEX] 7`，证明整条链（构造器 → 字段 → 继承方法解析）都通了。
+
+### 45.3 异常：一条哨兵错误 + 一张 try 表
+
+不引入 `enum Flow`，也不重写 exec 的返回类型。做法是：
+
+- 一个全局 `THROW_VAL: i32` 存异常对象引用；
+- 一条哨兵错误串 `"__aster_throw"` 当"这是异常不是程序错误"的标记；
+- `throw vAA`：写 `THROW_VAL`，在本方法里找 handler，找到就 `pc = handler`，找不到 `return Err(哨兵)`；
+- 遇到子调用时用 `match` 而不是 `?`：`Err(哨兵)` 就先查本方法在该**调用指令 pc** 上的 handler，接住就跳过去；查不到就继续往上抛；
+- `move-exception vAA`（0x0d）：把 `THROW_VAL` 放进寄存器，handler 第一条指令通常就是它。
+
+`find_handler` 读 `code_item` 的 `tries_size`：
+
+```
+insns[insns_size]        （奇数条时要 2 字节对齐填充）
+try_item[tries_size]     { u32 start_addr; u16 insn_count; u16 handler_off; }
+encoded_catch_handler_list
+```
+
+`handler_off` 相对 handler 列表起点，`encoded_catch_handler` 的 size 是 **sleb128**（有符号），`<= 0` 表示含 catch-all。我们只取第一个地址，不做异常类型匹配——catch-all 就够 demo。
+
+### 45.4 fixture（第六版）
+
+```java
+class Base { int v; Base(int x){v=x;} int get(){return v;} }
+class Child extends Base { Child(int x){ super(x); } }
+class Boom { Boom() { throw new RuntimeException(); } }
+
+static void run() {
+    ... // 数组、静态字段、StringBuilder（APK-6/7 全部保留）
+    Child c = new Child(7);
+    Log.n(c.get());                              // 7
+    try { new Boom(); } catch (Throwable t) { Log.i("caught xmethod"); }
+    try { throw new RuntimeException(); } catch (Throwable t) { Log.i("caught local"); }
+    Log.i("apk8 ok");
+}
+```
+
+101 个 code unit，两张 try 表（`[75,80)` 覆盖 `Boom.<init>` 调用、`[86,89)` 覆盖本地 `throw`），两个 catch-all handler。dex 1860 字节，`demo3.apk` 1264 字节。实拍：
+
+```
+[DEX] 30
+[DEX] array ok
+[DEX] sum=30 hits=1
+[DEX] 7
+[DEX] caught xmethod
+[DEX] caught local
+[DEX] apk8 ok
+run() 执行完（90 条指令），正常 return-void
+```
+
+`caught xmethod` 是跨方法传播：异常在 `Boom.<init>` 里抛，`run` 在调用指令 pc 上接住。`caught local` 是同方法抛出、同方法 handler。
+
+### 45.5 这次的两个坑
+
+**一、`const/4` 又写反一次。** `const/4 v5, #7` 应该是 `0x7512`（lit 7 在高 4 位），我写成 `0x3512`（lit 3），于是 `Child(7)` 变成 `Child(3)`，`get()` 打出 3。上一轮刚记录过这条，说明"记住"不等于"不犯"，唯一的防线是反汇编自检——现在 `mkdex.py` 每次生成都会打印每个 code_item 的 code unit，`0x3512` 一眼就能对上 `v5=3`。
+
+**二、`info` 字典漏键导致 apk 静默不更新。** `main()` 里回填 header 前会遍历 `("code_init", ..., "code_boom_init")` 读 `info[name]`，我加了 code_item 却忘了把这个键塞进 `info`，于是 `KeyError` 抛在写 zip 之前——**`demo3.apk` 一直是上一版**，而内核也一直编译同一个 1860→1682 的旧包，跑出来全是旧输出。这个坑比代码 bug 更阴：脚本"看起来跑了"（前半段反汇编照样打印），只有最后一行 `demo3.apk ... bytes` 消失。所以现在的判断标准是**看最后那行字节数**，看不到就是没写成功。
+
+### 45.6 限制
+
+- 不做异常类型匹配：`catch (IOException)` 和 `catch (Throwable)` 一样处理，永远走第一个 handler 地址。
+- 只有 catch-all 和"第一个 typed handler"两种解码路径，多 handler 的 `encoded_catch_handler` 链没走完（size 为负时的 typed 部分被跳过）。
+- 异常对象不带堆栈、不带 message（`new RuntimeException("x")` 的 `<init>(String)` 会找不到方法）。
+- 方法解析最多 4 层父类；接口（`interfaces_off`）完全没解。
+- `finally` 没有专门支持（DEX 里它被编译成"catch-all + 重抛"，理论上现在就能跑，但没测）。
+
+下一步是**屏幕绘制桥接**：把 `Log.i` 之后的东西拉到 framebuffer 上——`Canvas`/`View` 那一套太重，先做 `Paint`/`drawText`/`drawRect` 三个内建，让 APK 能往屏幕上写一行字、一个方块。那才是"能跑 APK"在用户眼里的样子。

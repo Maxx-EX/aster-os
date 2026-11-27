@@ -143,7 +143,7 @@ pub fn method<'a>(d: &'a [u8], h: &Header, idx: u32) -> Result<MethodRef<'a>, &'
 }
 
 /// 找类里某个 static/direct 方法的 code_off
-pub fn code_of(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<u32, &'static str> {
+fn code_in_class(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<u32, &'static str> {
     let mut i = 0u32;
     while i < h.classes {
         let p = h.c_off as usize + i as usize * 32;
@@ -206,6 +206,46 @@ pub fn code_of(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Res
         i += 1;
     }
     Err("没有这个类")
+}
+
+fn class_def_pos(d: &[u8], h: &Header, class_desc: &str) -> Result<usize, &'static str> {
+    let mut i = 0u32;
+    while i < h.classes {
+        let p = h.c_off as usize + i as usize * 32;
+        let class_idx = u32le(d, p);
+        if type_desc(d, h, class_idx)? == class_desc {
+            return Ok(p);
+        }
+        i += 1;
+    }
+    Err("没有这个类")
+}
+
+/// 沿 superclass 链解析方法：先在本类找，找不到上溯父类（最多 4 层）。
+/// 继承是 APK 的常态：`Child` 只有构造器，`get()` 声明在 `Base` 上。
+pub fn code_of(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<u32, &'static str> {
+    let mut desc = class_desc;
+    let mut depth = 0;
+    loop {
+        match code_in_class(d, h, desc, method_name) {
+            Ok(c) => return Ok(c),
+            Err(e) => {
+                if e == "没有这个类" {
+                    return Err(e);
+                }
+                let p = class_def_pos(d, h, desc)?;
+                let sup = u32le(d, p + 8);
+                if sup == u32::MAX {
+                    return Err("类里没有这个方法（已到根类）");
+                }
+                desc = type_desc(d, h, sup)?;
+                depth += 1;
+                if depth > 4 {
+                    return Err("方法解析超过 4 层父类");
+                }
+            }
+        }
+    }
 }
 
 /// 执行 `class_desc` 里的 `method_name`。
@@ -420,6 +460,73 @@ fn heap_idx(v: i32) -> Result<usize, &'static str> {
     Ok(v as usize)
 }
 
+// —— 异常（APK-8）——
+// 跨方法传播不返回专用类型，而是用一条哨兵错误 + 一个全局异常对象引用：
+// exec 收到哨兵时先在本方法的 try 表里找 handler，找不到才继续往上抛。
+const THROW_SENTINEL: &str = "__aster_throw";
+static mut THROW_VAL: i32 = 0;
+
+/// DEX 里的 sleb128（handler 的 size 字段是有符号的）
+fn sleb(d: &[u8], mut p: usize) -> Result<(i32, usize), &'static str> {
+    let mut v = 0i32;
+    let mut shift = 0;
+    loop {
+        if p >= d.len() {
+            return Err("sleb 越界");
+        }
+        let byte = d[p];
+        p += 1;
+        v |= ((byte & 0x7f) as i32) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            if shift < 32 && (byte & 0x40) != 0 {
+                v |= -1i32 << shift;
+            }
+            return Ok((v, p));
+        }
+        if shift > 28 {
+            return Err("sleb 过长");
+        }
+    }
+}
+
+/// 在方法 `coff` 里找覆盖 `pc` 的 handler，返回 handler 的地址（方法内 pc）。
+/// 只取第一个 handler 的地址——fixture 只有一个 catch-all，不做异常类型匹配。
+fn find_handler(d: &[u8], coff: u32, pc: usize) -> Result<Option<u32>, &'static str> {
+    let p = coff as usize;
+    let tries = u16le(d, p + 6) as usize;
+    if tries == 0 {
+        return Ok(None);
+    }
+    let n = u32le(d, p + 12) as usize;
+    let mut base = p + 16 + n * 2;
+    if n % 2 == 1 {
+        base += 2; // insns 奇数条时要 2 字节对齐填充
+    }
+    let handlers = base + tries * 8;
+    let mut i = 0;
+    while i < tries {
+        let t = base + i * 8;
+        let start = u32le(d, t) as usize;
+        let count = u16le(d, t + 4) as usize;
+        let hoff = u16le(d, t + 6) as usize;
+        if pc >= start && pc < start + count {
+            let hp = handlers + hoff;
+            let (size, q) = sleb(d, hp)?;
+            if size <= 0 {
+                // catch-all：地址紧跟 size
+                let (addr, _) = uleb(d, q)?;
+                return Ok(Some(addr));
+            }
+            let (_, q2) = uleb(d, q)?; // typed handler 的 type_idx
+            let (addr, _) = uleb(d, q2)?;
+            return Ok(Some(addr));
+        }
+        i += 1;
+    }
+    Ok(None)
+}
+
 /// 执行一个方法。`args` 是调用方传进来的寄存器值（this 在第一个位置）。
 fn exec(
     d: &[u8],
@@ -478,6 +585,12 @@ fn exec(
                 // move-result vAA
                 let a = ((u >> 8) & 0xff) as usize;
                 regs[a] = last;
+                pc += 1;
+            }
+            0x0d => {
+                // move-exception vAA
+                let a = ((u >> 8) & 0xff) as usize;
+                regs[a] = unsafe { THROW_VAL };
                 pc += 1;
             }
             0x12 => {
@@ -576,6 +689,15 @@ fn exec(
                 }
                 unsafe { ARRS[i].d[k as usize] = regs[a] };
                 pc += 2;
+            }
+            0x27 => {
+                // throw vAA
+                let a = ((u >> 8) & 0xff) as usize;
+                unsafe { THROW_VAL = regs[a] };
+                match find_handler(d, coff, pc as usize)? {
+                    Some(hp) => pc = hp as i32,
+                    None => return Err(THROW_SENTINEL),
+                }
             }
             0x28 => pc += sx8((u >> 8) & 0xff),
             0x29 => {
@@ -717,7 +839,7 @@ fn exec(
                 regs[a] = regs[b].wrapping_add(sx8(w & 0xff));
                 pc += 2;
             }
-            0x6e | 0x70 | 0x71 => {
+            0x6e | 0x6f | 0x70 | 0x71 => {
                 // invoke-virtual / invoke-direct / invoke-static （都是 35c）
                 let argc = ((u >> 12) & 0xf) as usize;
                 if (pc as usize) + 2 >= n {
@@ -771,7 +893,21 @@ fn exec(
                     }
                 } else {
                     let c2 = code_of(d, h, m.class, m.name)?;
-                    last = exec(d, h, c2, &args[..argc], depth + 1, steps)?;
+                    match exec(d, h, c2, &args[..argc], depth + 1, steps) {
+                        Ok(v) => last = v,
+                        Err(e) if e == THROW_SENTINEL => {
+                            // 异常跨方法传播：本方法有 handler 就接住
+                            match find_handler(d, coff, pc as usize)? {
+                                Some(hp) => {
+                                    pc = hp as i32;
+                                    *steps += 1;
+                                    continue;
+                                }
+                                None => return Err(THROW_SENTINEL),
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 pc += 3;
             }
@@ -801,6 +937,7 @@ pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<
     let coff = code_of(d, h, class_desc, method_name)?;
     heap_reset();
     call_reset();
+    unsafe { THROW_VAL = 0; }
     let mut steps = 0u32;
     exec(d, h, coff, &[], 0, &mut steps)?;
     Ok(steps)
