@@ -216,7 +216,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\nxce\nxce run\nupdate check\nhalt\n' | timeout 55 \
+	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\nxce\nxce run\nupdate check\napp start\napp step\napp step\nhalt\n' | timeout 60 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -231,6 +231,7 @@ test: image
 	@grep -q "caught xmethod" $(B)/test.log && echo "[TEST] PASS DEX 异常：跨方法 throw + try/catch + 方法解析上溯" || (echo "[TEST] FAIL DEX throw" && exit 1)
 	@grep -q "canvas ok" $(B)/test.log && echo "[TEST] PASS APK 画布：Canvas clear/setColor/drawRect/drawText 落到 framebuffer" || (echo "[TEST] FAIL canvas" && exit 1)
 	@grep -q "no touch" $(B)/test.log && echo "[TEST] PASS APK 画布触摸：touchX/touchY 无事件返回 -1" || (echo "[TEST] FAIL canvas touch" && exit 1)
+	@grep -q "帧 2 完成，画布命令 3 条" $(B)/test.log && echo "[TEST] PASS APK 驻留：Main.frame()V 帧回调 + 静态字段初值" || (echo "[TEST] FAIL app frame" && exit 1)
 	@grep -q "deflate 解压正确" $(B)/test.log && echo "[TEST] PASS inflate（deflate 条目还原）" || (echo "[TEST] FAIL deflate" && exit 1)
 	@grep -q "XCE ok: native program, EL0, Aster" $(B)/test.log && echo "[TEST] PASS XCE：原生程序装载 + EL0 执行 + SVC exit" || (echo "[TEST] FAIL XCE" && exit 1)
 	@grep -q "Device Lock 锁定" $(B)/test.log && echo "[TEST] PASS Device Lock 默认锁定" || (echo "[TEST] FAIL DL" && exit 1)

@@ -786,6 +786,7 @@ pub fn run() -> ! {
                 crate::fb::close_win(i);
                 println!("  [WIN] {} 关闭", i);
             }
+            "app" | "app on" | "app off" | "app start" | "app stop" | "app status" | "app step" => cmd_app(line),
             "canvas" | "canvas on" | "canvas off" => {
                 let (nc, dropped) = crate::apkcanvas::stats();
                 if line == "canvas off" || line == "canvas" {
@@ -978,6 +979,106 @@ fn fnv1a64(data: &[u8]) -> u64 {
         h = h.wrapping_mul(0x1_0000_0001_b3);
     }
     h
+}
+
+// —— APK-11：驻留 app（帧回调 + 拖动）——
+static mut APP_ON: bool = false;
+static mut APP_FRAMES: u64 = 0;
+
+pub fn app_active() -> bool {
+    unsafe { APP_ON }
+}
+
+pub fn app_frames() -> u64 {
+    unsafe { APP_FRAMES }
+}
+
+fn app_dex() -> Result<(&'static [u8], crate::dex::Header), &'static str> {
+    let buf = unsafe { &mut INFL_BUF[..] };
+    let n = crate::zip::extract(DEMO3_APK, "classes.dex", buf)?;
+    // 注意：这里必须把 buffer 当成 'static —— INFL_BUF 本身是静态的
+    let d: &'static [u8] = unsafe { &INFL_BUF[..n] };
+    let h = crate::dex::header(d)?;
+    Ok((d, h))
+}
+
+fn app_start() -> Result<(), &'static str> {
+    let (d, h) = app_dex()?;
+    crate::dex::app_begin(d, &h, "Lcom/aster/Main;")?;
+    unsafe {
+        APP_ON = true;
+        APP_FRAMES = 0;
+    }
+    crate::apkcanvas::set_active(true);
+    Ok(())
+}
+
+/// 一帧：失败返回错误串并自动停机，免得每帧都刷同一条错误
+pub fn app_frame() -> Option<&'static str> {
+    if !app_active() {
+        return None;
+    }
+    let (d, h) = match app_dex() {
+        Ok(v) => v,
+        Err(e) => {
+            unsafe { APP_ON = false };
+            return Some(e);
+        }
+    };
+    // 每帧从空命令表开始：APK 画什么就是什么，不叠昨天的帧
+    crate::apkcanvas::reset();
+    match crate::dex::app_step(d, &h, "Lcom/aster/Main;", "frame") {
+        Ok(_) => {
+            unsafe { APP_FRAMES += 1 };
+            None
+        }
+        Err(e) => {
+            unsafe { APP_ON = false };
+            Some(e)
+        }
+    }
+}
+
+fn cmd_app(line: &str) {
+    match line {
+        "app" | "app status" => {
+            if app_active() {
+                let (nc, drop) = crate::apkcanvas::stats();
+                println!("  [APP] 运行中，已画 {} 帧，命令 {} 条（丢弃 {}）", app_frames(), nc, drop);
+            } else {
+                println!("  [APP] 未运行。app start 起动 Main.frame()V");
+            }
+        }
+        "app step" => {
+            // 手动跑一帧：无显示环境（-nographic）也能验证 frame() 能出命令
+            if !app_active() {
+                match app_start() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        println!("  [APP] 起动失败: {}", e);
+                        return;
+                    }
+                }
+            }
+            match app_frame() {
+                None => {
+                    let (nc, _) = crate::apkcanvas::stats();
+                    println!("  [APP] 帧 {} 完成，画布命令 {} 条", app_frames(), nc);
+                }
+                Some(e) => println!("  [APP] 帧失败: {}", e),
+            }
+        }
+        "app off" | "app stop" => {
+            unsafe { APP_ON = false };
+            println!("  [APP] 已停止，画布保留最后一帧（{} 帧）", app_frames());
+        }
+        _ => match app_start() {
+            Ok(()) => println!(
+                "  [APP] 起动 Main.frame()V：画布 320x200，点击落点定位、按住拖动跟手。app stop 停止"
+            ),
+            Err(e) => println!("  [APP] 起动失败: {}", e),
+        },
+    }
 }
 
 fn cmd_dex(a: &str) {

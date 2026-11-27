@@ -924,6 +924,15 @@ fn exec(
 
                         }
                         "touchY" => last = crate::apkcanvas::last_touch().1,
+                        "moveX" => {
+                            last = match crate::apkcanvas::take_move() {
+                                Some((tx, _)) => tx,
+                                None => -1,
+                            };
+                        }
+                        "moveY" => last = crate::apkcanvas::last_move().1,
+                        "width" => last = crate::apkcanvas::CW,
+                        "height" => last = crate::apkcanvas::CH,
                         _ => return Err("Canvas 上没有这个方法"),
                     }
                 } else {
@@ -966,6 +975,98 @@ fn exec(
         *steps += 1;
     }
     Ok(rv)
+}
+
+/// 解析某个类的 static_values，把初值写进静态字段槽（APK-11 新增）。
+/// 只认 VALUE_INT（demo 里的静态字段全是 int）。
+pub fn load_statics(d: &[u8], h: &Header, class_desc: &str) -> Result<(), &'static str> {
+    let cd = class_def_pos(d, h, class_desc)?;
+    let class_data_off = u32le(d, cd + 24);
+    let sv_off = u32le(d, cd + 28);
+    if class_data_off == 0 || class_data_off == 0xFFFF_FFFF {
+        return Ok(());
+    }
+    let mut p = class_data_off as usize;
+    let (n_static, np) = uleb(d, p)?;
+    p = np;
+    let (_, np) = uleb(d, p)?;
+    p = np;
+    let (_, np) = uleb(d, p)?;
+    p = np;
+    let (_, np) = uleb(d, p)?;
+    p = np;
+
+    let mut fids = [0u32; NSFIELD];
+    let mut nf = 0usize;
+    let mut idx = 0u32;
+    let mut i = 0u32;
+    while i < n_static {
+        let (diff, np) = uleb(d, p)?;
+        idx += diff;
+        p = np;
+        let (_, np) = uleb(d, p)?;
+        p = np;
+        if nf < NSFIELD {
+            fids[nf] = idx;
+            nf += 1;
+        }
+        i += 1;
+    }
+
+    if sv_off == 0 || sv_off == 0xFFFF_FFFF {
+        return Ok(());
+    }
+    let mut q = sv_off as usize;
+    let (size, nq) = uleb(d, q)?;
+    q = nq;
+    let mut k = 0u32;
+    while k < size {
+        if q >= d.len() {
+            return Err("static_values 越界");
+        }
+        let b = d[q];
+        q += 1;
+        let nb = (b >> 5) as usize + 1;
+        let mut v: i64 = 0;
+        let mut j = 0usize;
+        while j < nb {
+            if q >= d.len() {
+                return Err("static_values 越界");
+            }
+            v |= (d[q] as i64) << (j * 8);
+            q += 1;
+            j += 1;
+        }
+        let bits = nb * 8;
+        if bits < 64 && (v & (1i64 << (bits - 1))) != 0 {
+            v -= 1i64 << bits;
+        }
+        if (k as usize) < nf {
+            let fi = fids[k as usize] as usize;
+            if fi < NSFIELD {
+                unsafe { SFIELDS[fi] = v as i32 };
+            }
+        }
+        k += 1;
+    }
+    Ok(())
+}
+
+/// 启动 app：清堆、清静态、装初值、确认 frame 存在（APK-11）
+pub fn app_begin(d: &[u8], h: &Header, class_desc: &str) -> Result<u32, &'static str> {
+    heap_reset();
+    call_reset();
+    unsafe { THROW_VAL = 0 };
+    load_statics(d, h, class_desc)?;
+    code_of(d, h, class_desc, "frame")
+}
+
+/// 跑一帧（不重置任何状态，静态字段/对象堆跨帧保留）
+pub fn app_step(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<u32, &'static str> {
+    let coff = code_of(d, h, class_desc, method_name)?;
+    let mut steps = 0u32;
+    exec(d, h, coff, &[], 0, &mut steps)?;
+    Ok(steps)
 }
 
 pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<u32, &'static str> {

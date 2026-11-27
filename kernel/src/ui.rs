@@ -11,6 +11,8 @@ const MIN_INTERVAL_MS: u64 = 70;
 static mut LAST: u64 = 0;
 static mut BLINK: bool = true;
 static mut DRAG: usize = usize::MAX;
+static mut LASTM: (i32, i32) = (-1, -1);
+static mut APP_MS: u64 = 0;
 static mut OFF_X: i32 = 0;
 static mut OFF_Y: i32 = 0;
 
@@ -36,7 +38,18 @@ pub fn tick() {
         crate::cursor::invalidate();
     }
 
-    let want = handle_mouse();
+    let mut want = handle_mouse();
+
+    // APK 帧回调：30ms 一拍，交给 dex 跑 Main.frame()V，跑完就重绘
+    if crate::shell::app_active() {
+        let now = timer::now_ms();
+        if now.saturating_sub(unsafe { APP_MS }) >= 30 {
+            unsafe { APP_MS = now };
+            if crate::shell::app_frame().is_some() {
+                want = true;
+            }
+        }
+    }
     let now = timer::now_ms();
     let dirty = crate::term::dirty();
 
@@ -149,6 +162,21 @@ fn handle_mouse() -> bool {
                 crate::cursor::invalidate();
                 want = true;
             }
+        }
+    }
+
+    // 画布拖动：按住左键在画布上移动 → move 队列
+    if crate::apkcanvas::active() {
+        let down = input::mouse_buttons() & 1 != 0;
+        if down && (mx, my) != unsafe { LASTM } {
+            if let Some((cx, cy)) = crate::apkcanvas::screen_to_canvas(mx, my) {
+                crate::apkcanvas::push_move(cx, cy);
+                want = true;
+            }
+            unsafe { LASTM = (mx, my) };
+        }
+        if !down {
+            unsafe { LASTM = (-1, -1) };
         }
     }
 

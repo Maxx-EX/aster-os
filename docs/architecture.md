@@ -1629,3 +1629,111 @@ dex 2424 字节，`demo3.apk` 1551 字节。实拍：先 `canvas on` 让画布�
 - 坐标是画布像素，没有压力、没有多点、没有时间戳。
 - 画布仍然固定 320×200 / 2 倍 / 居中；命中区跟着 `origin()` 走，但 APK 自己不知道画布尺寸（没有 `width()`/`height()`）。
 - 无显示环境（`-nographic`）下 `ui::tick` 不消费指针，`make test` 只能断言"无事件返回 -1"，命中路径靠图形截图取证（`build/apk10t.png`）。
+
+---
+
+## 48. APK-11：驻留 app（帧回调 + 拖动）
+
+到 APK-10 为止，`dex run` 还是"跑完一个方法就退出"的脚本模型：画一次图，然后进程结束，Dex 状态全丢。这一节把它改成**能一直活着、每帧重画、跟着手指走**的 app。
+
+### 48.1 事件模型
+
+`apkcanvas` 的触摸队列从"一个 (x, y, down) 环形队列"拆成两条：
+
+| 队列 | 深度 | 语义 | 对应 API |
+|---|---|---|---|
+| `DQ` | 8 | 按下点（抬起丢弃） | `touchX()` / `touchY()` |
+| `MQ` | 8 | 拖动点（满了丢最老的，永远留最新） | `moveX()` / `moveY()` |
+
+分开的理由很直白：**按下是离散事件不能丢，拖动是连续状态丢掉旧的正好**。混在一个队列里，APK 一帧取一次就只能看到 1/6 的拖动轨迹，方块会抽搐。
+
+`ui::handle_mouse()` 里新增一段：画布 active 且左键按住、鼠标位置相对上一拍有变化 → `push_move(换算后的画布坐标)`。抬起或指针移出画布就清空"上一拍位置"，下次按下重新开始。
+
+### 48.2 帧回调
+
+shell 里保存三件事：`APP_ON`、`APP_FRAMES`，dex 数据则每帧从 `INFL_BUF` 现取（`zip::extract` 是 stored 条目，2.8 KiB 拷贝，代价可以忽略，好处是不用操心生命周期）。
+
+```rust
+pub fn app_active() -> bool
+pub fn app_frame() -> Option<&'static str>   // None = 这一帧跑成功
+```
+
+`ui::tick()` 里每 30 ms 调一次 `app_frame()`：
+
+```rust
+if crate::shell::app_active() {
+    let now = timer::now_ms();
+    if now.saturating_sub(APP_MS) >= 30 {
+        APP_MS = now;
+        if crate::shell::app_frame().is_some() { want = true; }  // 出错就不再重绘
+    }
+}
+```
+
+`app_frame()` 的流程是：`apkcanvas::reset()` → `zip::extract` → `header` → `dex::app_step("Main", "frame")`。**关键在 `reset()`**：每帧从空命令表开始画，APK 画什么就是什么；否则上一帧的命令会叠上来，48 条槽很快塞满。
+
+失败即停机：`app_frame` 把错误串返回给 UI，同时把 `APP_ON` 置 false，避免同一个错误每 30 ms 刷一次屏幕。
+
+dex 侧新增两个入口：
+
+- `app_begin(d, h, class)`：清对象堆、清静态字段、**装 static_values 初值**、确认 `frame()` 存在。起动时调一次。
+- `app_step(d, h, class, name)`：只 `exec`，不重置任何状态——静态字段和对象堆跨帧活着，这才是 app。
+
+`Canvas.<init>` 仍然是 `reset + set_active(true)`，所以 APK 第一帧建完 Canvas 之后就一直有画布。
+
+### 48.3 静态字段初值（static_values）
+
+这一版第一次用到 `class_def.static_values_off`：DEX 的静态字段初值不在 `field_ids` 里，而是在类定义指向的一个 `encoded_array` 中，**按 class_data 里静态字段的声明顺序**一一对应。
+
+`load_statics()` 做的事：读 class_data 拿到静态字段的 field_idx 列表 → 读 encoded_array → 逐个写进 `SFIELDS`。值类型只认 `VALUE_INT`（`0x04`），`value_arg` 是"字节数 − 1"。
+
+fixture 里 `cvh = 0, hits = 1, px = 140, py = 80`，于是 app 一启动方块就在画面中间偏左，而不是从 (0,0) 角落爬出来。
+
+### 48.4 fixture 第九版
+
+`tools/mkdex.py` 新增 `Main.frame()V`（107 code unit，dex 2818 字节，`demo3.apk` 1767 字节）：
+
+```
+static int cvh, px = 140, py = 80;
+static void frame() {
+    if (cvh == 0) cvh = new Canvas();
+    Canvas c = cvh;                  // 解释器里对象引用就是堆索引，直接 sget 出来当 this 用
+    c.clear(0x101418);
+    c.setColor(0x5b99ff); c.drawRect(16, 16, 40, 4);
+    c.setColor(0xdadde2); c.drawText("Aster APK", 16, 36);
+    c.setColor(0x46c46a); c.drawRect(px, py, 32, 32);
+    int mx = c.moveX();  if (mx >= 0) { px = mx - 16; py = c.moveY() - 16; }
+    int tx = c.touchX(); if (tx >= 0) { px = tx - 16; py = c.touchY() - 16; }
+}
+```
+
+Canvas 句柄存进静态字段是这版的一个小技巧：`new-instance` 只跑第一帧（`if (cvh == 0)`），之后每帧 `sget v6, cvh` 拿同一个堆索引当 `this` 传给 `invoke-virtual`。解释器不检查类型，对象引用本来就是 i32 的堆索引，所以这条路畅通——也意味着**对象堆只有 8 个槽，app 要是每帧 new 一个对象就会在 8 帧后爆掉**，这是明确的 demo 级限制。
+
+实拍三张：
+
+1. `app start` → 蓝下划线 + 灰白标题 + 绿方块在 (140,80)，`app status` 报 "已画 54 帧，命令 3 条"。
+2. `app start` + `sim drag 400 400 → 620 470` → 方块跟到光标处（画布 (198,127)），79 帧。
+3. `app start` + `sim click 500 300` → 方块跳到点击点（画布 (138,42)），101 帧。
+
+### 48.5 这轮踩到的四个坑
+
+**一、每帧忘了清命令表。** 第一版 `app_frame` 直接 `app_step`，于是命令累积到 48 条上限，`app status` 打出"命令 2 条（丢弃 42）"——画面只留下最初几笔，剩下全被丢掉。判据是 `DROPPED` 不为 0。修法就是每帧 `reset()`。
+
+**二、`add-int/lit8` 的 22b 单元字节序。** 我按 `lit<<8 | BB` 写 `0xF000`，内核读出来的 BB 是 240，`regs[240]` 直接越界 panic（`dex.rs:850`）。正确是 `BB<<8 | lit`：`add-int/lit8 v3, v0, #-16` → `0x00F0`（BB=0，lit=0xF0=−16）。
+
+**三、`VALUE_INT` 是带符号的。** `px = 140` 我写成单字节 `0x04 0x8c`，解析时按 8 位符号扩展成 **−116**，方块被画到画布外，屏幕上什么都看不到。要写正数就得给两个字节：`0x24 0x8c 0x00`（value_arg=1）。同类错误在 `const/4`、`const/16` 上都踩过，这次轮到了 encoded_value。
+
+**四、连续重绘导致截图撕裂。** app 跑着的时候 UI 每 70 ms 重绘一次，`screendump` 大概率抓到中间态：整窗空白、只剩标题条、画布一块纯色。取证套路是 `app stop` 之后再补两条 `uptime` 静置，画面就稳了。**别把撕裂当成绘制 bug 去改 `apkcanvas`。**
+
+### 48.6 限制
+
+- 帧率受 UI 的 70 ms 重绘节流限制，实际 ~14 fps；没有脏矩形，每帧整块画布重画。
+- 没有 `onCreate`/`onPause`/`onDestroy`，只有 `frame()`；也没有 `stop` 通知给 APK（停就是内核侧不调了）。
+- 拖动没有速度/加速度，坐标一步到位；没有多点、没有压力。
+- 对象堆 8 槽、数组 4 槽、动态字符串 4 槽、StringBuilder 单实例，全是 demo 规模。
+- 画布固定 320×200 / 2 倍；`width()/height()` 已经能自报尺寸，但不支持改。
+- `app` 只认内嵌的 `demo3.apk`，还不能从 AsterFS 选包。
+
+### 48.7 下一步
+
+到这里"APK 能画、能点、能拖、能活着"四件都齐了。下一站建议是**把画布让给真正的 Activity 语义**：`onCreate` 一次、`frame` 循环、`onTouch` 事件分发，再加上 `Intent` 那种最简的启动参数——这是"跑真实 APK"的最后一块拼图。同时顺手把 `new-array`/对象堆的上限放开（页帧分配器已经就绪，缺的只是把它接给解释器）。

@@ -160,13 +160,18 @@ pub fn draw_if_active() {
     );
 }
 
-// —— 触摸（APK-10）——
-// 画布上的点击由 ui::handle_mouse 转进来，APK 用 touchX()/touchY() 取。
+// —— 触摸（APK-10/11）——
+// 画布上的点击由 ui::handle_mouse 转进来，APK 用 touchX()/touchY() 取；
+// 拖动由 push_move() 进单独的 move 队列，APK 用 moveX()/moveY() 取。
 const MAXT: usize = 8;
-static mut TQ: [(i32, i32, bool); MAXT] = [(0, 0, false); MAXT];
-static mut TQN: usize = 0;
-static mut TQR: usize = 0;
+static mut DQ: [(i32, i32); MAXT] = [(0, 0); MAXT];
+static mut DQN: usize = 0;
+static mut DQR: usize = 0;
+static mut MQ: [(i32, i32); MAXT] = [(0, 0); MAXT];
+static mut MQN: usize = 0;
+static mut MQR: usize = 0;
 static mut LASTT: (i32, i32) = (0, 0);
+static mut LASTMV: (i32, i32) = (0, 0);
 
 fn origin() -> (i32, i32) {
     let sw = crate::fb::width() as i32;
@@ -186,34 +191,65 @@ pub fn screen_to_canvas(sx: i32, sy: i32) -> Option<(i32, i32)> {
     }
 }
 
+/// 按下/抬起都压进 down 队列（take_touch 只取按下）
 pub fn push_touch(x: i32, y: i32, down: bool) {
+    if !down {
+        return; // 抬起不关心：抬到画布外也照样结束拖动
+    }
     unsafe {
-        if TQN - TQR >= MAXT {
+        if DQN - DQR >= MAXT {
             return; // 队列满就丢，别让 UI 线程卡住
         }
-        TQ[TQN % MAXT] = (x, y, down);
-        TQN += 1;
+        DQ[DQN % MAXT] = (x, y);
+        DQN += 1;
     }
 }
 
-/// 取下一条"按下"事件（抬起事件丢掉——demo 只关心落点）
+/// 拖动：满队时就丢最老的，永远保留最新位置
+pub fn push_move(x: i32, y: i32) {
+    unsafe {
+        if MQN - MQR >= MAXT {
+            MQR += 1;
+        }
+        MQ[MQN % MAXT] = (x, y);
+        MQN += 1;
+    }
+}
+
+/// 取下一条"按下"事件
 pub fn take_touch() -> Option<(i32, i32)> {
     unsafe {
-        while TQR < TQN {
-            let i = TQR % MAXT;
-            TQR += 1;
-            let (x, y, down) = TQ[i];
-            if down {
-                LASTT = (x, y);
-                return Some((x, y));
-            }
+        if DQR >= DQN {
+            return None;
         }
-        None
+        let i = DQR % MAXT;
+        DQR += 1;
+        let (x, y) = DQ[i];
+        LASTT = (x, y);
+        Some((x, y))
+    }
+}
+
+/// 取下一条"拖动"事件（无则 None）
+pub fn take_move() -> Option<(i32, i32)> {
+    unsafe {
+        if MQR >= MQN {
+            return None;
+        }
+        let i = MQR % MAXT;
+        MQR += 1;
+        let (x, y) = MQ[i];
+        LASTMV = (x, y);
+        Some((x, y))
     }
 }
 
 pub fn last_touch() -> (i32, i32) {
     unsafe { LASTT }
+}
+
+pub fn last_move() -> (i32, i32) {
+    unsafe { LASTMV }
 }
 
 pub fn stats() -> (usize, usize) {

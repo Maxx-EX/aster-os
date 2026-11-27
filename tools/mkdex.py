@@ -92,17 +92,24 @@ STRINGS = [
     "caught local",
     "caught xmethod",
     "clear",
+    "cvh",
     "drawRect",
     "drawText",
+    "frame",
     "get",
+    "height",
     "hello",
     "hits",
     "i",
     "loop done",
+    "moveX",
+    "moveY",
     "n",
     "next",
     "no touch",
     "objects ok",
+    "px",
+    "py",
     "run",
     "setColor",
     "sum=",
@@ -111,6 +118,7 @@ STRINGS = [
     "touchX",
     "touchY",
     "v",
+    "width",
 ]
 assert STRINGS == sorted(STRINGS), "string_ids 必须升序"
 IDX = {s: i for i, s in enumerate(STRINGS)}
@@ -132,6 +140,9 @@ S_APKTITLE, S_CANVASOK = IDX["Aster APK"], IDX["canvas ok"]
 S_CLEAR, S_SETCOLOR, S_DRECT, S_DTEXT = IDX["clear"], IDX["setColor"], IDX["drawRect"], IDX["drawText"]
 S_TOUCHHIT, S_NOTOUCH = IDX["touch hit"], IDX["no touch"]
 S_TOUCHX, S_TOUCHY = IDX["touchX"], IDX["touchY"]
+S_CVH_F, S_PX_F, S_PY_F = IDX["cvh"], IDX["px"], IDX["py"]
+S_FRAME = IDX["frame"]
+S_MVX, S_MVY, S_W, S_H = IDX["moveX"], IDX["moveY"], IDX["width"], IDX["height"]
 S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
 S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
 
@@ -141,7 +152,8 @@ T_BASE, T_CHILD, T_RTE, T_BOOM, T_CV = 8, 9, 10, 11, 12
 P_STR, P_VOID, P_INT_V, P_INT_I = 0, 1, 2, 3
 P_APP_STR, P_APP_INT, P_SB_VOID = 4, 5, 6
 P_DRECT, P_DTEXT = 7, 8
-F_V, F_HITS, F_BASE_V = 0, 1, 2
+# 字段表顺序（同 class 内 name 升序）：cvh/hits/px/py 都在 Main 上
+F_V, F_CVH, F_HITS, F_PX, F_PY, F_BASE_V = 0, 1, 2, 3, 4, 5
 # method：0=Log.i 1=Log.n 2=Counter.<init> 3=Counter.next 4=Main.run 5=Main.hello
 #        6=SB.<init> 7=SB.append(String) 8=SB.append(I) 9=SB.toString
 M_I, M_N, M_INIT, M_NEXT, M_RUN, M_HELLO = 0, 1, 2, 3, 4, 5
@@ -149,6 +161,8 @@ M_SB_INIT, M_SB_APP_S, M_SB_APP_I, M_SB_STR = 6, 7, 8, 9
 M_BASE_INIT, M_BASE_GET, M_CHILD_INIT, M_BOOM_INIT = 10, 11, 12, 13
 M_CV_INIT, M_CV_CLEAR, M_CV_COLOR, M_CV_RECT, M_CV_TEXT = 14, 15, 16, 17, 18
 M_CV_TX, M_CV_TY = 19, 20
+M_FRAME = 21
+M_CV_MVX, M_CV_MVY, M_CV_W, M_CV_H = 22, 23, 24, 25
 
 
 def build():
@@ -180,9 +194,12 @@ def build():
     buf += struct.pack("<III", S_VLII, T_V, 0)    # 8: (String,II)V
 
     field_ids_off = len(buf)
-    buf += struct.pack("<HHI", T_COUNTER, T_INT, S_V_F)
-    buf += struct.pack("<HHI", T_MAIN, T_INT, S_HITS_F)
-    buf += struct.pack("<HHI", T_BASE, T_INT, S_V_F)
+    buf += struct.pack("<HHI", T_COUNTER, T_INT, S_V_F)   # 0 Counter.v
+    buf += struct.pack("<HHI", T_MAIN, T_INT, S_CVH_F)     # 1 Main.cvh（Canvas 句柄）
+    buf += struct.pack("<HHI", T_MAIN, T_INT, S_HITS_F)    # 2 Main.hits
+    buf += struct.pack("<HHI", T_MAIN, T_INT, S_PX_F)      # 3 Main.px
+    buf += struct.pack("<HHI", T_MAIN, T_INT, S_PY_F)      # 4 Main.py
+    buf += struct.pack("<HHI", T_BASE, T_INT, S_V_F)       # 5 Base.v
 
     method_ids_off = len(buf)
     buf += struct.pack("<HHI", T_LOG, P_STR, S_I_M)
@@ -206,6 +223,11 @@ def build():
     buf += struct.pack("<HHI", T_CV, P_DTEXT, S_DTEXT)         # 18 drawText(String,II)V
     buf += struct.pack("<HHI", T_CV, P_INT_I, S_TOUCHX)        # 19 touchX()I
     buf += struct.pack("<HHI", T_CV, P_INT_I, S_TOUCHY)        # 20 touchY()I
+    buf += struct.pack("<HHI", T_MAIN, P_VOID, S_FRAME)        # 21 Main.frame()V
+    buf += struct.pack("<HHI", T_CV, P_INT_I, S_MVX)          # 22 moveX()I
+    buf += struct.pack("<HHI", T_CV, P_INT_I, S_MVY)          # 23 moveY()I
+    buf += struct.pack("<HHI", T_CV, P_INT_I, S_W)            # 24 width()I
+    buf += struct.pack("<HHI", T_CV, P_INT_I, S_H)            # 25 height()I
 
     class_defs_off = len(buf)
     main_def_pos = len(buf)
@@ -464,6 +486,71 @@ def build():
     buf += struct.pack("<HHHHII", 2, 1, 0, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
+    # Main.frame()V —— APK-11：一帧一画，静态字段跨帧保留
+    #   if (cvh == 0) cvh = new Canvas();
+    #   c.clear(0x101418); setColor; drawRect(16,16,40,4);
+    #   drawText("Aster APK",16,36); setColor(0x46c46a); drawRect(px,py,32,32);
+    #   "拖动/点击都把方块跟到手指位置"
+    code_frame = len(buf)
+    ins = [
+        0x0060, F_CVH,               # 0  sget v0, cvh
+        0x0038, 0x0700,              # 2  if-eqz v0, +7 -> 9
+        0x0022, T_CV,                # 4  new-instance v0, Canvas
+        0x1070, M_CV_INIT, 0x0000,   # 6  invoke-direct {v0}, <init>()V
+        0x0067, F_CVH,               # 9  sput cvh, v0
+        0x0660, F_CVH,               # 11 sget v6, cvh
+        0x0114, 0x1418, 0x0010,      # 13 const v1, #0x101418
+        0x206e, M_CV_CLEAR, 0x0016,  # 16 clear(v1)
+        0x0114, 0x99ff, 0x005b,      # 19 const v1, #0x5b99ff
+        0x206e, M_CV_COLOR, 0x0016,  # 22 setColor(v1)
+        0x0113, 0x0010,              # 25 const/16 v1, #16
+        0x0313, 0x0010,              # 27 const/16 v3, #16
+        0x0213, 0x0028,              # 29 const/16 v2, #40
+        0x0713, 0x0004,              # 31 const/16 v7, #4
+        0x576e, M_CV_RECT, 0x2316,   # 33 drawRect(v1,v3,v2,v7)
+        0x0114, 0xdde2, 0x00da,      # 36 const v1, #0xdadde2（标题用灰白）
+        0x206e, M_CV_COLOR, 0x0016,  # 39 setColor(v1)
+        0x021a, S_APKTITLE,          # 42 const-string v2, "Aster APK"
+        0x0113, 0x0010,              # 38 const/16 v1, #16
+        0x0313, 0x0024,              # 40 const/16 v3, #36
+        0x406e, M_CV_TEXT, 0x3126,   # 42 drawText(v2,v1,v3)
+        0x0114, 0xc46a, 0x0046,      # 45 const v1, #0x46c46a
+        0x206e, M_CV_COLOR, 0x0016,  # 48 setColor(v1)
+        0x0760, F_PX,                # 51 sget v7, px
+        0x0360, F_PY,                # 53 sget v3, py
+        0x0113, 0x0020,              # 55 const/16 v1, #32
+        0x0213, 0x0020,              # 57 const/16 v2, #32
+        0x526e, M_CV_RECT, 0x1376,   # 59 drawRect(v7,v3,v1,v2)
+        0x106e, M_CV_MVX, 0x0006,    # 62 moveX()
+        0x000a,                      # 65 move-result v0
+        0x0212,                      # 66 const/4 v2, #0
+        0x2033, 0x0E00,              # 67 if-lt v0, v2 -> +14（跳到 81）
+        0x03d8, 0x00F0,              # 69 add-int/lit8 v3, v0, #-16
+        0x0367, F_PX,                # 71 sput px, v3
+        0x106e, M_CV_MVY, 0x0006,    # 73 moveY()
+        0x000a,                      # 76 move-result v0
+        0x03d8, 0x00F0,              # 77 add-int/lit8 v3, v0, #-16
+        0x0367, F_PY,                # 79 sput py, v3
+        0x106e, M_CV_TX, 0x0006,     # 81 touchX()
+        0x000a,                      # 84 move-result v0
+        0x0212,                      # 85 const/4 v2, #0
+        0x2033, 0x0E00,              # 86 if-lt v0, v2 -> +14（跳到 100）
+        0x03d8, 0x00F0,              # 88 add-int/lit8 v3, v0, #-16
+        0x0367, F_PX,                # 90 sput px, v3
+        0x106e, M_CV_TY, 0x0006,     # 92 touchY()
+        0x000a,                      # 95 move-result v0
+        0x03d8, 0x00F0,              # 96 add-int/lit8 v3, v0, #-16
+        0x0367, F_PY,                # 98 sput py, v3
+        0x000e,                      # 100 return-void
+    ]
+    assert len(ins) == 107, len(ins)
+    buf += struct.pack("<HHHHII", 8, 0, 0, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
+    # Main 的 static_values：cvh=0, hits=1, px=140, py=80
+    sv_main = len(buf)
+    buf += uleb(4) + b"\x04\x00" + b"\x04\x01" + b"\x24\x8c\x00" + b"\x04\x50"
+
     # Counter 的 class_data：1 个实例字段，1 个 direct，1 个 virtual
     cd_counter = len(buf)
     buf += uleb(0) + uleb(1) + uleb(1) + uleb(1)
@@ -472,12 +559,16 @@ def build():
     # virtual methods 的 method_idx_diff 也从 0 开始累加，不是接着 direct 的
     buf += uleb(M_NEXT - 0) + uleb(0x0001) + uleb(code_next)
 
-    # Main 的 class_data：1 个静态字段 + 2 个 direct
+    # Main 的 class_data：4 个静态字段 + 3 个 direct（APK-11 加了 cvh/px/py 和 frame）
     cd_main = len(buf)
-    buf += uleb(1) + uleb(0) + uleb(2) + uleb(0)
-    buf += uleb(F_HITS - 0) + uleb(0x0008)       # hits：static int
+    buf += uleb(4) + uleb(0) + uleb(3) + uleb(0)
+    buf += uleb(F_CVH - 0) + uleb(0x0008)        # cvh：static int
+    buf += uleb(F_HITS - F_CVH) + uleb(0x0008)   # hits
+    buf += uleb(F_PX - F_HITS) + uleb(0x0008)    # px
+    buf += uleb(F_PY - F_PX) + uleb(0x0008)      # py
     buf += uleb(M_RUN - 0) + uleb(0x0009) + uleb(code_run)
     buf += uleb(M_HELLO - M_RUN) + uleb(0x0009) + uleb(code_hello)
+    buf += uleb(M_FRAME - M_HELLO) + uleb(0x0009) + uleb(code_frame)
 
     # Base 的 class_data：1 实例字段 + 1 direct + 1 virtual
     cd_base = len(buf)
@@ -500,7 +591,7 @@ def build():
         struct.pack_into("<I", buf, pos, off)
 
     struct.pack_into("<IIIIIIII", buf, main_def_pos,
-                     T_MAIN, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_main, 0)
+                     T_MAIN, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_main, sv_main)
     struct.pack_into("<IIIIIIII", buf, counter_def_pos,
                      T_COUNTER, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_counter, 0)
     struct.pack_into("<IIIIIIII", buf, base_def_pos,
@@ -521,13 +612,13 @@ def build():
         (0x0001, len(STRINGS), string_ids_off),
         (0x0002, 13, type_ids_off),
         (0x0003, 9, proto_ids_off),
-        (0x0004, 3, field_ids_off),
-        (0x0005, 21, method_ids_off),
+        (0x0004, 6, field_ids_off),
+        (0x0005, 26, method_ids_off),
         (0x0006, 7, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
         (0x2000, 5, cd_counter),
-        (0x2001, 8, code_init),
+        (0x2001, 9, code_init),
         (0x2002, len(STRINGS), str_offsets[0]),
     ]
     items.sort(key=lambda x: x[0])
@@ -541,14 +632,15 @@ def build():
         string_ids=(len(STRINGS), string_ids_off),
         type_ids=(13, type_ids_off),
         proto_ids=(9, proto_ids_off),
-        field_ids=(3, field_ids_off),
-        method_ids=(21, method_ids_off),
+        field_ids=(6, field_ids_off),
+        method_ids=(26, method_ids_off),
         class_defs=(7, class_defs_off),
         data=(data_size, data_off),
         code_init=code_init, code_next=code_next,
         code_run=code_run, code_hello=code_hello,
         code_base_init=code_base_init, code_base_get=code_base_get,
         code_child_init=code_child_init, code_boom_init=code_boom_init,
+        code_frame=code_frame,
     )
 
 
@@ -582,7 +674,8 @@ def main():
     assert struct.unpack_from("<I", buf, 8)[0] == zlib.adler32(bytes(buf[12:])) & 0xffffffff
     assert buf[12:32] == hashlib.sha1(bytes(buf[32:])).digest()
     for name in ("code_init", "code_next", "code_run", "code_hello",
-                 "code_base_init", "code_base_get", "code_child_init", "code_boom_init"):
+                 "code_base_init", "code_base_get", "code_child_init", "code_boom_init",
+                 "code_frame"):
         off = info[name]
         regs, ins_n, outs, tries, dbg, n = struct.unpack_from("<HHHHII", buf, off)
         insns = [struct.unpack_from("<H", buf, off + 16 + 2 * i)[0] for i in range(n)]
