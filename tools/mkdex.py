@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
-"""mkdex.py — 手搓一个最小但合法的 DEX（第二版），打进 demo3.apk。
+"""mkdex.py — 手搓一个合法 DEX（第三版）：对象 + 字段 + 虚方法。
 
-两个方法，都在 Lcom/aster/Main; 里：
+类与代码：
 
-    static void hello() {
-        Log.i("Hello from Aster, this string lives in a real DEX");
+    class Counter {
+        int v;
+        Counter(int x) { v = x; }
+        int next() { v = v + 1; return v; }
     }
 
     static void run() {
-        int sum = 0;
-        for (int i = 1; i <= 5; i++) sum += i;   // 1+2+3+4+5 = 15
-        Log.n(sum);                              // 打印整数
-        Log.i("loop done");
+        Counter c = new Counter(10);
+        Log.n(c.next());   // 11
+        Log.n(c.next());   // 12
+        Log.i("objects ok");
     }
 
-字节码用到：const/4、const-string、if-gt、add-int、add-int/lit8、goto、
-invoke-static、return-void —— 真的走循环、条件分支和算术，不只是打印一句话。
+用到的 opcode：new-instance、invoke-direct(<init>)、invoke-virtual、iget、iput、
+move-result、const/4、const-string、add-int/lit8、invoke-static、return/return-void。
+这要求解释器有对象堆、能递归调用方法、能把返回值塞回调用者的 move-result。
 
-DEX 结构按规范逐字段拼：header / map_list / string_ids / type_ids / proto_ids /
-method_ids / class_defs / data（string_data、type_list、class_data、code_item），
-checksum（adler32）和 signature（sha1）最后回填。
+DEX 结构仍按规范逐字段拼（header / map_list / 全部 ids / class_defs / data），
+checksum 与 signature 最后回填。
 """
 import hashlib
 import struct
@@ -42,8 +44,10 @@ def align(buf, n=4):
         buf.append(0)
 
 STRINGS = [
+    "<init>",
     "Hello from Aster, this string lives in a real DEX",
     "I",
+    "Lcom/aster/Counter;",
     "Lcom/aster/Log;",
     "Lcom/aster/Main;",
     "Ljava/lang/String;",
@@ -54,25 +58,26 @@ STRINGS = [
     "i",
     "loop done",
     "n",
+    "next",
+    "objects ok",
     "run",
+    "v",
 ]
 assert STRINGS == sorted(STRINGS), "string_ids 必须升序"
-(
-    S_HELLO, S_I_T, S_LOG, S_MAIN, S_STRING, S_V, S_VI, S_VL,
-    S_HELLO_M, S_I_M, S_LOOPDONE, S_N_M, S_RUN_M,
-) = range(13)
+S_INIT, S_HELLO, S_I_T, S_COUNTER, S_LOG, S_MAIN, S_STRING, S_V, S_VI, S_VL, \
+    S_HELLO_M, S_I_M, S_LOOPDONE, S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = range(18)
 
-# type_ids：0=String, 1=Main, 2=V, 3=Log, 4=I
-T_STRING, T_MAIN, T_V, T_LOG, T_INT = 0, 1, 2, 3, 4
-# proto_ids：0=(String)V, 1=()V, 2=(I)V
-P_STR, P_VOID, P_INT = 0, 1, 2
-# method_ids：0=Log->i, 1=Log->n, 2=Main->run, 3=Main->hello
-M_I, M_N, M_RUN, M_HELLO = 0, 1, 2, 3
+T_STRING, T_MAIN, T_V, T_LOG, T_INT, T_COUNTER = 0, 1, 2, 3, 4, 5
+# proto：0=(String)V 1=()V 2=(I)V 3=()I
+P_STR, P_VOID, P_INT_V, P_INT_I = 0, 1, 2, 3
+F_V = 0
+# method：0=Log.i 1=Log.n 2=Counter.<init> 3=Counter.next 4=Main.run 5=Main.hello
+M_I, M_N, M_INIT, M_NEXT, M_RUN, M_HELLO = 0, 1, 2, 3, 4, 5
 
 
 def build():
     buf = bytearray(0x70)
-    n_map = 11
+    n_map = 12
     map_off = 0x70
     string_ids_off = map_off + 4 + 12 * n_map
     buf += bytearray(b"\0" * (string_ids_off - 0x70))
@@ -81,19 +86,32 @@ def build():
     for _ in STRINGS:
         str_off_pos.append(len(buf))
         buf += b"\0\0\0\0"
+
     type_ids_off = len(buf)
-    buf += b"".join(struct.pack("<I", t) for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T))
+    for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER):
+        buf += struct.pack("<I", t)
+
     proto_ids_off = len(buf)
     buf += struct.pack("<III", S_VL, S_V, 0)
     buf += struct.pack("<III", S_V, S_V, 0)
     buf += struct.pack("<III", S_VI, S_V, 0)
+    buf += struct.pack("<III", S_I_T, S_I_T, 0)
+
+    field_ids_off = len(buf)
+    buf += struct.pack("<HHI", T_COUNTER, T_INT, S_V_F)
+
     method_ids_off = len(buf)
     buf += struct.pack("<HHI", T_LOG, P_STR, S_I_M)
-    buf += struct.pack("<HHI", T_LOG, P_INT, S_N_M)
+    buf += struct.pack("<HHI", T_LOG, P_INT_V, S_N_M)
+    buf += struct.pack("<HHI", T_COUNTER, P_INT_V, S_INIT)
+    buf += struct.pack("<HHI", T_COUNTER, P_INT_I, S_NEXT)
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_RUN_M)
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_HELLO_M)
+
     class_defs_off = len(buf)
-    class_def_pos = len(buf)
+    main_def_pos = len(buf)
+    buf += b"\0" * 32
+    counter_def_pos = len(buf)
     buf += b"\0" * 32
 
     data_off = len(buf)
@@ -114,46 +132,74 @@ def build():
 
     align(buf)
 
-    # ---- run()V ----
-    # 0  const/4 v0, 0         sum
-    # 1  const/4 v1, 1         i
-    # 2  const/4 v2, 5         上限
-    # 3  if-gt v1, v2, +7      → 10（跳出循环）
-    # 4  add-int v0, v0, v1
-    # 5  add-int/lit8 v1, v1, #1
-    # 9  goto -6               → 3
-    # 5  add-int v0, v0, v1    (5,6)
-    # 7  add-int/lit8 v1, v1   (7,8)
-    # 10 invoke-static {v0}, Log->n   (10,11,12)
-    # 13 const-string v3, "loop done" (13,14)
-    # 15 invoke-static {v3}, Log->i   (15,16,17)
-    # 18 return-void
-    ins_run = [
-        0x0012,
-        0x1112,
-        0x5212,
-        0x2135, 0x0702,
-        0x0090, 0x0100,
-        0x01d8, 0x0101,
-        0xfa28,
-        0x1071, M_N, 0x0000,
-        0x031a, S_LOOPDONE,
-        0x1071, M_I, 0x0003,
-        0x000e,
-    ]
-    assert len(ins_run) == 19, len(ins_run)
+    # Counter.<init>(I)V   regs=2 ins=1
+    #   iput v1, v0, field@0
+    #   return-void
+    code_init = len(buf)
+    ins = [0x0159, F_V, 0x000e]
+    # 实例方法的 ins_size 含 this：这里 this + int = 2
+    buf += struct.pack("<HHHHII", 2, 2, 0, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
+    # Counter.next()I    regs=2 ins=1
+    #   iget v0, v1, field@0
+    #   add-int/lit8 v0, v0, #1
+    #   iput v0, v1, field@0
+    #   return v0
+    code_next = len(buf)
+    # 22c：B 在 unit0 高 4 位，unit1 整 16 位都是字段索引
+    ins = [0x1052, F_V, 0x00d8, 0x0001, 0x1059, F_V, 0x000f]
+    buf += struct.pack("<HHHHII", 2, 1, 0, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
+    # Main.run()V   regs=5 ins=0 outs=2
+    # 0  new-instance v0, Counter        (0x0022, type 5)
+    # 2  const/4 v1, #10                 (0xa112)
+    # 3  invoke-direct {v0, v1}, <init>  (0x2070, m2, C=0 D=1)
+    # 6  invoke-virtual {v0}, next       (0x106e, m3, C=0)
+    # 9  move-result v2                  (0x020a)
+    # 10 invoke-virtual {v0}, next
+    # 13 move-result v3                  (0x030a)
+    # 14 invoke-static {v2}, Log.n       (0x1071, m1, C=2)
+    # 17 invoke-static {v3}, Log.n       (0x1071, m1, C=3)
+    # 20 const-string v4, "objects ok"   (0x041a, s15)
+    # 22 invoke-static {v4}, Log.i       (0x1071, m0, C=4)
+    # 25 return-void
     code_run = len(buf)
-    buf += struct.pack("<HHHHII", 4, 0, 2, 0, 0, len(ins_run))
-    buf += b"".join(struct.pack("<H", i) for i in ins_run)
+    ins = [
+        0x0022, T_COUNTER,        # new-instance v0
+        0x0113, 0x000a,           # const/16 v1, #10（const/4 只装得下 -8..7）
+        0x2070, M_INIT, 0x0010,   # invoke-direct {v0, v1}, <init>
+        0x106e, M_NEXT, 0x0000,   # invoke-virtual {v0}, next
+        0x020a,                   # move-result v2
+        0x106e, M_NEXT, 0x0000,
+        0x030a,                   # move-result v3
+        0x1071, M_N, 0x0002,      # Log.n(v2)
+        0x1071, M_N, 0x0003,      # Log.n(v3)
+        0x041a, S_OBJOK,          # const-string v4, "objects ok"
+        0x1071, M_I, 0x0004,      # Log.i(v4)
+        0x000e,                   # return-void
+    ]
+    assert len(ins) == 27, len(ins)
+    buf += struct.pack("<HHHHII", 5, 0, 2, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
 
-    # ---- hello()V ----
-    ins_hello = [0x001a, S_HELLO, 0x1071, M_I, 0x0000, 0x000e]
+    # Main.hello()V  regs=1 ins=0 outs=1
     code_hello = len(buf)
-    buf += struct.pack("<HHHHII", 1, 0, 1, 0, 0, len(ins_hello))
-    buf += b"".join(struct.pack("<H", i) for i in ins_hello)
+    ins = [0x001a, S_HELLO, 0x1071, M_I, 0x0000, 0x000e]
+    buf += struct.pack("<HHHHII", 1, 0, 1, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
 
-    # ---- class_data：2 direct methods ----
-    class_data_off = len(buf)
+    # Counter 的 class_data：1 个实例字段，1 个 direct，1 个 virtual
+    cd_counter = len(buf)
+    buf += uleb(0) + uleb(1) + uleb(1) + uleb(1)
+    buf += uleb(F_V - 0) + uleb(0x0002)          # 字段 v：private int
+    buf += uleb(M_INIT - 0) + uleb(0x10001) + uleb(code_init)
+    # virtual methods 的 method_idx_diff 也从 0 开始累加，不是接着 direct 的
+    buf += uleb(M_NEXT - 0) + uleb(0x0001) + uleb(code_next)
+
+    # Main 的 class_data：2 个 direct
+    cd_main = len(buf)
     buf += uleb(0) + uleb(0) + uleb(2) + uleb(0)
     buf += uleb(M_RUN - 0) + uleb(0x0009) + uleb(code_run)
     buf += uleb(M_HELLO - M_RUN) + uleb(0x0009) + uleb(code_hello)
@@ -161,24 +207,25 @@ def build():
     for pos, off in zip(str_off_pos, str_offsets):
         struct.pack_into("<I", buf, pos, off)
 
-    struct.pack_into(
-        "<IIIIIIII", buf, class_def_pos,
-        T_MAIN, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, class_data_off, 0
-    )
+    struct.pack_into("<IIIIIIII", buf, main_def_pos,
+                     T_MAIN, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_main, 0)
+    struct.pack_into("<IIIIIIII", buf, counter_def_pos,
+                     T_COUNTER, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_counter, 0)
 
     data_size = len(buf) - data_off
 
     items = [
         (0x0000, 1, 0),
         (0x0001, len(STRINGS), string_ids_off),
-        (0x0002, 5, type_ids_off),
-        (0x0003, 3, proto_ids_off),
-        (0x0005, 4, method_ids_off),
-        (0x0006, 1, class_defs_off),
+        (0x0002, 6, type_ids_off),
+        (0x0003, 4, proto_ids_off),
+        (0x0004, 1, field_ids_off),
+        (0x0005, 6, method_ids_off),
+        (0x0006, 2, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
-        (0x2000, 1, class_data_off),
-        (0x2001, 2, code_run),
+        (0x2000, 2, cd_counter),
+        (0x2001, 4, code_init),
         (0x2002, len(STRINGS), str_offsets[0]),
     ]
     items.sort(key=lambda x: x[0])
@@ -190,11 +237,13 @@ def build():
     return buf, dict(
         file_size=len(buf), map_off=map_off,
         string_ids=(len(STRINGS), string_ids_off),
-        type_ids=(5, type_ids_off),
-        proto_ids=(3, proto_ids_off),
-        method_ids=(4, method_ids_off),
-        class_defs=(1, class_defs_off),
+        type_ids=(6, type_ids_off),
+        proto_ids=(4, proto_ids_off),
+        field_ids=(1, field_ids_off),
+        method_ids=(6, method_ids_off),
+        class_defs=(2, class_defs_off),
         data=(data_size, data_off),
+        code_init=code_init, code_next=code_next,
         code_run=code_run, code_hello=code_hello,
     )
 
@@ -211,8 +260,7 @@ def write_header(buf, info):
     for base, key in ((56, "string_ids"), (64, "type_ids"), (72, "proto_ids")):
         size, off = info[key]
         struct.pack_into("<II", buf, base, size, off)
-    struct.pack_into("<II", buf, 80, 0, 0)
-    for base, key in ((88, "method_ids"), (96, "class_defs"), (104, "data")):
+    for base, key in ((80, "field_ids"), (88, "method_ids"), (96, "class_defs"), (104, "data")):
         size, off = info[key]
         struct.pack_into("<II", buf, base, size, off)
 
@@ -229,24 +277,22 @@ def main():
     finish(buf)
     assert struct.unpack_from("<I", buf, 8)[0] == zlib.adler32(bytes(buf[12:])) & 0xffffffff
     assert buf[12:32] == hashlib.sha1(bytes(buf[32:])).digest()
-    for name in ("code_run", "code_hello"):
+    for name in ("code_init", "code_next", "code_run", "code_hello"):
         off = info[name]
-        regs, ins, outs, tries, dbg, n = struct.unpack_from("<HHHHII", buf, off)
+        regs, ins_n, outs, tries, dbg, n = struct.unpack_from("<HHHHII", buf, off)
         insns = [struct.unpack_from("<H", buf, off + 16 + 2 * i)[0] for i in range(n)]
-        print(f"{name}: regs={regs} ins={ins} outs={outs} n={n}", [hex(i) for i in insns])
+        print(f"{name}: regs={regs} ins={ins_n} outs={outs} n={n}")
+        print("   ", [hex(i) for i in insns])
 
     apk = f"{root}/assets/demo3.apk"
     with zipfile.ZipFile(apk, "w") as z:
-        z.writestr(
-            zipfile.ZipInfo("classes.dex", (2026, 1, 1, 0, 0, 0)),
-            bytes(buf), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9,
-        )
-        z.writestr(
-            zipfile.ZipInfo("AndroidManifest.xml", (2026, 1, 1, 0, 0, 0)),
-            b"\x03\x00\x08\x00" + b"\0" * 60, compress_type=zipfile.ZIP_STORED,
-        )
+        z.writestr(zipfile.ZipInfo("classes.dex", (2026, 1, 1, 0, 0, 0)),
+                   bytes(buf), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+        z.writestr(zipfile.ZipInfo("AndroidManifest.xml", (2026, 1, 1, 0, 0, 0)),
+                   b"\x03\x00\x08\x00" + b"\0" * 60, compress_type=zipfile.ZIP_STORED)
     import os
     print("demo3.apk", os.path.getsize(apk), "bytes，classes.dex", len(buf), "字节")
+
 
 if __name__ == "__main__":
     main()

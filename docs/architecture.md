@@ -1040,3 +1040,38 @@ static void run() {
 2. 分支目标算错：加了两条指令后 `if-gt` 的目标从 pc 10 变成还在 pc 10，但我照着旧注释写成 `+10`（跳到 pc 13 的 `const-string`），于是循环体被整段跳过。相对偏移必须跟着指令重排重新算。
 
 两条都不是解释器的错 —— 解释器按 DEX 规范执行得很老实，错在 fixture 的编码。这也说明"解释器对了"不等于"程序对了"，fixture 的字节码得用反汇编核对（`mkdex.py` 跑完会把 insns 打出来）。
+
+## 36. 对象、字段与虚方法（APK-5）
+
+上一版解释器只能跑静态方法。这一版加了三样东西：对象堆、字段、调用栈。
+
+**对象堆**：`static mut HEAP: [ObjState; 8]`，每个对象 8 个整型字段。`new-instance` 分配，寄存器里存的是堆索引（不是指针），因为内核还没有每进程堆；对象引用就是一个整数。
+
+**字段**：`iget/iput`（22c）直接用 field_idx 当槽号 —— v0 的 field_ids 只有一项，够 demo。真实现要按类布局算偏移，这一步先跳过。
+
+**调用栈**：`exec()` 递归，深度上限 8。`invoke-direct` / `invoke-virtual` / `invoke-static` 走同一条路径：取参数寄存器 → 递归执行 → 返回值写进调用者的 `last`，`move-result` 再搬进目标寄存器。
+
+**fixture**（`tools/mkdex.py` 第三版，918 字节 dex）：
+
+```java
+class Counter { int v; Counter(int x){v=x;} int next(){v=v+1;return v;} }
+static void run() {
+    Counter c = new Counter(10);
+    Log.n(c.next());   // 11
+    Log.n(c.next());   // 12
+    Log.i("objects ok");
+}
+```
+
+**结果**：`[DEX] 11` / `[DEX] 12` / `[DEX] objects ok`，22 条指令后退回。
+
+### 写 fixture 时又踩的三个坑
+
+这一版在 fixture 上连踩三次，都记下来，因为它们是 DEX 里最容易反复错的地方：
+
+1. `ins_size` 忘了算 `this`。实例方法 `<init>(I)V` 的 ins_size 是 2（this + int），我写 1，解释器在参数个数检查上直接拒绝。
+2. `virtual_methods` 的 `method_idx_diff` 从 0 重新累加，不是接着 direct methods 的最后一个。我按"接着"写，导致找 `next` 时索引指向别处。
+3. `22c` 格式里 B（对象寄存器）在 **unit0 的高 4 位**，unit1 整 16 位都是字段索引。我把 B 写进 unit1 高 8 位，字段索引变成 0x0100，越界。
+4. 附带：`const/4` 只装得下 -8..7，给构造器传 10 必须用 `const/16`（占 2 个 code unit，后面所有 pc 跟着挪）。
+
+第 3 条和第 4 条都是"编码错了但格式校验不报错"，只有真的执行才会露出来。所以 fixture 每次生成都会打印反汇编，人工对照语义 —— 这一步省不得。

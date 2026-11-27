@@ -31,6 +31,8 @@ fn adler32(b: &[u8]) -> u32 {
 }
 
 pub struct Header {
+    pub fields: u32,
+    pub f_off: u32,
     pub file_size: u32,
     pub strings: u32,
     pub types: u32,
@@ -69,6 +71,8 @@ pub fn header(d: &[u8]) -> Result<Header, &'static str> {
         t_off: u32le(d, 68),
         protos: u32le(d, 72),
         p_off: u32le(d, 76),
+        fields: u32le(d, 80),
+        f_off: u32le(d, 84),
         methods: u32le(d, 88),
         m_off: u32le(d, 92),
         classes: u32le(d, 96),
@@ -181,7 +185,22 @@ pub fn code_of(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Res
                 }
                 k += 1;
             }
-            let _ = vm;
+            // virtual methods 的 idx 从 0 重新累加
+            let mut midx2 = 0u32;
+            let mut k2 = 0;
+            while k2 < vm {
+                let (diff, n1) = uleb(d, q)?;
+                let (acc, n2) = uleb(d, n1)?;
+                let (coff, n3) = uleb(d, n2)?;
+                midx2 += diff;
+                q = n3;
+                let m = method(d, h, midx2)?;
+                if m.name == method_name {
+                    let _ = acc;
+                    return Ok(coff);
+                }
+                k2 += 1;
+            }
             return Err("类里没有这个方法");
         }
         i += 1;
@@ -191,44 +210,115 @@ pub fn code_of(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Res
 
 /// 执行 `class_desc` 里的 `method_name`。
 /// 返回执行的指令条数；调用的外部方法只有 `Lcom/aster/Log;->i(String)`。
-pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<u32, &'static str> {
-    let coff = code_of(d, h, class_desc, method_name)?;
+/// 极小的对象堆：每对象 8 个整型字段。够 demo 用，也是后面真堆的雏形。
+#[derive(Clone, Copy)]
+struct ObjState {
+    used: bool,
+    class_idx: u32,
+    fields: [i32; 8],
+}
+
+const NOBJ: usize = 8;
+static mut HEAP: [ObjState; NOBJ] = [ObjState { used: false, class_idx: 0, fields: [0; 8] }; NOBJ];
+
+fn heap_reset() {
+    let mut i = 0;
+    while i < NOBJ {
+        unsafe {
+            HEAP[i] = ObjState { used: false, class_idx: 0, fields: [0; 8] };
+        }
+        i += 1;
+    }
+}
+
+fn heap_new(class_idx: u32) -> Result<usize, &'static str> {
+    let mut i = 0;
+    while i < NOBJ {
+        if !unsafe { HEAP[i].used } {
+            unsafe {
+                HEAP[i] = ObjState { used: true, class_idx, fields: [0; 8] };
+            }
+            return Ok(i);
+        }
+        i += 1;
+    }
+    Err("对象堆满（8 个）")
+}
+
+fn heap_idx(v: i32) -> Result<usize, &'static str> {
+    if v < 0 || v as usize >= NOBJ || !unsafe { HEAP[v as usize].used } {
+        return Err("不是有效对象引用");
+    }
+    Ok(v as usize)
+}
+
+/// 执行一个方法。`args` 是调用方传进来的寄存器值（this 在第一个位置）。
+fn exec(
+    d: &[u8],
+    h: &Header,
+    coff: u32,
+    args: &[i32],
+    depth: u32,
+    steps: &mut u32,
+) -> Result<i32, &'static str> {
+    if depth > 8 {
+        return Err("调用栈超过 8 层");
+    }
     let p = coff as usize;
     if p + 16 > d.len() {
         return Err("code_item 越界");
     }
+    let regs_n = u16le(d, p) as usize;
+    let ins_n = u16le(d, p + 2) as usize;
     let n = u32le(d, p + 12) as usize;
     let base = p + 16;
     if base + n * 2 > d.len() {
         return Err("指令越界");
     }
+    if regs_n > 16 || ins_n > 16 || args.len() > ins_n {
+        return Err("寄存器或参数数量超出解释器上限");
+    }
     let unit = |i: usize| -> u16 { u16le(d, base + i * 2) };
-    let sx8 = |v: u16| -> i32 { ((v as i8) as i32) };
+    let sx8 = |v: u16| -> i32 { (v as i8) as i32 };
 
     let mut regs = [0i32; 16];
+    if ins_n > 0 {
+        let start = regs_n - ins_n;
+        let mut k = 0;
+        while k < args.len() {
+            regs[start + k] = args[k];
+            k += 1;
+        }
+    }
     let mut pc: i32 = 0;
-    let mut steps = 0u32;
-    while pc >= 0 && (pc as usize) < n {
+    let mut last: i32 = 0;
+    let mut ret = false;
+    let mut rv = 0i32;
+
+    while pc >= 0 && (pc as usize) < n && !ret {
         let u = unit(pc as usize);
         let op = (u & 0xff) as u8;
         match op {
             0x00 => pc += 1,
             0x01 => {
-                // move vA, vB  (12x)
                 let a = ((u >> 8) & 0xf) as usize;
                 let b = ((u >> 12) & 0xf) as usize;
                 regs[a] = regs[b];
                 pc += 1;
             }
+            0x0a => {
+                // move-result vAA
+                let a = ((u >> 8) & 0xff) as usize;
+                regs[a] = last;
+                pc += 1;
+            }
             0x12 => {
-                // const/4 vA, #+B
                 let a = ((u >> 8) & 0xf) as usize;
                 let lit = (u >> 12) as i32;
                 regs[a] = if lit & 8 != 0 { lit - 16 } else { lit };
                 pc += 1;
             }
             0x13 => {
-                // const/16 vAA, #+BBBB
                 let a = ((u >> 8) & 0xff) as usize;
                 if (pc as usize) + 1 >= n {
                     return Err("const/16 被截断");
@@ -237,7 +327,6 @@ pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<
                 pc += 2;
             }
             0x1a => {
-                // const-string vAA, string@BBBB
                 let a = ((u >> 8) & 0xff) as usize;
                 if (pc as usize) + 1 >= n {
                     return Err("const-string 被截断");
@@ -247,20 +336,25 @@ pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<
                 regs[a] = idx as i32;
                 pc += 2;
             }
-            0x28 => {
-                // goto +AA  (10t)
-                pc += sx8(((u >> 8) & 0xff) as u16);
+            0x22 => {
+                // new-instance vAA, type@BBBB
+                let a = ((u >> 8) & 0xff) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("new-instance 被截断");
+                }
+                let type_idx = unit(pc as usize + 1) as u32;
+                type_desc(d, h, type_idx)?;
+                regs[a] = heap_new(type_idx)? as i32;
+                pc += 2;
             }
+            0x28 => pc += sx8((u >> 8) & 0xff),
             0x29 => {
-                // goto/16 +BBBB  (20t)
                 if (pc as usize) + 1 >= n {
                     return Err("goto/16 被截断");
                 }
-                let off = unit(pc as usize + 1) as i16 as i32;
-                pc += off;
+                pc += unit(pc as usize + 1) as i16 as i32;
             }
             0x31..=0x36 => {
-                // if-test vA, vB, +CCCC  (22t)
                 let a = ((u >> 8) & 0xf) as usize;
                 let b = ((u >> 12) & 0xf) as usize;
                 if (pc as usize) + 1 >= n {
@@ -280,7 +374,6 @@ pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<
                 pc += if take { off } else { 2 };
             }
             0x38..=0x3d => {
-                // if-testz vAA, +BBBB  (21t)
                 let a = ((u >> 8) & 0xff) as usize;
                 if (pc as usize) + 1 >= n {
                     return Err("if-testz 被截断");
@@ -297,8 +390,39 @@ pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<
                 };
                 pc += if take { off } else { 2 };
             }
+            0x52 => {
+                // iget vA, vB, field@CCCC  (22c)
+                let a = ((u >> 8) & 0xf) as usize;
+                let b = ((u >> 12) & 0xf) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("iget 被截断");
+                }
+                let w = unit(pc as usize + 1);
+                let f = (w & 0xffff) as usize;
+                let obj = heap_idx(regs[b])?;
+                if f >= 8 {
+                    return Err("字段槽越界");
+                }
+                regs[a] = unsafe { HEAP[obj].fields[f] };
+                pc += 2;
+            }
+            0x59 => {
+                // iput vA, vB, field@CCCC
+                let a = ((u >> 8) & 0xf) as usize;
+                let b = ((u >> 12) & 0xf) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("iput 被截断");
+                }
+                let w = unit(pc as usize + 1);
+                let f = (w & 0xffff) as usize;
+                let obj = heap_idx(regs[b])?;
+                if f >= 8 {
+                    return Err("字段槽越界");
+                }
+                unsafe { HEAP[obj].fields[f] = regs[a] };
+                pc += 2;
+            }
             0x90..=0x94 => {
-                // add/sub/mul/div/rem-int vAA, vBB, vCC  (23x)
                 let a = ((u >> 8) & 0xff) as usize;
                 if (pc as usize) + 1 >= n {
                     return Err("算术指令被截断");
@@ -328,7 +452,6 @@ pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<
                 pc += 2;
             }
             0xd0 => {
-                // add-int/lit16 vA, vB, #+CCCC  (22s)
                 let a = ((u >> 8) & 0xf) as usize;
                 let b = ((u >> 12) & 0xf) as usize;
                 if (pc as usize) + 1 >= n {
@@ -338,53 +461,89 @@ pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<
                 pc += 2;
             }
             0xd8 => {
-                // add-int/lit8 vAA, vBB, #+CC  (22b)
                 let a = ((u >> 8) & 0xff) as usize;
-                let w = if (pc as usize) + 1 >= n {
+                if (pc as usize) + 1 >= n {
                     return Err("add-int/lit8 被截断");
-                } else {
-                    unit(pc as usize + 1)
-                };
+                }
+                let w = unit(pc as usize + 1);
                 let b = ((w >> 8) & 0xff) as usize;
                 regs[a] = regs[b].wrapping_add(sx8(w & 0xff));
                 pc += 2;
             }
-            0x71 => {
-                // invoke-static {vC, ...}, method@BBBB  (35c)
+            0x6e | 0x70 | 0x71 => {
+                // invoke-virtual / invoke-direct / invoke-static （都是 35c）
                 let argc = ((u >> 12) & 0xf) as usize;
                 if (pc as usize) + 2 >= n {
-                    return Err("invoke-static 被截断");
+                    return Err("invoke 被截断");
                 }
                 let midx = unit(pc as usize + 1) as u32;
                 let word = unit(pc as usize + 2);
-                let args = [
+                let mut args = [0i32; 5];
+                let mut k = 0;
+                let reg_of = [
                     (word & 0xf) as usize,
                     ((word >> 4) & 0xf) as usize,
                     ((word >> 8) & 0xf) as usize,
                     ((word >> 12) & 0xf) as usize,
                     ((u >> 8) & 0xf) as usize,
                 ];
+                while k < argc {
+                    args[k] = regs[reg_of[k]];
+                    k += 1;
+                }
                 let m = method(d, h, midx)?;
-                if m.class == "Lcom/aster/Log;" && m.name == "i" && argc == 1 {
-                    let s = string(d, h, regs[args[0]] as u32)?;
-                    crate::println!("  [DEX] {}", s);
-                } else if m.class == "Lcom/aster/Log;" && m.name == "n" && argc == 1 {
-                    crate::println!("  [DEX] {}", regs[args[0]]);
+                if m.class == "Lcom/aster/Log;" {
+                    if m.name == "i" {
+                        let s = string(d, h, args[0] as u32)?;
+                        crate::println!("  [DEX] {}", s);
+                    } else if m.name == "n" {
+                        crate::println!("  [DEX] {}", args[0]);
+                    } else {
+                        return Err("Log 上没有这个方法");
+                    }
+                    last = 0;
                 } else {
-                    crate::println!("  [DEX] 未知外部方法 {}->{}{}", m.class, m.name, m.shorty);
-                    return Err("调用了本解释器不认识的方法");
+                    let c2 = code_of(d, h, m.class, m.name)?;
+                    last = exec(d, h, c2, &args[..argc], depth + 1, steps)?;
                 }
                 pc += 3;
             }
-            0x0e | 0x0f => return Ok(steps),
+            0x0e => {
+                ret = true;
+                rv = 0;
+                pc += 1;
+            }
+            0x0f => {
+                // return vAA
+                let a = ((u >> 8) & 0xff) as usize;
+                ret = true;
+                rv = regs[a];
+                pc += 1;
+            }
             _ => {
-                crate::println!("  [DEX] 遇到不支持的 opcode {:#04x} @pc {}", op, pc);
+                crate::println!("  [DEX] 不支持的 opcode {:#04x} @pc {}", op, pc);
                 return Err("opcode 未实现");
             }
         }
-        steps += 1;
+        *steps += 1;
     }
+    Ok(rv)
+}
+
+pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<u32, &'static str> {
+    let coff = code_of(d, h, class_desc, method_name)?;
+    heap_reset();
+    let mut steps = 0u32;
+    exec(d, h, coff, &[], 0, &mut steps)?;
     Ok(steps)
+}
+
+pub fn field_name<'a>(d: &'a [u8], h: &Header, idx: u32) -> Result<&'a str, &'static str> {
+    if idx >= h.fields {
+        return Err("字段索引越界");
+    }
+    let p = h.f_off as usize + idx as usize * 8;
+    string(d, h, u32le(d, p + 4))
 }
 
 pub fn dump(d: &[u8]) -> Result<(), &'static str> {
