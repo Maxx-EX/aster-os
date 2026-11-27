@@ -209,7 +209,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex run\nhalt\n' | timeout 45 \
+	@printf '\nhelp\nex3\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\nhalt\n' | timeout 45 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -218,7 +218,8 @@ test: image
 	@grep -q "全部任务结束，最后退出码 = 0" $(B)/test.log && echo "[TEST] PASS 系统调用/退出码" || (echo "[TEST] FAIL 退出码" && exit 1)
 	@grep -q "数据中止(低 EL)" $(B)/test.log && echo "[TEST] PASS 用户越权被 MMU 拦下" || (echo "[TEST] FAIL 隔离失效" && exit 1)
 	@grep -q "TASK 2" $(B)/test.log && echo "[TEST] PASS 双任务轮转" || (echo "[TEST] FAIL 无多任务输出" && exit 1)
-	@grep -q "Hello from Aster, this string lives in a real DEX" $(B)/test.log && echo "[TEST] PASS DEX 解释器（const-string + invoke-static + return）" || (echo "[TEST] FAIL DEX" && exit 1)
+	@grep -q "Hello from Aster, this string lives in a real DEX" $(B)/test.log && echo "[TEST] PASS DEX 解释器：const-string + invoke-static" || (echo "[TEST] FAIL DEX hello" && exit 1)
+	@grep -q "\[DEX\] 15" $(B)/test.log && echo "[TEST] PASS DEX 解释器：循环 + if-gt + add-int 算出 1..5 之和" || (echo "[TEST] FAIL DEX loop" && exit 1)
 	@grep -q "deflate 解压正确" $(B)/test.log && echo "[TEST] PASS inflate（deflate 条目还原）" || (echo "[TEST] FAIL deflate" && exit 1)
 	@awk '/BUSY start/{s=NR} /TASK 2/{t=NR} /BUSY end/{e=NR} END{if (s>0 && t>s && e>t) print "[TEST] PASS 抢占：纯计算期间另一任务仍在跑"; else {print "[TEST] FAIL 抢占未生效"; exit 1}}' $(B)/test.log
 	# 隔离：两个任务写同一 VA，各自读回自己写的值（打印 '.'，不是 'X'）

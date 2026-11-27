@@ -23,7 +23,7 @@
 
 `dex` 打印 DEX 结构（字符串、类型、方法、类，带 adler32 校验）；`dex run` 真正执行 `Lcom/aster/Main;->run()`：const-string 取字符串、invoke-static 桥接到内核打印、return-void 收尾。
 
-样例 DEX 不是 dx/d8 产物，是 `tools/mkdex.py` 按规范手拼的 536 字节文件（header / map_list / ids / class_defs / data 全手写，checksum 与 sha1 最后回填）。
+样例 DEX 里有一个真程序：循环 `i = 1..5` 累加，用 `if-gt` 跳出、`add-int` 累加、`goto` 回跳，最后打印 `15`。样例 DEX 不是 dx/d8 产物，是 `tools/mkdex.py` 按规范手拼的 536 字节文件（header / map_list / ids / class_defs / data 全手写，checksum 与 sha1 最后回填）。
 
 ## 开机动画
 

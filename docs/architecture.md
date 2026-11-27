@@ -1014,3 +1014,29 @@ return-void
 **取证**：`dex` 打印结构（8 字符串 / 4 类型 / 2 原型 / 2 方法 / 1 类，checksum PASS）；`dex run` 打印那段字符串并报"2 条指令，正常 return-void"。已加进 `make test` 作为第 7 项断言。
 
 到这一步，`APK → deflate 解压 → DEX 结构 → 字节码执行 → 内核输出` 整条链路是通的。剩下的解释器工作（算术、分支、字段、对象、`new-instance`、异常）是在这套骨架上加 opcode，不是重做。
+
+### 35.1 第二版：循环、分支、算术
+
+第一版只证明"字节码能进来"。第二版的 `run()` 是一段真程序：
+
+```java
+static void run() {
+    int sum = 0;
+    for (int i = 1; i <= 5; i++) sum += i;   // 15
+    Log.n(sum);
+    Log.i("loop done");
+}
+```
+
+对应 19 个 code unit，opcode 扩到 15 个：`move`、`const/4`、`const/16`、`const-string`、`goto`、`goto/16`、`if-eq/ne/lt/ge/gt/le`、`if-eqz/nez/ltz/gez/gtz/lez`、`add/sub/mul/div/rem-int`、`add-int/lit8`、`add-int/lit16`、`invoke-static`、`return`/`return-void`。
+
+执行结果：`[DEX] 15` → `[DEX] loop done`，27 条指令后正常 `return-void`（5 轮循环 × 4 条 + 初始化 3 条 + 收尾 4 条）。
+
+同时补上 `Lcom/aster/Log;->n(I)V` 桥接，能打印整数 —— 不然算术算了也看不见。
+
+**写这个 fixture 时踩的两个编码坑，值得记下来**（都是"看起来对、跑起来错"）：
+
+1. `if-gt` 是 22t 格式，寄存器编号在 unit0 的高 8 位：`B|A|op`。我先写成 `0x0135`（A=1, B=0），实际比较的是 `v1` 和 `v0`（sum=0），于是第一轮就 `1 > 0` 跳出去，和变成 0。正确编码是 `0x2135`（A=1, B=2）。
+2. 分支目标算错：加了两条指令后 `if-gt` 的目标从 pc 10 变成还在 pc 10，但我照着旧注释写成 `+10`（跳到 pc 13 的 `const-string`），于是循环体被整段跳过。相对偏移必须跟着指令重排重新算。
+
+两条都不是解释器的错 —— 解释器按 DEX 规范执行得很老实，错在 fixture 的编码。这也说明"解释器对了"不等于"程序对了"，fixture 的字节码得用反汇编核对（`mkdex.py` 跑完会把 insns 打出来）。

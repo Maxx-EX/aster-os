@@ -202,78 +202,183 @@ pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<
     if base + n * 2 > d.len() {
         return Err("指令越界");
     }
+    let unit = |i: usize| -> u16 { u16le(d, base + i * 2) };
+    let sx8 = |v: u16| -> i32 { ((v as i8) as i32) };
 
-    let mut regs = [0u32; 16];
-    let mut pc = 0usize;
+    let mut regs = [0i32; 16];
+    let mut pc: i32 = 0;
     let mut steps = 0u32;
-    while pc < n {
-        let u = u16le(d, base + pc * 2);
+    while pc >= 0 && (pc as usize) < n {
+        let u = unit(pc as usize);
         let op = (u & 0xff) as u8;
         match op {
-            0x00 => {
+            0x00 => pc += 1,
+            0x01 => {
+                // move vA, vB  (12x)
+                let a = ((u >> 8) & 0xf) as usize;
+                let b = ((u >> 12) & 0xf) as usize;
+                regs[a] = regs[b];
                 pc += 1;
-            }
-            0x1a => {
-                // const-string vAA, string@BBBB
-                let v = ((u >> 8) & 0xff) as usize;
-                if v >= regs.len() || pc + 1 >= n {
-                    return Err("const-string 寄存器越界");
-                }
-                let idx = u16le(d, base + (pc + 1) * 2) as u32;
-                string(d, h, idx)?;
-                regs[v] = idx;
-                pc += 2;
             }
             0x12 => {
                 // const/4 vA, #+B
-                let v = ((u >> 8) & 0xf) as usize;
-                let lit = ((u >> 12) & 0xf) as u32;
-                let lit = if lit & 8 != 0 { lit | 0xffff_fff0 } else { lit };
-                if v >= regs.len() {
-                    return Err("const/4 寄存器越界");
-                }
-                regs[v] = lit;
+                let a = ((u >> 8) & 0xf) as usize;
+                let lit = (u >> 12) as i32;
+                regs[a] = if lit & 8 != 0 { lit - 16 } else { lit };
                 pc += 1;
             }
             0x13 => {
                 // const/16 vAA, #+BBBB
-                let v = ((u >> 8) & 0xff) as usize;
-                if v >= regs.len() || pc + 1 >= n {
-                    return Err("const/16 寄存器越界");
+                let a = ((u >> 8) & 0xff) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("const/16 被截断");
                 }
-                regs[v] = u16le(d, base + (pc + 1) * 2) as u32;
+                regs[a] = unit(pc as usize + 1) as i32;
+                pc += 2;
+            }
+            0x1a => {
+                // const-string vAA, string@BBBB
+                let a = ((u >> 8) & 0xff) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("const-string 被截断");
+                }
+                let idx = unit(pc as usize + 1) as u32;
+                string(d, h, idx)?;
+                regs[a] = idx as i32;
+                pc += 2;
+            }
+            0x28 => {
+                // goto +AA  (10t)
+                pc += sx8(((u >> 8) & 0xff) as u16);
+            }
+            0x29 => {
+                // goto/16 +BBBB  (20t)
+                if (pc as usize) + 1 >= n {
+                    return Err("goto/16 被截断");
+                }
+                let off = unit(pc as usize + 1) as i16 as i32;
+                pc += off;
+            }
+            0x31..=0x36 => {
+                // if-test vA, vB, +CCCC  (22t)
+                let a = ((u >> 8) & 0xf) as usize;
+                let b = ((u >> 12) & 0xf) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("if-test 被截断");
+                }
+                let off = sx8(unit(pc as usize + 1) >> 8);
+                let x = regs[a];
+                let y = regs[b];
+                let take = match op {
+                    0x31 => x == y,
+                    0x32 => x != y,
+                    0x33 => x < y,
+                    0x34 => x >= y,
+                    0x35 => x > y,
+                    _ => x <= y,
+                };
+                pc += if take { off } else { 2 };
+            }
+            0x38..=0x3d => {
+                // if-testz vAA, +BBBB  (21t)
+                let a = ((u >> 8) & 0xff) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("if-testz 被截断");
+                }
+                let off = sx8(unit(pc as usize + 1) >> 8);
+                let x = regs[a];
+                let take = match op {
+                    0x38 => x == 0,
+                    0x39 => x != 0,
+                    0x3a => x < 0,
+                    0x3b => x >= 0,
+                    0x3c => x > 0,
+                    _ => x <= 0,
+                };
+                pc += if take { off } else { 2 };
+            }
+            0x90..=0x94 => {
+                // add/sub/mul/div/rem-int vAA, vBB, vCC  (23x)
+                let a = ((u >> 8) & 0xff) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("算术指令被截断");
+                }
+                let w = unit(pc as usize + 1);
+                let b = ((w >> 8) & 0xff) as usize;
+                let c = (w & 0xff) as usize;
+                let x = regs[b];
+                let y = regs[c];
+                regs[a] = match op {
+                    0x90 => x.wrapping_add(y),
+                    0x91 => x.wrapping_sub(y),
+                    0x92 => x.wrapping_mul(y),
+                    0x93 => {
+                        if y == 0 {
+                            return Err("整数除零");
+                        }
+                        x.wrapping_div(y)
+                    }
+                    _ => {
+                        if y == 0 {
+                            return Err("整数除零");
+                        }
+                        x.wrapping_rem(y)
+                    }
+                };
+                pc += 2;
+            }
+            0xd0 => {
+                // add-int/lit16 vA, vB, #+CCCC  (22s)
+                let a = ((u >> 8) & 0xf) as usize;
+                let b = ((u >> 12) & 0xf) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("add-int/lit16 被截断");
+                }
+                regs[a] = regs[b].wrapping_add(unit(pc as usize + 1) as i16 as i32);
+                pc += 2;
+            }
+            0xd8 => {
+                // add-int/lit8 vAA, vBB, #+CC  (22b)
+                let a = ((u >> 8) & 0xff) as usize;
+                let w = if (pc as usize) + 1 >= n {
+                    return Err("add-int/lit8 被截断");
+                } else {
+                    unit(pc as usize + 1)
+                };
+                let b = ((w >> 8) & 0xff) as usize;
+                regs[a] = regs[b].wrapping_add(sx8(w & 0xff));
                 pc += 2;
             }
             0x71 => {
-                // invoke-static {vC}, method@BBBB  （35c，3 个 code unit）
+                // invoke-static {vC, ...}, method@BBBB  (35c)
                 let argc = ((u >> 12) & 0xf) as usize;
-                if pc + 2 >= n {
+                if (pc as usize) + 2 >= n {
                     return Err("invoke-static 被截断");
                 }
-                let midx = u16le(d, base + (pc + 1) * 2) as u32;
-                let word = u16le(d, base + (pc + 2) * 2);
-                let mut args = [0usize; 5];
-                args[0] = (word & 0xf) as usize;
-                args[1] = ((word >> 4) & 0xf) as usize;
-                args[2] = ((word >> 8) & 0xf) as usize;
-                args[3] = ((word >> 12) & 0xf) as usize;
-                args[4] = ((u >> 8) & 0xf) as usize; // G
+                let midx = unit(pc as usize + 1) as u32;
+                let word = unit(pc as usize + 2);
+                let args = [
+                    (word & 0xf) as usize,
+                    ((word >> 4) & 0xf) as usize,
+                    ((word >> 8) & 0xf) as usize,
+                    ((word >> 12) & 0xf) as usize,
+                    ((u >> 8) & 0xf) as usize,
+                ];
                 let m = method(d, h, midx)?;
                 if m.class == "Lcom/aster/Log;" && m.name == "i" && argc == 1 {
-                    let s = string(d, h, regs[args[0]])?;
+                    let s = string(d, h, regs[args[0]] as u32)?;
                     crate::println!("  [DEX] {}", s);
+                } else if m.class == "Lcom/aster/Log;" && m.name == "n" && argc == 1 {
+                    crate::println!("  [DEX] {}", regs[args[0]]);
                 } else {
                     crate::println!("  [DEX] 未知外部方法 {}->{}{}", m.class, m.name, m.shorty);
                     return Err("调用了本解释器不认识的方法");
                 }
                 pc += 3;
             }
-            0x0e => {
-                // return-void
-                return Ok(steps);
-            }
+            0x0e | 0x0f => return Ok(steps),
             _ => {
-                crate::println!("  [DEX] 遇到不支持的 opcode {:#04x}", op);
+                crate::println!("  [DEX] 遇到不支持的 opcode {:#04x} @pc {}", op, pc);
                 return Err("opcode 未实现");
             }
         }
