@@ -1499,3 +1499,71 @@ run() 执行完（90 条指令），正常 return-void
 - `finally` 没有专门支持（DEX 里它被编译成"catch-all + 重抛"，理论上现在就能跑，但没测）。
 
 下一步是**屏幕绘制桥接**：把 `Log.i` 之后的东西拉到 framebuffer 上——`Canvas`/`View` 那一套太重，先做 `Paint`/`drawText`/`drawRect` 三个内建，让 APK 能往屏幕上写一行字、一个方块。那才是"能跑 APK"在用户眼里的样子。
+
+---
+
+## 46. APK-9：画布桥接
+
+到 APK-8 为止，APK 的可见输出只有串口里的 `[DEX] ...`。用户眼里"能跑 APK"不是这个——是屏幕上出现东西。这一站把 `Log` 后面的画布拉出来。
+
+`android.graphics.Canvas` / `Paint` / `View` 那套太重（要 `Bitmap`、要 `Path`、要 `View` 树和 `Choreographer`），先做自研的最小画布：`Lcom/aster/Canvas;`，四个方法。
+
+### 46.1 不分配位图，只记命令
+
+`kernel/src/apkcanvas.rs`：不申请像素缓冲，而是记一份**绘制命令表**，每次桌面重绘时按 2 倍缩放叠到屏幕中央。
+
+```rust
+struct Cmd { kind: u8, x: i32, y: i32, w: i32, h: i32, color: u32, slot: usize }
+static mut CMDS: [Cmd; 48];  static mut NC: usize;
+static mut STRS: [[u8; 48]; 12];  // 文字就地复制，避免跨模块借字符串
+```
+
+为什么不做真位图：位图要按需分配（`alloc` 或页帧），而画布一旦是离屏缓冲，还要有"合成到屏幕"的搬图路径和 320×200→1024×768 的拉伸。命令表这个做法在 demo 规模上零成本，而且**天然适配桌面重绘**——每次 `render_dashboard()` 末尾重放一遍就行，不需要管脏区。
+
+### 46.2 四个方法
+
+| 方法 | 编码 | 语义 |
+|---|---|---|
+| `<init>()V` | 35c | 清命令、清文字槽、置 `ACTIVE` |
+| `clear(I)V` | 35c | 换底色并清掉已有命令 |
+| `setColor(I)V` | 35c | 设当前画笔色，影响后续 rect/text |
+| `drawRect(IIII)V` | 35c argc=5 | `x,y,w,h`，用当前色 |
+| `drawText(String,II)V` | 35c argc=4 | `x,y` 画一行字，字号是画布的 2 倍放大 |
+
+`drawRect` 要 5 个寄存器（canvas + 4 个 int），正好用满 35c 的 `C/D/E/F/G`——`G` 在 unit0 的 bits 8-11，这也是第一次把第 5 个参数寄存器用上。
+
+`draw_if_active()` 的落点：`shell::render_dashboard()` 最后一行。桌面每次重绘（光标闪烁、鼠标、终端输出）之后都把画布重放一遍，所以画布不会被刷掉。
+
+### 46.3 fixture（第七版）
+
+```java
+Canvas cv = new Canvas();
+cv.clear(0x101418);
+cv.setColor(0x5b99ff); cv.drawRect(20, 20, 60, 8);          // 标题下划线
+cv.setColor(0xdadde2); cv.drawText("Aster APK", 20, 48);
+cv.setColor(0x46c46a);
+cv.drawRect(20, 80, 40, 40); cv.drawRect(70, 80, 40, 40); cv.drawRect(120, 80, 40, 40);
+Log.i("canvas ok");
+```
+
+176 个 code unit，dex 2276 字节，`demo3.apk` 1465 字节。实拍：画布浮在桌面之上，蓝色下划线 + 灰白标题 + 三个绿色方块，底边一小行 `APK Canvas 320x200` 标记。`canvas` / `canvas off` / `canvas on` 可以收起/放回。
+
+### 46.4 这次的三个坑
+
+**一、`const`（31i）根本没实现。** 前六版 fixture 的常量都在 `const/4`（−8..7）和 `const/16` 范围内，所以从没碰过 32 位常量；一写颜色 `0x5b99ff` 立刻 `不支持的 opcode 0x14 @pc 105`。补上 `0x14`：`(hi<<16)|lo`。
+
+**二、`invoke-virtual` 的 argc 少了 `this`。** `clear(I)V` 我写成 `0x106e`（argc=1），于是 `args[1]` 从没被赋值，恒为 0——`clear(0)` 把底色画成纯黑、`setColor(0)` 让所有图形变黑。表现是"画布是黑块、内容全看不到"。正确是 `0x206e`（this + 1 个 int）。`drawRect` 的 `0x576e`、`drawText` 的 `0x406e` 都是 argc 对上的，所以只有这两个方法坏——**同一个 API 里一半对一半错，最容易误判成"画布渲染有问题"**。
+
+**三、32 位常量的高低 16 位写反。** `0xdadde2` 写成 `0x0514, 0x0dde, 0x00da`，拼出来是 `0x00da0dde`（R=da,G=0d,B=de），屏幕上标题变成洋红色。改成 `0xdde2, 0x00da` 才回到灰白。这个错误特别像"颜色通道反了"，很容易跑去改 `fb::native()`——实际上 `native()` 是恒等函数，通道一直是对的。
+
+另外记一条工程教训：**改 `assets/*.apk` 后 `make image` 经常不重编**（`include_bytes!` 的依赖检测不稳），可靠做法是 `cd kernel && cargo clean -q`。这轮在这上面浪费了三次"改了没效果"。
+
+### 46.5 限制与下一步
+
+- 画布坐标固定 320×200、固定 2 倍、固定在屏幕中央；没有多窗口、没有 DPI 概念。
+- 命令表 48 条、文字 12 条各 48 字节，超了静默丢弃（`stats()` 里能读到丢弃数）。
+- `drawRect` 是实心填充，没有描边、没有圆角、没有透明度。
+- 没有读回像素（`getPixel`）、没有 `save/restore`、没有裁剪。
+- 文字只能画一行、不换行、不测量宽度（`text_len` 没接出去）。
+
+下一步有两条：一是**触摸/点击事件回传给 APK**（现在画布是只读的，点了没反应）；二是**放开 `new-array`/位图的上限**，把页帧分配器给用户态开个口子——那才是能跑真实 APK 的地基。前者成本低、体验增益大，建议先做。

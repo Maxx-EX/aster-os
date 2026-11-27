@@ -27,6 +27,7 @@ mod vfs;
 mod zip;
 mod inflate;
 mod dex;
+mod apkcanvas;
 mod usb;
 mod xce;
 mod update;

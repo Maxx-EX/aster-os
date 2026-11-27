@@ -786,6 +786,23 @@ pub fn run() -> ! {
                 crate::fb::close_win(i);
                 println!("  [WIN] {} 关闭", i);
             }
+            "canvas" | "canvas on" | "canvas off" => {
+                let (nc, dropped) = crate::apkcanvas::stats();
+                if line == "canvas off" || line == "canvas" {
+                    crate::apkcanvas::set_active(false);
+                    crate::fb::fill_rect(
+                        (crate::fb::width() / 2 - 328) as u32,
+                        (crate::fb::height() / 2 - 208) as u32,
+                        656, 416, 0x1d1f24,
+                    );
+                    println!("  [CV] 隐藏（{} 条命令，丢弃 {}）", nc, dropped);
+                }
+                if line == "canvas on" || line == "canvas" {
+                    crate::apkcanvas::set_active(true);
+                    println!("  [CV] 显示（{} 条命令，丢弃 {}）", nc, dropped);
+                }
+                crate::shell::render_dashboard();
+            }
             "fbinfo" => {
                 if !crate::fb::available() {
                     println!("  没有 framebuffer");
@@ -922,6 +939,8 @@ pub fn render_dashboard() {
         i.payload_size / 1024,
     );
     crate::term::mark_clean(uptime_ms());
+    // APK 跑过画布就盖在最上层（桌面重绘不擦掉它）
+    crate::apkcanvas::draw_if_active();
 }
 
 fn cmd_net() {

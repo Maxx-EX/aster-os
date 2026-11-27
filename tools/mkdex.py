@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkdex.py — 手搓一个合法 DEX（第六版）：继承 + invoke-super + throw/catch。
+"""mkdex.py — 手搓一个合法 DEX（第七版）：画布绘制（com.aster.Canvas）。
 
 类与代码：
 
@@ -58,6 +58,7 @@ def align(buf, n=4):
 STRINGS = [
     " hits=",
     "<init>",
+    "Aster APK",
     "Base",
     "Boom",
     "Child",
@@ -68,6 +69,7 @@ STRINGS = [
     "LL",
     "Lcom/aster/Base;",
     "Lcom/aster/Boom;",
+    "Lcom/aster/Canvas;",
     "Lcom/aster/Child;",
     "Lcom/aster/Counter;",
     "Lcom/aster/Log;",
@@ -78,14 +80,20 @@ STRINGS = [
     "RuntimeException",
     "V",
     "VI",
+    "VIIII",
     "VL",
+    "VLII",
     "[I",
     "apk8 ok",
     "append",
     "array ok",
+    "canvas ok",
     "caught",
     "caught local",
     "caught xmethod",
+    "clear",
+    "drawRect",
+    "drawText",
     "get",
     "hello",
     "hits",
@@ -95,6 +103,7 @@ STRINGS = [
     "next",
     "objects ok",
     "run",
+    "setColor",
     "sum=",
     "toString",
     "v",
@@ -110,23 +119,29 @@ S_SB, S_APPEND, S_STRM, S_SUM, S_HITS_S, S_TOSTR = (
     IDX["sum="], IDX[" hits="], IDX["toString"])
 S_HITS_F = IDX["hits"]
 S_L, S_LI, S_LL = IDX["L"], IDX["LI"], IDX["LL"]
+S_VIIII, S_VLII = IDX["VIIII"], IDX["VLII"]
 S_BASE, S_CHILD, S_RTE = IDX["Lcom/aster/Base;"], IDX["Lcom/aster/Child;"], IDX["Ljava/lang/RuntimeException;"]
 S_GET, S_CAUGHT, S_APK8 = IDX["get"], IDX["caught local"], IDX["apk8 ok"]
 S_BOOM, S_CAUGHTX = IDX["Lcom/aster/Boom;"], IDX["caught xmethod"]
+S_CV = IDX["Lcom/aster/Canvas;"]
+S_APKTITLE, S_CANVASOK = IDX["Aster APK"], IDX["canvas ok"]
+S_CLEAR, S_SETCOLOR, S_DRECT, S_DTEXT = IDX["clear"], IDX["setColor"], IDX["drawRect"], IDX["drawText"]
 S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
 S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
 
 T_STRING, T_MAIN, T_V, T_LOG, T_INT, T_COUNTER, T_ARR, T_SB = 0, 1, 2, 3, 4, 5, 6, 7
-T_BASE, T_CHILD, T_RTE, T_BOOM = 8, 9, 10, 11
+T_BASE, T_CHILD, T_RTE, T_BOOM, T_CV = 8, 9, 10, 11, 12
 # proto：0=(String)V 1=()V 2=(I)V 3=()I 4=(String)SB 5=(I)SB 6=()SB
 P_STR, P_VOID, P_INT_V, P_INT_I = 0, 1, 2, 3
 P_APP_STR, P_APP_INT, P_SB_VOID = 4, 5, 6
+P_DRECT, P_DTEXT = 7, 8
 F_V, F_HITS, F_BASE_V = 0, 1, 2
 # method：0=Log.i 1=Log.n 2=Counter.<init> 3=Counter.next 4=Main.run 5=Main.hello
 #        6=SB.<init> 7=SB.append(String) 8=SB.append(I) 9=SB.toString
 M_I, M_N, M_INIT, M_NEXT, M_RUN, M_HELLO = 0, 1, 2, 3, 4, 5
 M_SB_INIT, M_SB_APP_S, M_SB_APP_I, M_SB_STR = 6, 7, 8, 9
 M_BASE_INIT, M_BASE_GET, M_CHILD_INIT, M_BOOM_INIT = 10, 11, 12, 13
+M_CV_INIT, M_CV_CLEAR, M_CV_COLOR, M_CV_RECT, M_CV_TEXT = 14, 15, 16, 17, 18
 
 
 def build():
@@ -143,7 +158,7 @@ def build():
 
     type_ids_off = len(buf)
     for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER, S_ARR, S_SB,
-              S_BASE, S_BOOM, S_CHILD, S_RTE):
+              S_BASE, S_BOOM, S_CHILD, S_RTE, S_CV):
         buf += struct.pack("<I", t)
 
     proto_ids_off = len(buf)
@@ -154,6 +169,8 @@ def build():
     buf += struct.pack("<III", S_LL, T_SB, 0)     # 4: (String)SB，params_size 稍后填
     buf += struct.pack("<III", S_LI, T_SB, 0)     # 5: (I)SB
     buf += struct.pack("<III", S_L, T_SB, 0)      # 6: ()SB
+    buf += struct.pack("<III", S_VIIII, T_V, 0)   # 7: (IIII)V
+    buf += struct.pack("<III", S_VLII, T_V, 0)    # 8: (String,II)V
 
     field_ids_off = len(buf)
     buf += struct.pack("<HHI", T_COUNTER, T_INT, S_V_F)
@@ -175,6 +192,11 @@ def build():
     buf += struct.pack("<HHI", T_BASE, P_INT_I, S_GET)         # 11 Base.get()I
     buf += struct.pack("<HHI", T_CHILD, P_INT_V, S_INIT)       # 12 Child.<init>(I)V
     buf += struct.pack("<HHI", T_BOOM, P_VOID, S_INIT)         # 13 Boom.<init>()V（直接抛）
+    buf += struct.pack("<HHI", T_CV, P_VOID, S_INIT)           # 14 Canvas.<init>()V
+    buf += struct.pack("<HHI", T_CV, P_INT_V, S_CLEAR)         # 15 clear(I)V
+    buf += struct.pack("<HHI", T_CV, P_INT_V, S_SETCOLOR)      # 16 setColor(I)V
+    buf += struct.pack("<HHI", T_CV, P_DRECT, S_DRECT)         # 17 drawRect(IIII)V
+    buf += struct.pack("<HHI", T_CV, P_DTEXT, S_DTEXT)         # 18 drawText(String,II)V
 
     class_defs_off = len(buf)
     main_def_pos = len(buf)
@@ -188,6 +210,8 @@ def build():
     rte_def_pos = len(buf)
     buf += b"\0" * 32
     boom_def_pos = len(buf)
+    buf += b"\0" * 32
+    cv_def_pos = len(buf)
     buf += b"\0" * 32
 
     data_off = len(buf)
@@ -213,6 +237,14 @@ def build():
     buf += b"\0\0"
     struct.pack_into("<I", buf, proto_ids_off + 48 + 8, tl_sb_str)
     struct.pack_into("<I", buf, proto_ids_off + 60 + 8, tl_sb_int)
+    tl_4i = len(buf)
+    buf += struct.pack("<IH", 4, T_INT) + b"\0\0" * 4
+    tl_s2i = len(buf)
+    buf += struct.pack("<IH", 3, T_STRING) + b"\0\0"
+    buf += struct.pack("<IH", 2, T_INT) + b"\0\0"
+    buf += struct.pack("<IH", 3, T_INT) + b"\0\0"
+    struct.pack_into("<I", buf, proto_ids_off + 84 + 8, tl_4i)
+    struct.pack_into("<I", buf, proto_ids_off + 96 + 8, tl_s2i)
 
     align(buf)
 
@@ -327,11 +359,42 @@ def build():
         0x1071, M_I, 0x0000,     # Log.i(v0)
         0x001a, S_APK8,          # const-string v0, "apk8 ok"
         0x1071, M_I, 0x0000,     # Log.i(v0)
+        # —— APK-9：画布（pc 100 起）——
+        0x0622, T_CV,            # new-instance v6, Canvas
+        0x1070, M_CV_INIT, 0x0006,   # invoke-direct {v6}, <init>()V
+        0x0514, 0x1418, 0x0010,  # const v5, #0x00101418（31i：AA<<8|0x14）
+        0x206e, M_CV_CLEAR, 0x0056,  # clear(v5)：argc=2（含 this）
+        0x0514, 0x99ff, 0x005b,  # const v5, #0x005b99ff
+        0x206e, M_CV_COLOR, 0x0056,  # setColor(v5)
+        0x0313, 0x0014,          # const/16 v3, #20
+        0x0413, 0x0014,          # const/16 v4, #20
+        0x0513, 0x003c,          # const/16 v5, #60
+        0x0713, 0x0008,          # const/16 v7, #8
+        0x576e, M_CV_RECT, 0x5436,   # drawRect {v6,v3,v4,v5,v7}
+        0x0514, 0xdde2, 0x00da,  # const v5, #0x00dadde2
+        0x206e, M_CV_COLOR, 0x0056,  # setColor
+        0x001a, S_APKTITLE,      # const-string v0, "Aster APK"
+        0x0313, 0x0014,          # const/16 v3, #20
+        0x0413, 0x0030,          # const/16 v4, #48
+        0x406e, M_CV_TEXT, 0x4306,   # drawText {v6,v0,v3,v4}
+        0x0514, 0xc46a, 0x0046,  # const v5, #0x0046c46a
+        0x206e, M_CV_COLOR, 0x0056,  # setColor
+        0x0313, 0x0014,          # const/16 v3, #20
+        0x0413, 0x0050,          # const/16 v4, #80
+        0x0513, 0x0028,          # const/16 v5, #40
+        0x0713, 0x0028,          # const/16 v7, #40
+        0x576e, M_CV_RECT, 0x5436,   # drawRect
+        0x0313, 0x0046,          # const/16 v3, #70
+        0x576e, M_CV_RECT, 0x5436,   # drawRect
+        0x0313, 0x0078,          # const/16 v3, #120
+        0x576e, M_CV_RECT, 0x5436,   # drawRect
+        0x001a, S_CANVASOK,      # const-string v0, "canvas ok"
+        0x1071, M_I, 0x0000,     # Log.i(v0)
         0x000e,                  # return-void
     ]
-    assert len(ins) == 101, len(ins)
+    assert len(ins) == 176, len(ins)
     # tries_size=1：throw 在 pc 77，try 覆盖 [75, 78)
-    buf += struct.pack("<HHHHII", 8, 0, 3, 2, 0, len(ins))
+    buf += struct.pack("<HHHHII", 8, 0, 5, 2, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
     if len(ins) % 2 == 1:
         buf += b"\0\0"                       # insns 奇数条时补到 4 字节对齐
@@ -418,17 +481,19 @@ def build():
                      T_RTE, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0)
     struct.pack_into("<IIIIIIII", buf, boom_def_pos,
                      T_BOOM, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_boom, 0)
+    struct.pack_into("<IIIIIIII", buf, cv_def_pos,
+                     T_CV, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0)
 
     data_size = len(buf) - data_off
 
     items = [
         (0x0000, 1, 0),
         (0x0001, len(STRINGS), string_ids_off),
-        (0x0002, 12, type_ids_off),
-        (0x0003, 7, proto_ids_off),
+        (0x0002, 13, type_ids_off),
+        (0x0003, 9, proto_ids_off),
         (0x0004, 3, field_ids_off),
-        (0x0005, 14, method_ids_off),
-        (0x0006, 6, class_defs_off),
+        (0x0005, 19, method_ids_off),
+        (0x0006, 7, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
         (0x2000, 5, cd_counter),
@@ -444,11 +509,11 @@ def build():
     return buf, dict(
         file_size=len(buf), map_off=map_off,
         string_ids=(len(STRINGS), string_ids_off),
-        type_ids=(12, type_ids_off),
-        proto_ids=(7, proto_ids_off),
+        type_ids=(13, type_ids_off),
+        proto_ids=(9, proto_ids_off),
         field_ids=(3, field_ids_off),
-        method_ids=(14, method_ids_off),
-        class_defs=(6, class_defs_off),
+        method_ids=(19, method_ids_off),
+        class_defs=(7, class_defs_off),
         data=(data_size, data_off),
         code_init=code_init, code_next=code_next,
         code_run=code_run, code_hello=code_hello,

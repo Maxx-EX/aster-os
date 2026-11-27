@@ -607,6 +607,17 @@ fn exec(
                 regs[a] = unit(pc as usize + 1) as i32;
                 pc += 2;
             }
+            0x14 => {
+                // const vAA, #+BBBBBBBB  (31i)
+                let a = ((u >> 8) & 0xff) as usize;
+                if (pc as usize) + 2 >= n {
+                    return Err("const 被截断");
+                }
+                let lo = unit(pc as usize + 1) as u32;
+                let hi = unit(pc as usize + 2) as u32;
+                regs[a] = ((hi << 16) | lo) as i32;
+                pc += 3;
+            }
             0x1a => {
                 let a = ((u >> 8) & 0xff) as usize;
                 if (pc as usize) + 1 >= n {
@@ -891,6 +902,23 @@ fn exec(
                     } else {
                         return Err("StringBuilder 上没有这个方法");
                     }
+                } else if m.class == "Lcom/aster/Canvas;" {
+                    // 内建画布：不查 code_of，命令交给 apkcanvas 记录
+                    match m.name {
+                        "<init>" => {
+                            crate::apkcanvas::reset();
+                            crate::apkcanvas::set_active(true);
+                        }
+                        "clear" => crate::apkcanvas::clear(args[1] as u32),
+                        "setColor" => crate::apkcanvas::set_color(args[1] as u32),
+                        "drawRect" => crate::apkcanvas::rect(args[1], args[2], args[3], args[4]),
+                        "drawText" => {
+                            let sv = str_of(d, h, args[1])?;
+                            crate::apkcanvas::text(args[2], args[3], sv);
+                        }
+                        _ => return Err("Canvas 上没有这个方法"),
+                    }
+                    last = 0;
                 } else {
                     let c2 = code_of(d, h, m.class, m.name)?;
                     match exec(d, h, c2, &args[..argc], depth + 1, steps) {
