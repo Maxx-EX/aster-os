@@ -108,12 +108,9 @@ pub fn draw_if_active() {
     if !crate::fb::available() {
         return;
     }
-    let sw = crate::fb::width() as i32;
-    let sh = crate::fb::height() as i32;
     let w = CW * SCALE as i32;
     let h = CH * SCALE as i32;
-    let ox = (sw - w) / 2;
-    let oy = (sh - h) / 2;
+    let (ox, oy) = origin();
 
     // 外框 + 底色
     crate::fb::fill_rect((ox - 8) as u32, (oy - 8) as u32, (w + 16) as u32, (h + 16) as u32, 0x1b1e23);
@@ -161,6 +158,62 @@ pub fn draw_if_active() {
         "APK Canvas 320x200",
         0x6a7179,
     );
+}
+
+// —— 触摸（APK-10）——
+// 画布上的点击由 ui::handle_mouse 转进来，APK 用 touchX()/touchY() 取。
+const MAXT: usize = 8;
+static mut TQ: [(i32, i32, bool); MAXT] = [(0, 0, false); MAXT];
+static mut TQN: usize = 0;
+static mut TQR: usize = 0;
+static mut LASTT: (i32, i32) = (0, 0);
+
+fn origin() -> (i32, i32) {
+    let sw = crate::fb::width() as i32;
+    let sh = crate::fb::height() as i32;
+    ((sw - CW * SCALE as i32) / 2, (sh - CH * SCALE as i32) / 2)
+}
+
+/// 屏幕坐标 → 画布坐标；落在画布外返回 None
+pub fn screen_to_canvas(sx: i32, sy: i32) -> Option<(i32, i32)> {
+    let (ox, oy) = origin();
+    let cx = (sx - ox) / SCALE as i32;
+    let cy = (sy - oy) / SCALE as i32;
+    if cx >= 0 && cy >= 0 && cx < CW && cy < CH {
+        Some((cx, cy))
+    } else {
+        None
+    }
+}
+
+pub fn push_touch(x: i32, y: i32, down: bool) {
+    unsafe {
+        if TQN - TQR >= MAXT {
+            return; // 队列满就丢，别让 UI 线程卡住
+        }
+        TQ[TQN % MAXT] = (x, y, down);
+        TQN += 1;
+    }
+}
+
+/// 取下一条"按下"事件（抬起事件丢掉——demo 只关心落点）
+pub fn take_touch() -> Option<(i32, i32)> {
+    unsafe {
+        while TQR < TQN {
+            let i = TQR % MAXT;
+            TQR += 1;
+            let (x, y, down) = TQ[i];
+            if down {
+                LASTT = (x, y);
+                return Some((x, y));
+            }
+        }
+        None
+    }
+}
+
+pub fn last_touch() -> (i32, i32) {
+    unsafe { LASTT }
 }
 
 pub fn stats() -> (usize, usize) {

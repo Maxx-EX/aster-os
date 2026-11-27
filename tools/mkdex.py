@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkdex.py — 手搓一个合法 DEX（第七版）：画布绘制（com.aster.Canvas）。
+"""mkdex.py — 手搓一个合法 DEX（第八版）：画布绘制 + 触摸回传。
 
 类与代码：
 
@@ -101,11 +101,15 @@ STRINGS = [
     "loop done",
     "n",
     "next",
+    "no touch",
     "objects ok",
     "run",
     "setColor",
     "sum=",
     "toString",
+    "touch hit",
+    "touchX",
+    "touchY",
     "v",
 ]
 assert STRINGS == sorted(STRINGS), "string_ids 必须升序"
@@ -126,6 +130,8 @@ S_BOOM, S_CAUGHTX = IDX["Lcom/aster/Boom;"], IDX["caught xmethod"]
 S_CV = IDX["Lcom/aster/Canvas;"]
 S_APKTITLE, S_CANVASOK = IDX["Aster APK"], IDX["canvas ok"]
 S_CLEAR, S_SETCOLOR, S_DRECT, S_DTEXT = IDX["clear"], IDX["setColor"], IDX["drawRect"], IDX["drawText"]
+S_TOUCHHIT, S_NOTOUCH = IDX["touch hit"], IDX["no touch"]
+S_TOUCHX, S_TOUCHY = IDX["touchX"], IDX["touchY"]
 S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
 S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
 
@@ -142,6 +148,7 @@ M_I, M_N, M_INIT, M_NEXT, M_RUN, M_HELLO = 0, 1, 2, 3, 4, 5
 M_SB_INIT, M_SB_APP_S, M_SB_APP_I, M_SB_STR = 6, 7, 8, 9
 M_BASE_INIT, M_BASE_GET, M_CHILD_INIT, M_BOOM_INIT = 10, 11, 12, 13
 M_CV_INIT, M_CV_CLEAR, M_CV_COLOR, M_CV_RECT, M_CV_TEXT = 14, 15, 16, 17, 18
+M_CV_TX, M_CV_TY = 19, 20
 
 
 def build():
@@ -197,6 +204,8 @@ def build():
     buf += struct.pack("<HHI", T_CV, P_INT_V, S_SETCOLOR)      # 16 setColor(I)V
     buf += struct.pack("<HHI", T_CV, P_DRECT, S_DRECT)         # 17 drawRect(IIII)V
     buf += struct.pack("<HHI", T_CV, P_DTEXT, S_DTEXT)         # 18 drawText(String,II)V
+    buf += struct.pack("<HHI", T_CV, P_INT_I, S_TOUCHX)        # 19 touchX()I
+    buf += struct.pack("<HHI", T_CV, P_INT_I, S_TOUCHY)        # 20 touchY()I
 
     class_defs_off = len(buf)
     main_def_pos = len(buf)
@@ -390,9 +399,30 @@ def build():
         0x576e, M_CV_RECT, 0x5436,   # drawRect
         0x001a, S_CANVASOK,      # const-string v0, "canvas ok"
         0x1071, M_I, 0x0000,     # Log.i(v0)
+        # —— APK-10：触摸（pc 176 起）——
+        0x0212,                  # const/4 v2, #0
+        0x106e, M_CV_TX, 0x0006, # invoke-virtual {v6}, touchX()I
+        0x000a,                  # move-result v0
+        0x2033, 0x1E00,          # if-lt v0, v2 -> +30（跳到 no-touch 211）
+        0x4412,                  # const/4 v4, #4
+        0x0591, 0x0004,          # sub-int v5, v0, v4（高=BB0 低=CC4）
+        0x106e, M_CV_TY, 0x0006, # invoke-virtual {v6}, touchY()I
+        0x030a,                  # move-result v3
+        0x0391, 0x0304,          # sub-int v3, v3, v4（高=BB3 低=CC4）
+        0x0214, 0xa441, 0x00d9,  # const v2, #0x00d9a441（WARN 色）
+        0x206e, M_CV_COLOR, 0x0026,  # setColor(v2)
+        0x0713, 0x0008,          # const/16 v7, #8
+        0x0113, 0x0008,          # const/16 v1, #8
+        0x516e, M_CV_RECT, 0x7356,   # drawRect {v6,v5,v3,v7,v1}
+        0x001a, S_TOUCHHIT,      # const-string v0, "touch hit"
+        0x1071, M_I, 0x0000,     # Log.i(v0)
+        0x0628,                  # goto +6（跳到 216 return）
+        # no-touch（pc 211）
+        0x001a, S_NOTOUCH,       # const-string v0, "no touch"
+        0x1071, M_I, 0x0000,     # Log.i(v0)
         0x000e,                  # return-void
     ]
-    assert len(ins) == 176, len(ins)
+    assert len(ins) == 216, len(ins)
     # tries_size=1：throw 在 pc 77，try 覆盖 [75, 78)
     buf += struct.pack("<HHHHII", 8, 0, 5, 2, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
@@ -492,7 +522,7 @@ def build():
         (0x0002, 13, type_ids_off),
         (0x0003, 9, proto_ids_off),
         (0x0004, 3, field_ids_off),
-        (0x0005, 19, method_ids_off),
+        (0x0005, 21, method_ids_off),
         (0x0006, 7, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
@@ -512,7 +542,7 @@ def build():
         type_ids=(13, type_ids_off),
         proto_ids=(9, proto_ids_off),
         field_ids=(3, field_ids_off),
-        method_ids=(19, method_ids_off),
+        method_ids=(21, method_ids_off),
         class_defs=(7, class_defs_off),
         data=(data_size, data_off),
         code_init=code_init, code_next=code_next,

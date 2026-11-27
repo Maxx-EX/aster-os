@@ -66,6 +66,15 @@ fn handle_mouse() -> bool {
     }
 
     while let Some((x, y, pressed)) = input::take_click() {
+        // 画布优先：落在 APK 画布上的点不给桌面（否则会当成点窗口）
+        if crate::apkcanvas::active() {
+            if let Some((cx, cy)) = crate::apkcanvas::screen_to_canvas(x, y) {
+                crate::apkcanvas::push_touch(cx, cy, pressed);
+                crate::cursor::invalidate();
+                want = true;
+                continue;
+            }
+        }
         if pressed {
             // 点窗口：抬到最上层并聚焦；落在标题栏上就开始拖
             if let Some(i) = fb::hit_top(x, y) {

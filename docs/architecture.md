@@ -1567,3 +1567,65 @@ Log.i("canvas ok");
 - 文字只能画一行、不换行、不测量宽度（`text_len` 没接出去）。
 
 下一步有两条：一是**触摸/点击事件回传给 APK**（现在画布是只读的，点了没反应）；二是**放开 `new-array`/位图的上限**，把页帧分配器给用户态开个口子——那才是能跑真实 APK 的地基。前者成本低、体验增益大，建议先做。
+
+---
+
+## 47. APK-10：画布点击回传
+
+画布在 APK-9 里是"只读"的：能画，点了没反应。这一节把指针事件接回虚拟机。
+
+### 47.1 内核侧
+
+`kernel/src/apkcanvas.rs` 加了一个 8 深的环形队列 `TQ: [(i32, i32, bool); 8]`，配 `TQN`（写入总数）/`TQR`（读游标）/`LASTT`（最后一次按下的画布坐标）。
+
+```rust
+pub fn origin() -> (i32, i32)          // 画布左上角在屏幕上的坐标
+pub fn screen_to_canvas(sx, sy) -> Option<(i32, i32)>   // 屏幕点 -> 画布坐标，越界返回 None
+pub fn push_touch(cx, cy, down)
+pub fn take_touch() -> Option<(i32, i32)>   // 只取按下事件，记进 LASTT
+pub fn last_touch() -> (i32, i32)
+```
+
+`ui::handle_mouse()` 在 `take_click()` 循环的**最前面**拦一道：只要画布是 active，且落点在 `origin()` + 640×400 之内，就把这个点换算成画布坐标压进队列并 `continue`——**它不会再落到桌面上当"点窗口"处理**。抬起的那个事件也压进队列，但 `take_touch()` 只取 `down`，避免一次点击被读两遍。
+
+`dex.rs` 的 `Lcom/aster/Canvas;` 分支加两个内建方法：
+
+- `touchX()I` — 取一次队列里的按下事件，有就返回画布坐标 x，没有返回 `-1`；顺带把坐标记进 `LASTT`。
+- `touchY()I` — 返回 `last_touch().1`。
+
+所以 APK 侧的惯用法是"先问 `touchX()`，非负再问 `touchY()`"。
+
+### 47.2 fixture 第八版
+
+`tools/mkdex.py` 的 `code_run` 末尾追加（pc 175 起，41 条指令，总 216 code unit）：
+
+```
+int tx = cv.touchX();
+if (tx >= 0) {
+    int ty = cv.touchY();
+    cv.setColor(0xd9a441);
+    cv.drawRect(tx - 4, ty - 4, 8, 8);
+    Log.i("touch hit");
+} else {
+    Log.i("no touch");
+}
+```
+
+dex 2424 字节，`demo3.apk` 1551 字节。实拍：先 `canvas on` 让画布成为命中区，`sim click 400 400`（屏幕点 → 画布 `(104,108)`），再 `dex run`，光标处立刻多出一个金色 8×8 标记，串口 `touch hit`、137 条指令；不点时输出 `no touch`、126 条指令。
+
+### 47.3 这轮踩到的四个坑
+
+**一、内建分支末尾多了一行 `last = 0`。** `Canvas` 的 `clear/setColor/drawRect/drawText` 都是 void，我当初在 match 之后统一写了 `last = 0` 当作"清返回值"，结果 `touchX` 算出来的 `-1`/坐标在 `move-result` 之前就被抹成 0——APK 里 `if (tx >= 0)` 恒真，不点也走"命中"分支。删掉那行即可（`last` 本来就是上一次调用的返回值，不该由调用方清）。
+
+**二、23x 格式的单元字节序。** `sub-int vAA, vBB, vCC` 的第二单元是 `CC|BB`（**低字节 BB、高字节 CC**），我按"高 BB 低 CC"写了 `0x0400`，`v5 = v4 - v0 = -100`，方块被裁到画布外面，看起来"完全没画"。内核当前的取法是 `b = w >> 8`、`c = w & 0xff`，所以 fixture 必须按 **`BB<<8|CC`** 写：`sub-int v5, v0, v4` → `0x0004`。
+
+**三、第二次 `move-result` 写错了目标寄存器。** `touchY()` 之后我图省事复用了 `0x000a`（move-result v0），但 y 应该进 `v3`。于是 `sub-int v3, v3, v4` 减的是一个循环残留值 120，方块被画到 y=116——离点击点 8 像素，看上去像"命中位置偏了"。正确是 `0x030a`。
+
+**四、截图撕裂。** 命中画布会让 `want = true`，UI 连续重绘几帧；ramfb 在 `-display none` 下抓 `screendump` 正好赶上中间态，出现"整窗空白""只剩标题条"的假故障。判据是串口：日志里 `touch hit` 已经打出，画面不对就多补两条 `uptime` 让 UI 多刷几帧再截。
+
+### 47.4 限制
+
+- 队列 8 深、只保留按下事件；拖动（move）没有转给 APK，`touchMove` 还不存在。
+- 坐标是画布像素，没有压力、没有多点、没有时间戳。
+- 画布仍然固定 320×200 / 2 倍 / 居中；命中区跟着 `origin()` 走，但 APK 自己不知道画布尺寸（没有 `width()`/`height()`）。
+- 无显示环境（`-nographic`）下 `ui::tick` 不消费指针，`make test` 只能断言"无事件返回 -1"，命中路径靠图形截图取证（`build/apk10t.png`）。

@@ -916,9 +916,16 @@ fn exec(
                             let sv = str_of(d, h, args[1])?;
                             crate::apkcanvas::text(args[2], args[3], sv);
                         }
+                        "touchX" => {
+                            last = match crate::apkcanvas::take_touch() {
+                                Some((tx, _)) => tx,
+                                None => -1,
+                            };
+
+                        }
+                        "touchY" => last = crate::apkcanvas::last_touch().1,
                         _ => return Err("Canvas 上没有这个方法"),
                     }
-                    last = 0;
                 } else {
                     let c2 = code_of(d, h, m.class, m.name)?;
                     match exec(d, h, c2, &args[..argc], depth + 1, steps) {
