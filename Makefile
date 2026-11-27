@@ -37,7 +37,7 @@ BOOT_C   := boot/main.c boot/uart.c boot/sha256.c boot/verify.c boot/timer.c \
             boot/image.c boot/flash.c boot/shell.c boot/mem.c
 BOOT_OBJ := $(patsubst boot/%.c,$(B)/obj/%.o,$(BOOT_C)) $(B)/obj/start.o
 
-.PHONY: all image kernel sign boot run run-sock run-disk img test clean rpi4 info user
+.PHONY: all image kernel sign boot run run-sock run-disk img test clean rpi4 rpi3 sdcard info user
 
 all: image
 
@@ -53,8 +53,10 @@ YL_BIN    := $(B)/user/yield.bin
 FILE_BIN  := $(B)/user/file.bin
 FAULT_BIN := $(B)/user/fault.bin
 BUSY_BIN  := $(B)/user/busy.bin
+XCE_BIN   := $(B)/user/xce.bin
+XCE_PKG   := assets/xce/demo.xce
 
-user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN) $(FILE_BIN)
+user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN) $(FILE_BIN) $(XCE_BIN)
 
 $(B)/user/%.o: user/%.S
 	@mkdir -p $(B)/user
@@ -88,6 +90,11 @@ $(FAULT_BIN): $(B)/user/fault.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 fault: $$(stat -c%s $@) bytes"
 
+$(XCE_BIN): $(B)/user/xce.elf
+	$(CROSS)-objcopy -O binary $< $@
+	@mkdir -p assets/xce
+	@python3 tools/mkxce.py $@ $(XCE_PKG)
+
 $(BUSY_BIN): $(B)/user/busy.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 busy: $$(stat -c%s $@) bytes"
@@ -99,7 +106,7 @@ $(FILE_BIN): $(B)/user/file.elf
 # ---------- 1. 内核（Rust + C） ----------
 kernel: $(KBIN)
 
-$(KBIN): FORCE $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN)
+$(KBIN): FORCE $(XCE_BIN) $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN)
 	@mkdir -p $(B)
 	@test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
 	@python3 tools/aster-sign.py --build-id "aster-$(BOARD)" gen-ex3
@@ -257,6 +264,12 @@ rpi4:
 	$(MAKE) BOARD=rpi4 image
 	@cp $(B)/aster-boot.bin $(B)/kernel8.img
 	@echo "生成 $(B)/kernel8.img —— 拷到 SD 卡 boot 分区即可"
+
+SCARD := $(B)/aster-sdcard.img
+
+# 可直接 dd 到 SD 卡的镜像（MBR + FAT32 启动分区 + kernel8.img + config.txt）
+sdcard: rpi3
+	python3 tools/mksdcard.py build/kernel8.img $(SCARD) 64
 
 rpi3: img
 	$(MAKE) BOARD=rpi3 image

@@ -1149,3 +1149,123 @@ QEMU 的 raspi3b 没有 DWC2 模型，所以**这一层在本地只能验到"不
 3. **侧栏 hover 底色 alpha 26 → 32**，在 `#212328` 窗底上更容易和选中态的 accent pill 区分。
 
 跳过的四项（连字、字重区分、平滑滚动、输入区微亮底色）仍然跳过，理由没变：在 8×16 固定点阵上做这些只会变糊。
+
+## 39. XCE：Aster 原生程序格式
+
+APK / DEX 那条线解决的是"别人的程序怎么在 Aster 上跑"。XCE 解决的是另一件事：**Aster 自己的程序长什么样**。
+
+它不是 ELF 也不是 PE，是一段"链接到 `0x4440_0000` 的 EL0 扁平二进制"外面套 28 字节头。这个地址是内核用户地址空间的代码页，从阶段二起就没变过。
+
+### 39.1 头格式
+
+| 偏移 | 大小 | 字段 | 说明 |
+| --- | --- | --- | --- |
+| 0x00 | 4 | magic | `"XCE1"` |
+| 0x04 | 2 | version | 1 |
+| 0x06 | 2 | kind | 0 = EL0 可执行，1 = 数据包，2 = 内核模块（未开放） |
+| 0x08 | 4 | entry_va | 必须等于 `0x4440_0000` |
+| 0x0C | 4 | body_size | body 字节数，上限一页 4 KiB |
+| 0x10 | 4 | crc32 | body 的 IEEE CRC32 |
+| 0x14 | 4 | stack_va | 期望栈顶 |
+| 0x18 | 4 | flags | 保留 |
+| 0x1C | — | body | 代码与只读数据 |
+
+为什么不做段表：当前用户地址空间是固定的"一页代码 + 一页栈"，多段加载只会把 MMU 和页帧分配器拖进来。等到要支持堆和动态库再开 `kind=2`。
+
+### 39.2 装载流程
+
+`xce run` 做的事和 `run` 命令完全同源：
+
+1. `parse()` 校验：魔数、版本、body 不越界、`body_size ≤ 4096`、CRC32、`entry == 用户代码页`
+2. `sched::reset()` → `mmu::new_space()` → `mmu::load_image(sp, body)`（拷页 + `dc cvau` + `ic ivau` 刷 I-cache）
+3. `sched::spawn(sp)` → `timer::arm()` → `mmu::activate(&sp)` → `enter_user_state(CODE, STACK_TOP)`
+4. 程序里 `svc #0` 走 64=write、93=exit；任务全死时 `exit_current()` 发现 `pick_next()` 返回 `None`，切回内核页表，`enter_user_state` 返回退出码
+
+实拍（`xce1.png`）：装载 71 字节 → 打印 `XCE ok: native program, EL0, Aster` → `[SVC] exit(7)` → 回 shell。
+
+### 39.3 打包
+
+`tools/mkxce.py` 用纯 Python 的 `struct + zlib` 打包，不依赖交叉工具链：
+
+```
+python3 tools/mkxce.py build/user/xce.bin assets/xce/demo.xce
+```
+
+`make image` 会先编 `user/xce.S`、objcopy 成扁平二进制、再打包成 `assets/xce/demo.xce`，内核用 `include_bytes!` 内嵌。所以 `xce run` 在没挂磁盘的情况下也能跑。
+
+## 40. Device Lock（DL）
+
+Extreme 与 DL 是两道锁，管的不是同一件事：
+
+- **Extreme**：放开权限层级（提示符变 `#`，允许碰底层命令）
+- **DL**：这台设备现在准不准动底层（内存写、磁盘格式化、固件刷写）
+
+所以 `ex` 打开之后 `poke` 仍然被拒，必须再 `dl unlock`。这样"我进了 root 模式"和"我知道我在改哪台机器"是两次独立的确认。
+
+### 40.1 解锁码
+
+`EX3` 指纹的末 8 位。顶栏一直显示着 `9337BDCD`，引导器底层模式里 `dl` 也会打印。
+
+这不是安全边界 —— 能看到串口的人本来就读得到 EX3。它的作用是**防误操作**：刷固件、格式化磁盘这类不可逆动作，要求手抄一遍本机构建标识。文档里要把这句话写清楚，不能假装它是鉴权。
+
+### 40.2 覆盖范围
+
+| 位置 | 命令 | 锁定时的行为 |
+| --- | --- | --- |
+| 引导器 | `flash` | 拒绝，并打印解锁码 |
+| 内核 | `peek` / `poke` | 拒绝 |
+| 内核 | `fmt` / `mkfs` | 拒绝 |
+
+关于用 `peek` 只读也拦了这一条：读内核地址本身不改状态，但它和 `poke` 是同一套地址解析，拦一半留一半反而容易误操作。要么都放开，要么都锁。
+
+锁状态不跨重启：每次上电默认锁定。持久化需要一块可信存储，那是后面的事。
+
+## 41. 系统更新：A/B 槽与 AUP
+
+### 41.1 更新包
+
+`AUP1` 头 28 字节 + body：
+
+| 偏移 | 字段 |
+| --- | --- |
+| 0x00 | magic `"AUP1"` |
+| 0x04 | version u16（`0x0009` = 0.9） |
+| 0x06 | build u16（0 = 任意构建） |
+| 0x08 | body_size u32 |
+| 0x0C | crc32(body) u32 |
+| 0x10 | ex3[12] —— 本机 EX3 的前 12 字节 |
+| 0x1C | body |
+
+`ex3[12]` 是"这个包是给这台设备打的"的凭据。校验不过就拒绝，连 stage 都不给登记。
+
+### 41.2 四步状态机
+
+- `update check`：只读校验（魔数、长度、CRC、EX3 绑定、版本比较），不动任何状态
+- `update stage`：校验通过后写 `upd.state`（`staged ver=0.9 pending`）
+- `update apply`：写 `boot.conf` 的 `slot=B`，`upd.state` 记 `applied`
+- `update rollback`：写回 `slot=A`，`upd.state` 记 `rolled-back reason=manual`
+
+实拍（`upd5.png` / `upd6.png`）：`fmt → mkfs → stage → apply` 后状态变 `B（暂存更新）`；`rollback` 后回 `A`，`上次状态` 那行显示 `rolled-back slot=A reason=manual`。
+
+### 41.3 现在还没真的生效
+
+引导器仍然加载内嵌镜像。"从 B 槽读盘启动"需要引导器自己有块设备驱动 —— 那是 **BOARD-6**。在这之前 `apply` 会把这句话如实打出来，不假装重启就换版本了。
+
+另外 AsterFS v0 单文件上限 4096 字节，装不下 370 KB 的内核镜像。BOARD-6 要一起解决：内核镜像走 disk 上的裸槽（不占文件系统），boot.conf 只记槽号。
+
+## 42. SD 卡镜像
+
+`make sdcard` 产出一个可以直接 `dd` 的 64 MiB 镜像：
+
+```
+sector 0        MBR：一个分区，type 0x0C（FAT LBA），从 sector 2048 开始
+sector 2048 起  FAT16「ASTERBOOT」分区
+                  config.txt    arm_64bit=1 / kernel8.img / enable_uart=1 / dtoverlay=disable-bt
+                  kernel8.img   Aster 引导器（内含内核与校验链）
+```
+
+做法：先建独立的 FAT 分区镜像（`mkfs.vfat -F 16` + `mcopy`），再整块 dd 回主镜像的 2048 扇区处。全程不需要 root、不需要 loop 设备。
+
+为什么 FAT16 而不是 FAT32：64 MiB 上 FAT32 的 cluster 数低于规范建议，mtools 直接读不了（`Error reading FAT`）。树莓派固件 FAT16/FAT32 都认，小镜像用 16 更稳。
+
+为什么 MP4 里不做 ISO：ARM64 没有 PC 的 El Torito/CD 引导路径，对树莓派它就是一个 FAT 分区。硬做 `.iso` 只是换个后缀，不解决任何问题。要 ISO 的话，等 UEFI 那条线（QEMU `virt` 目前走 `-kernel`）。

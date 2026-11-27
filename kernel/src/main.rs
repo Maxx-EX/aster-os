@@ -28,6 +28,13 @@ mod zip;
 mod inflate;
 mod dex;
 mod usb;
+mod xce;
+mod update;
+
+/// 内嵌的原生程序（XCE）：构建时由 tools/mkxce.py 打包
+pub static XCE_DEMO: &[u8] = include_bytes!("../../assets/xce/demo.xce");
+/// 更新包样例（AUP）：`update check` 默认校验这一份
+pub static UPD_DEMO: &[u8] = include_bytes!("../../assets/upd/update.aup");
 mod net;
 mod rtc;
 mod sched;
@@ -69,9 +76,9 @@ fn banner() {
     println!();
     match crate::rtc::local() {
         Some((y, mo, d, h, mi, _s)) => {
-            println!("  Aster 0.8   ARM64   {:04}-{:02}-{:02} {:02}:{:02} CST", y, mo, d, h, mi)
+            println!("  Aster 0.9   ARM64   {:04}-{:02}-{:02} {:02}:{:02} CST", y, mo, d, h, mi)
         }
-        None => println!("  Aster 0.8   ARM64"),
+        None => println!("  Aster 0.9   ARM64"),
     }
 }
 

@@ -90,6 +90,11 @@
 | BOARD-3 | mailbox framebuffer | ✅ | property 通道 8 + 五个 tag + 总线/物理地址判定；拿到 1024×768 并读回校验一致 |
 | BOARD-4 | EMMC（SDHCI） | ⬜ | 初始化 CMD0/8/41/2/3/7/16，PIO 读扇区，接进 `disk` |
 | BOARD-5 | USB HID（DWC2） | 🟡 | 主机模式 + 端口复位 + 标准枚举 + HID boot 报告 + 注入 `input` 已落地；轮询未挂定时器，真机未验 |
+| NAT-1 | XCE 原生程序格式 | ✅ | 28 字节头（魔数/版本/入口/长度/CRC32/栈）+ `tools/mkxce.py`；`xce run` 装载新地址空间、切 EL0、SVC exit 回 shell，已实拍 |
+| SEC-1 | Device Lock（DL） | ✅ | 引导器与内核两侧默认锁定；解锁码 = EX3 末 8 位；`flash`/`peek`/`poke`/`fmt`/`mkfs` 全部走门 |
+| UPD-1 | 更新包与 A/B 槽 | 🟡 | AUP 头（CRC + EX3 绑定 12 字节）+ `update check/stage/apply/rollback` 状态机 + `boot.conf` 槽记录；引导器读盘启动待 BOARD-6 |
+| BOARD-6 | 引导器块设备 + 裸槽 | ⬜ | 引导器自带 virtio-blk/EMMC 读、disk 上开 2 MiB 裸槽、按 `boot.conf` 选 A/B、失败自动回 A |
+| PKG-1 | SD 卡镜像 | ✅ | `make sdcard` 生成 64 MiB MBR + FAT16 镜像（config.txt + kernel8.img），`dd` 即可烧 |
 | UI-9 | 交互可测 | ✅ | `sim move/click/drag` 内核内注入，与真实事件同一状态机；拖拽、置顶、侧栏开窗均已实拍验证 |
 | UI-8 | 过渡与反馈 | ✅ 部分 | 窗口淡入淡出（alpha 逐帧）、悬停变亮、按钮按下态、光标闪烁、托盘图标动效 |
 
@@ -97,6 +102,7 @@
 - 目视：桌面截图与上一版对比，文字边缘无锯齿、窗口有圆角与投影
 - 性能：1024×768 全屏重绘 < 30 ms（QEMU TCG 下），VNC 观看不明显卡顿
 - `make test-gfx` 三项不变；新增 `make test-ui`：monitor `sendkey` 注入鼠标点击，断言焦点切换
+- 窗口三色点已接：红点关闭、黄点收起、绿点最大化/还原（`close3.png` 为关掉系统窗后的帧）
 
 **风险**
 - 软件渲染的填充率是真瓶颈：圆角+投影+文字都是 alpha 混合，像素写次数比原来高 3–5 倍。缓解：脏矩形重绘（只重画变化区域）、壁纸缓存成离屏位图、窗口内容双缓冲

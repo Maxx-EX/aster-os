@@ -81,6 +81,10 @@ fn read_line(buf: &mut [u8]) -> usize {
 
 
 static mut EXTREME: bool = false;
+/// Device Lock：默认锁定。锁定状态下任何"动底层"的命令都不执行，
+/// 即使进了 Extreme —— 两道锁各管一层：Extreme 管"要不要放开权限"，
+/// DL 管"这台设备现在准不准动固件/内存/磁盘"。
+static mut DL_LOCKED: bool = true;
 
 fn parse_hex(s: &str) -> Option<u64> {
     let t = s.trim();
@@ -88,13 +92,172 @@ fn parse_hex(s: &str) -> Option<u64> {
     u64::from_str_radix(t, 16).ok()
 }
 
+/// 解锁码 = 本机构建的 EX3 指纹末 8 位（顶栏那一串），大小写不敏感。
+fn dl_code() -> &'static str {
+    let t = crate::ex3::EX3_TAG;
+    &t[t.len() - 8..]
+}
+
+fn dl_unlocked() -> bool {
+    unsafe { !DL_LOCKED }
+}
+
+/// 底层命令的统一门：Extreme 已开 且 Device Lock 已解
+fn gate(what: &str) -> bool {
+    if !unsafe { EXTREME } {
+        println!("  需要 Extreme 权限：先输入 ex");
+        return false;
+    }
+    if unsafe { DL_LOCKED } {
+        println!("  Device Lock 锁定中，{} 被拒。解锁码是顶栏 EX3 的末 8 位：dl unlock <code>", what);
+        return false;
+    }
+    true
+}
+
+/// update            —— 版本 / 槽 / 上次结果
+/// update check [f]  —— 只校验更新包（魔数、长度、CRC32、EX3）
+/// update stage [f]  —— 校验通过后登记"待应用"
+/// update apply      —— 切 B 槽（写 boot.conf）
+/// update rollback   —— 切回 A 槽
+fn cmd_update(a: &str) {
+    let mut it = a.split_whitespace();
+    let sub = it.next().unwrap_or("");
+    let path = it.next();
+    let bytes: &[u8] = match path {
+        Some(p) => {
+            let out = xce_buf();
+            match crate::afs::read_file(p, out) {
+                Ok(n) => &out[..n],
+                Err(e) => {
+                    println!("  读不到 {}：{}", p, e);
+                    return;
+                }
+            }
+        }
+        None => crate::UPD_DEMO,
+    };
+
+    match sub {
+        "" => {
+            let slot = crate::update::boot_slot();
+            println!("  版本      Aster {}  ARM64", crate::update::CURRENT_VER);
+            println!("  当前槽    {}（{}）", if slot == 1 { "B" } else { "A" },
+                if slot == 1 { "暂存更新" } else { "内嵌镜像" });
+            println!("  磁盘      {} / 单文件上限 {} 字节", 
+                if crate::blk::available() { "已挂载 AsterFS v0" } else { "未挂载（起机没带 -drive）" },
+                crate::afs::BS);
+            {
+                let out = xce_buf();
+                let line = match crate::afs::read_file("upd.state", out) {
+                    Ok(n) => core::str::from_utf8(&out[..n]).unwrap_or("").trim(),
+                    Err(_) => crate::update::state(),
+                };
+                println!("  上次状态  {}", line);
+            }
+            println!("  检查包    update check [文件]   登记 update stage   切换 update apply   回滚 update rollback");
+        }
+        "check" => match crate::update::parse(bytes) {
+            Ok(p) => {
+                println!("  AUP       v{}  目标构建 {}  body {} 字节  CRC32 {:08x} {}",
+                    crate::update::version_str(p.version), p.build, p.body_size, p.crc,
+                    if p.crc_ok { "通过" } else { "不匹配" });
+                println!("  构建绑定  EX3 {}（{}）", &crate::ex3::EX3_TAG[4..16],
+                    if p.ex3_ok { "与这台设备一致" } else { "是别的设备打的，拒绝应用" });
+                if !p.crc_ok || !p.ex3_ok {
+                    println!("  结论      包不可用");
+                } else if p.version < 9 {
+                    println!("  结论      版本不高于当前，可跳过");
+                } else {
+                    println!("  结论      可以应用（update stage）");
+                }
+            }
+            Err(e) => println!("  {}", e),
+        },
+        "stage" => match crate::update::parse(bytes) {
+            Ok(p) => {
+                if !p.crc_ok || !p.ex3_ok {
+                    println!("  拒绝登记：CRC 或 EX3 绑定不通过");
+                    crate::update::set_state("stage-failed crc/ex3\n");
+                    return;
+                }
+                println!("  记录到 upd.state（v{} / {} 字节 / crc {:08x}）",
+                    crate::update::version_str(p.version), p.body_size, p.crc);
+                crate::update::set_state(if p.version >= 9 {
+                    "staged ver=0.9 pending\n"
+                } else {
+                    "staged older-version pending\n"
+                });
+                println!("  已登记待应用：v{}  {} 字节（update apply 切槽）",
+                    crate::update::version_str(p.version), p.body_size);
+            }
+            Err(e) => println!("  {}", e),
+        },
+        "apply" => {
+            if crate::update::boot_slot() == 1 {
+                println!("  已经在 B 槽，无需重复 apply");
+                return;
+            }
+            match crate::update::set_slot(1) {
+                Ok(()) => {
+                    crate::update::set_state("applied slot=B bootloader=embedded(BOARD-6 reads disk)\n");
+                    println!("  已切到 B 槽（boot.conf slot=B）");
+                    println!("  注意：当前引导器仍加载内嵌镜像；读盘启动是 BOARD-6，");
+                    println!("        那一步做完重启才会真的用上暂存镜像。");
+                }
+                Err(e) => println!("  写 boot.conf 失败：{}（磁盘没挂载？先 mkfs）", e),
+            }
+        }
+        "rollback" => match crate::update::set_slot(0) {
+            Ok(()) => {
+                crate::update::set_state("rolled-back slot=A reason=manual\n");
+                println!("  已回滚到 A 槽（内嵌镜像）");
+            }
+            Err(e) => println!("  写 boot.conf 失败：{}", e),
+        },
+        _ => println!("  用法: update | update check [文件] | update stage [文件] | update apply | update rollback"),
+    }
+}
+
+fn cmd_dl(a: &str) {
+    let mut it = a.split_whitespace();
+    match it.next().unwrap_or("") {
+        "" => {
+            println!(
+                "  Device Lock {}",
+                if unsafe { DL_LOCKED } { "锁定 —— 底层写操作全部拒绝" } else { "已解锁 —— 底层命令可用（仍需 Extreme）" }
+            );
+            println!("  范围      内存读写（peek/poke）、磁盘格式化（fmt/mkfs）、固件刷写");
+            println!("  解锁      dl unlock <code>   解锁码 = EX3 指纹末 8 位（{}）", dl_code());
+            println!("  重新上锁  dl lock（关机不保留，下次启动默认锁定）");
+        }
+        "unlock" => {
+            let code = it.next().unwrap_or("").trim();
+            if code.is_empty() {
+                println!("  用法: dl unlock <code>（8 位十六进制）");
+                return;
+            }
+            if code.len() == 8 && code.eq_ignore_ascii_case(dl_code()) {
+                unsafe { DL_LOCKED = false };
+                println!("  Device Lock 已解锁：{} 与本机构建一致", dl_code());
+            } else {
+                println!("  解锁失败：码与 EX3 指纹末 8 位不符（尝试次数不限制，但这层不是安全边界，只防误操作）");
+            }
+        }
+        "lock" => {
+            unsafe { DL_LOCKED = true };
+            println!("  Device Lock 已重新锁定");
+        }
+        _ => println!("  用法: dl | dl unlock <code> | dl lock"),
+    }
+}
+
 fn in_ram(addr: u64) -> bool {
     (0x4000_0000..0x5000_0000).contains(&addr)
 }
 
 fn cmd_peek(a: &str) {
-    if !unsafe { EXTREME } {
-        println!("  需要 Extreme 权限：先输入 ex");
+    if !gate("peek") {
         return;
     }
     match parse_hex(a) {
@@ -166,8 +329,7 @@ fn cmd_sim(a: &str) {
 }
 
 fn cmd_poke(a: &str) {
-    if !unsafe { EXTREME } {
-        println!("  需要 Extreme 权限：先输入 ex");
+    if !gate("poke") {
         return;
     }
     let mut it = a.split_whitespace();
@@ -221,8 +383,7 @@ fn cmd_disk() {
 }
 
 fn cmd_fmt() {
-    if !unsafe { EXTREME } {
-        println!("  格式化会清掉整盘，需要 Extreme 权限：先输入 ex");
+    if !gate("fmt") {
         return;
     }
     if !crate::blk::available() {
@@ -236,6 +397,55 @@ fn cmd_fmt() {
     }
 }
 
+struct XceCell(core::cell::UnsafeCell<[u8; 8192]>);
+unsafe impl Sync for XceCell {}
+static XCE_BUF: XceCell = XceCell(core::cell::UnsafeCell::new([0; 8192]));
+
+fn xce_buf() -> &'static mut [u8; 8192] {
+    unsafe { &mut *XCE_BUF.0.get() }
+}
+
+/// xce            —— 看内嵌演示程序
+/// xce info [f]   —— 校验一个 XCE 文件（不带路径就看内嵌那份）
+/// xce run  [f]   —— 装进新地址空间并切 EL0 跑
+fn cmd_xce(a: &str) {
+    let mut it = a.split_whitespace();
+    let sub = it.next().unwrap_or("");
+    let path = it.next();
+    let bytes: &[u8] = match path {
+        Some(p) => {
+            let out = xce_buf();
+            match crate::afs::read_file(p, out) {
+                Ok(n) => &out[..n],
+                Err(e) => {
+                    println!("  读不到 {}：{}", p, e);
+                    return;
+                }
+            }
+        }
+        None => crate::XCE_DEMO,
+    };
+
+    match sub {
+        "" | "info" => match crate::xce::describe(bytes) {
+            Ok(i) => {
+                println!("  XCE       v{}  {}  头 {} 字节", i.version, crate::xce::kind_name(i.kind), crate::xce::HDR);
+                println!("  入口      {:#x}  栈顶 {:#x}  flags {:#x}", i.entry, i.stack, i.flags);
+                println!("  body      {} 字节  CRC32 {:08x}  {}", i.body_size, i.crc, if i.crc_ok { "通过" } else { "不匹配" });
+                if path.is_none() {
+                    println!("  来源      内核内嵌（xce run 跑的就是这一份）");
+                }
+            }
+            Err(e) => println!("  {}", e),
+        },
+        "run" => match crate::xce::run(bytes) {
+            Ok(code) => println!("  [XCE] 任务结束，退出码 {}", code),
+            Err(e) => println!("  装载失败：{}", e),
+        },
+        _ => println!("  用法: xce | xce info [文件] | xce run [文件]"),
+    }
+}
+
 struct CatCell(core::cell::UnsafeCell<[u8; crate::afs::BS]>);
 unsafe impl Sync for CatCell {}
 static CAT_OUT: CatCell = CatCell(core::cell::UnsafeCell::new([0; crate::afs::BS]));
@@ -245,8 +455,7 @@ fn cat_out() -> &'static mut [u8; crate::afs::BS] {
 }
 
 fn cmd_mkfs() {
-    if !unsafe { EXTREME } {
-        println!("  需要 Extreme 权限：先输入 ex");
+    if !gate("mkfs") {
         return;
     }
     if !crate::blk::available() {
@@ -390,6 +599,9 @@ fn cmd_help() {
     println!("  apk2      deflate 混合包：apk2 dex / apk2 cat <条目>（走 inflate）");
     println!("  dex       DEX 头/结构；dex run 执行 Main->run()V（非零 opcode 解释器）");
     println!("  usb       DWC2 主机状态与设备描述符（树莓派键鼠走这条）");
+    println!("  xce       Aster 原生程序：xce / xce info [文件] / xce run [文件]");
+    println!("  dl        Device Lock：锁定/解锁底层写（解锁码 = EX3 末 8 位）");
+    println!("  update    A/B 槽更新：update / check / stage / apply / rollback");
     println!("  bootanim  重播开机动画（2.4s）");
     println!("  bootframe <ms>  把动画某一时刻静态画出来（取证用）");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
@@ -519,6 +731,30 @@ pub fn run() -> ! {
             println!("  已画到第 {} ms 并停在屏幕上", ms);
             continue;
         }
+        if line == "update" {
+            cmd_update("");
+            continue;
+        }
+        if let Some(a) = line.strip_prefix("update ") {
+            cmd_update(a);
+            continue;
+        }
+        if line == "dl" {
+            cmd_dl("");
+            continue;
+        }
+        if let Some(a) = line.strip_prefix("dl ") {
+            cmd_dl(a);
+            continue;
+        }
+        if line == "xce" {
+            cmd_xce("");
+            continue;
+        }
+        if let Some(a) = line.strip_prefix("xce ") {
+            cmd_xce(a);
+            continue;
+        }
         if let Some(a) = line.strip_prefix("dex ") {
             cmd_dex(a);
             continue;
@@ -567,6 +803,15 @@ pub fn run() -> ! {
                         println!("  来源   fw_cfg / etc/ramfb");
                     }
                 }
+            }
+            "perf" => {
+                let (a, b, c) = crate::fb::frame_breakdown();
+                println!("  整桌 {:?} ms   壁纸 {:?}   侧栏 {:?}   窗口 {:?}   帧 {}",
+                    crate::fb::last_frame_ms(), a, b, c, crate::fb::frame());
+                println!("  窗口 终端 {}x{}  系统 {}x{}  网络 {}x{}",
+                    crate::fb::win(0).w, crate::fb::win(0).h,
+                    crate::fb::win(1).w, crate::fb::win(1).h,
+                    crate::fb::win(2).w, crate::fb::win(2).h);
             }
             "wins" => {
                 for (n, x, y, w, h, o) in crate::fb::dump_wins() {

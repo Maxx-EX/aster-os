@@ -518,19 +518,31 @@ pub fn rounded_rect(x: i32, y: i32, w: u32, h: u32, r: u32, color: u32) {
 
 /// 柔和投影：三层递减，只露在窗口边缘外
 pub fn drop_shadow(x: i32, y: i32, w: u32, h: u32, r: u32) {
-    // 从外到内四层：外层半径大、透明度高，内层收紧、加深。
-    // 四层同 alpha 会在边缘留下一圈圈台阶，分层后过渡是连续的。
-    const SPEC: [(u32, u32); 4] = [(13, 5), (9, 9), (5, 14), (2, 20)];
-    for (d, a) in SPEC {
-        rounded_rect_alpha(
-            x - d as i32,
-            y - (d / 2) as i32 + 2,
-            w + d * 2,
-            h + d * 2,
-            r + d,
-            0x000000,
-            a,
-        );
+    // 只画窗口外的一圈（环带），窗口本体一会儿会被盖住。
+    // 原来两层把 800x600 整块扫一遍：478k 像素 × 每像素读+混合+写，
+    // 一帧就吃掉三十多毫秒。改成四条边带之后同一条阴影只扫约 40k 像素。
+    const SPEC: [(u32, u32, u32); 3] = [(14, 36, 6), (9, 26, 9), (4, 18, 14)];
+    for (d, cr, a) in SPEC {
+        let ox = x - d as i32;
+        let oy = y - (d / 2) as i32 + 2;
+        let ow = w + d * 2;
+        let oh = h + d * 2;
+        // 上带（含左右上圆角）
+        let top_h = (y - oy) as u32 + 3;
+        rounded_rect_alpha(ox, oy, ow, top_h, cr, 0x000000, a);
+        // 下带
+        let by = y + h as i32 - 3;
+        let bot_h = (oy + oh as i32 - by) as u32;
+        rounded_rect_alpha(ox, by, ow, bot_h, cr, 0x000000, a);
+        // 左右两条侧带
+        if x - ox > 0 {
+            blend_rect(ox.max(0) as u32, (y + 2).max(0) as u32, (x - ox) as u32, h.saturating_sub(4), 0x000000, a);
+        }
+        let rx = x + w as i32 + 2;
+        let rw = (ox + ow as i32) - rx;
+        if rw > 0 {
+            blend_rect(rx.max(0) as u32, (y + 2).max(0) as u32, rw as u32, h.saturating_sub(4), 0x000000, a);
+        }
     }
 }
 
@@ -1106,7 +1118,7 @@ pub fn cache_wall(ex3_short: &str) {
     fill_rect(0, 36, W, 1, 0x26292f);
     let mut hx = draw_text_ui(16, 10, "Aster", TEXT) + 10;
     hx = draw_text_ui(hx, 10, "星芒", TEXT2) + 14;
-    draw_text_ui(hx, 11, "v0.8  ARM64", DIM);
+    draw_text_ui(hx, 11, "v0.9  ARM64", DIM);
     let right = text_len_ui("EX3 ") + text_len_ui(ex3_short);
     draw_text_ui(W - right - 16, 11, "EX3 ", DIM);
     draw_text_ui(W - text_len_ui(ex3_short) - 16, 11, ex3_short, OK);
@@ -1140,12 +1152,30 @@ pub fn restore_wall(x: u32, y: u32, w: u32, h: u32) {
     }
     let x1 = (x + w).min(f.w);
     let y1 = (y + h).min(f.h);
+    // 两像素一次搬：整屏 786k 像素，逐 u32 读写在 QEMU 上要十几毫秒，
+    // 成对搬能把访存次数砍一半。x 是奇数或地址没对齐时退回逐像素。
+    let pair_ok = x % 2 == 0 && (f.base + (y * f.stride) as u64) % 8 == 0 && (wall_addr() + (y * f.stride) as u64) % 8 == 0;
     for yy in y..y1 {
         let row = (yy * f.stride) as u64;
-        for xx in x..x1 {
-            let off = row + (xx * 4) as u64;
-            let src = unsafe { core::ptr::read_volatile((wall_addr() + off) as *const u32) };
-            unsafe { core::ptr::write_volatile((f.base + off) as *mut u32, src) };
+        if pair_ok {
+            let mut xx = x;
+            while xx + 1 < x1 {
+                let off = row + (xx * 4) as u64;
+                let v = unsafe { core::ptr::read_volatile((wall_addr() + off) as *const u64) };
+                unsafe { core::ptr::write_volatile((f.base + off) as *mut u64, v) };
+                xx += 2;
+            }
+            if xx < x1 {
+                let off = row + (xx * 4) as u64;
+                let v = unsafe { core::ptr::read_volatile((wall_addr() + off) as *const u32) };
+                unsafe { core::ptr::write_volatile((f.base + off) as *mut u32, v) };
+            }
+        } else {
+            for xx in x..x1 {
+                let off = row + (xx * 4) as u64;
+                let src = unsafe { core::ptr::read_volatile((wall_addr() + off) as *const u32) };
+                unsafe { core::ptr::write_volatile((f.base + off) as *mut u32, src) };
+            }
         }
     }
 }
@@ -1218,11 +1248,78 @@ pub fn raise(i: usize) {
     }
 }
 
+static mut SAVED: [(i32, i32, u32, u32); NWIN] = [(0, 0, 0, 0); NWIN];
+static mut MAXED: [bool; NWIN] = [false; NWIN];
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Btn {
+    Close,
+    Min,
+    Max,
+}
+
+/// 标题栏三个圆点（左起 绿/黄/红）的命中判定，半径 8px 好点
+pub fn title_button_at(i: usize, x: i32, y: i32) -> Option<Btn> {
+    let w = win(i);
+    if y < w.y + 14 || y > w.y + 30 {
+        return None;
+    }
+    let cx = w.x + w.w as i32 - 26;
+    if (x - cx).abs() <= 8 {
+        return Some(Btn::Close);
+    }
+    if (x - (cx - 20)).abs() <= 8 {
+        return Some(Btn::Min);
+    }
+    if (x - (cx - 40)).abs() <= 8 {
+        return Some(Btn::Max);
+    }
+    None
+}
+
+/// 关掉一扇窗：焦点落到还在的最上层窗口
 pub fn close_win(i: usize) {
     unsafe {
         WINS[i].open = false;
-        FOCUS = 0;
-        raise(0);
+        MAXED[i] = false;
+        let mut next = usize::MAX;
+        for k in (0..NWIN).rev() {
+            let j = ZORD[k];
+            if j != i && WINS[j].open {
+                next = j;
+                break;
+            }
+        }
+        if next != usize::MAX {
+            FOCUS = next;
+        }
+    }
+}
+
+/// 最小化等同收起：窗口留在 dock，点侧栏或 dock 再抬起来
+pub fn minimize_win(i: usize) {
+    close_win(i);
+}
+
+/// 最大化/还原：记住原几何，铺到桌面可用区（让出顶栏与 dock）
+pub fn toggle_max(i: usize) {
+    unsafe {
+        let w = WINS[i];
+        if !MAXED[i] {
+            SAVED[i] = (w.x, w.y, w.w, w.h);
+            WINS[i].x = 16;
+            WINS[i].y = 56;
+            WINS[i].w = W - 32;
+            WINS[i].h = H - 56 - 96;
+            MAXED[i] = true;
+        } else {
+            let (x, y, ww, hh) = SAVED[i];
+            WINS[i].x = x;
+            WINS[i].y = y;
+            WINS[i].w = ww;
+            WINS[i].h = hh;
+            MAXED[i] = false;
+        }
     }
 }
 
@@ -1251,6 +1348,12 @@ pub fn title_hit(i: usize, y: i32) -> bool {
 
 /// 拖某一扇窗：擦掉新旧位置的并集，再按 z 序把还开着的窗口全画一遍
 pub fn move_window(i: usize, nx: i32, ny: i32) {
+    move_window_ex(i, nx, ny, true);
+}
+
+/// `shadow=false` 用于拖拽中的每一帧：阴影是 4 层大半径圆角混合，
+/// 一帧要盖掉几万个像素，拖动时省掉它手感立刻跟手。松手后再补一次完整的。
+pub fn move_window_ex(i: usize, nx: i32, ny: i32, shadow: bool) {
     let w = win(i);
     if nx == w.x && ny == w.y {
         return;
@@ -1262,7 +1365,7 @@ pub fn move_window(i: usize, nx: i32, ny: i32) {
     restore_wall(ux, uy, uw, uh);
     set_win_pos_of(i, nx, ny);
     draw_sidebar();
-    draw_all();
+    draw_all_ex(shadow);
     crate::cursor::invalidate();
 }
 
@@ -1285,22 +1388,55 @@ pub fn show_win(i: usize) {
     raise(i);
 }
 
+static mut LAST_MS: u64 = 0;
+static mut MS_RESTORE: u64 = 0;
+static mut MS_SIDEBAR: u64 = 0;
+static mut MS_WIN: u64 = 0;
+
+pub fn frame_breakdown() -> (u64, u64, u64) {
+    unsafe { (MS_RESTORE, MS_SIDEBAR, MS_WIN) }
+}
+
+/// 上一次整桌重绘耗时（ms）
+pub fn last_frame_ms() -> u64 {
+    unsafe { LAST_MS }
+}
+
 pub fn draw_all() {
+    draw_all_ex(true);
+}
+
+pub fn draw_all_ex(shadow: bool) {
+    let t0 = crate::timer::now_ms();
     unsafe {
         for k in 0..NWIN {
             let i = ZORD[k];
             if WINS[i].open {
-                draw_one(i);
+                draw_one_ex(i, shadow);
             }
         }
         FRAME = FRAME.wrapping_add(1);
+        let dt = crate::timer::now_ms().saturating_sub(t0);
+        LAST_MS = dt;
+        MS_WIN = dt;
     }
 }
 
 fn draw_one(i: usize) {
+    draw_one_ex(i, true);
+}
+
+fn draw_one_ex(i: usize, shadow: bool) {
     let w = win(i);
     let active = unsafe { FOCUS } == i;
     let title = win_title(i);
+
+    if !shadow {
+        rounded_rect(w.x, w.y, w.w, w.h, 14, WIN_BG);
+        draw_title(i, w, active, title);
+        draw_body(i, w);
+        return;
+    }
 
     rounded_rect_alpha(
         w.x - 26,
@@ -1322,6 +1458,11 @@ fn draw_one(i: usize) {
     );
     rounded_rect(w.x, w.y, w.w, w.h, 14, WIN_BG);
 
+    draw_title(i, w, active, title);
+    draw_body(i, w);
+}
+
+fn draw_title(i: usize, w: Win, active: bool, title: &str) {
     let bar = if active { WIN_BAR } else { 0x262a31 };
     rounded_rect(w.x + 1, w.y + 1, w.w - 2, TITLE_H as u32, 13, bar);
     fill_rect((w.x + 3) as u32, (w.y + 24) as u32, w.w - 6, 20, bar);
@@ -1356,7 +1497,9 @@ fn draw_one(i: usize) {
     circle(cx, w.y + 22, 5, 0xff5f57, a);
     circle(cx - 20, w.y + 22, 5, 0xfebc2e, a);
     circle(cx - 40, w.y + 22, 5, 0x28c840, a);
+}
 
+fn draw_body(i: usize, w: Win) {
     match i {
         0 => {
             term_guard((w.x + PAD_X as i32) as u32, (w.y + TITLE_H as i32 + 12) as u32, 88 * 8 + 12);
@@ -1395,7 +1538,7 @@ fn draw_sys_body(w: Win) {
     let mut y = (w.y + TITLE_H as i32 + 18) as u32;
     let (tasks, kernel_kb) = unsafe { (LAST_TASKS, LAST_KB) };
     let (used_pages, _t, _) = crate::frame::stats();
-    kv(x, y, "版本", "Aster 0.8  ARM64", TEXT);
+    kv(x, y, "版本", "Aster 0.9  ARM64", TEXT);
     y += 26;
     let kb_b = num_str(kernel_kb);
     kv(x, y, "内核", s_of(&kb_b), TEXT);
@@ -1522,8 +1665,15 @@ pub fn draw_desktop(
     }
     let _ = ex3_short;
 
+    let t_rest = crate::timer::now_ms();
     restore_wall(0, 0, W, H);
+    let t_side = crate::timer::now_ms();
     draw_sidebar();
+    let t_after_side = crate::timer::now_ms();
+    unsafe {
+        MS_RESTORE = t_side.saturating_sub(t_rest);
+        MS_SIDEBAR = t_after_side.saturating_sub(t_side);
+    }
 
     rounded_rect(118, (DOCK_Y + 40) as i32, 26, 3, 1, ACCENT);
     let lamp_y = (DOCK_Y + 23) as i32;

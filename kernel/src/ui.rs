@@ -69,6 +69,35 @@ fn handle_mouse() -> bool {
         if pressed {
             // 点窗口：抬到最上层并聚焦；落在标题栏上就开始拖
             if let Some(i) = fb::hit_top(x, y) {
+                // 标题栏三个圆点：红关、黄收起、绿最大化/还原
+                if let Some(b) = fb::title_button_at(i, x, y) {
+                    let w = fb::win(i);
+                    fb::raise(i);
+                    match b {
+                        fb::Btn::Close => fb::close_win(i),
+                        fb::Btn::Min => fb::minimize_win(i),
+                        fb::Btn::Max => fb::toggle_max(i),
+                    }
+                    // 旧位置（最大化时还要连新位置一起）擦回壁纸再整桌重画
+                    fb::restore_wall(
+                        (w.x - 30).max(0) as u32,
+                        (w.y - 12).max(0) as u32,
+                        (w.w + 60).min(1024) as u32,
+                        (w.h + 64).min(768) as u32,
+                    );
+                    let nw = fb::win(i);
+                    fb::restore_wall(
+                        (nw.x - 30).max(0) as u32,
+                        (nw.y - 12).max(0) as u32,
+                        (nw.w + 60).min(1024) as u32,
+                        (nw.h + 64).min(768) as u32,
+                    );
+                    fb::draw_sidebar();
+                    fb::draw_all();
+                    crate::cursor::invalidate();
+                    want = true;
+                    continue;
+                }
                 fb::raise(i);
                 want = true;
                 if fb::title_hit(i, y) {
@@ -95,7 +124,22 @@ fn handle_mouse() -> bool {
                 continue;
             }
         } else {
-            unsafe { DRAG = usize::MAX };
+            // 松手：拖拽期间省了阴影，这里补一次完整的
+            if unsafe { DRAG } != usize::MAX {
+                let i = unsafe { DRAG };
+                unsafe { DRAG = usize::MAX };
+                let w = fb::win(i);
+                fb::restore_wall(
+                    (w.x - 30).max(0) as u32,
+                    (w.y - 12).max(0) as u32,
+                    (w.w + 60).min(1024) as u32,
+                    (w.h + 64).min(768) as u32,
+                );
+                fb::draw_sidebar();
+                fb::draw_all();
+                crate::cursor::invalidate();
+                want = true;
+            }
         }
     }
 
@@ -105,7 +149,7 @@ fn handle_mouse() -> bool {
         let nx = (mx - unsafe { OFF_X }).clamp(80 - w.w as i32, 1024 - 80);
         let ny = (my - unsafe { OFF_Y }).clamp(40, 768 - 80);
         if nx != w.x || ny != w.y {
-            fb::move_window(i, nx, ny);
+            fb::move_window_ex(i, nx, ny, false); // 拖动中不画阴影，手感跟手
             want = true;
         }
     }

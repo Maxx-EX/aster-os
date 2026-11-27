@@ -10,6 +10,73 @@
 
 static char line[128];
 
+/* ---------------- Device Lock（DL） ----------------
+ * 底层模式能改的东西太危险（刷固件、写镜像），所以默认锁着。
+ * 解锁码 = 本机构建的 EX3 指纹末 8 位，与内核顶栏显示的是同一个串。
+ * 这一层不是安全边界，是"防误操作"的闸门：能读到串口的人本来就
+ * 能看到 EX3，要求他手抄一遍只是确认他知道自己在动哪台设备。
+ */
+static int dl_locked = 1;
+
+static int str_len(const char *s)
+{
+    int n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static char up(char c)
+{
+    return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
+}
+
+static const char *dl_code(void)
+{
+    const char *t = ASTER_EX3_TAG;
+    return t + (str_len(t) - 8);
+}
+
+static int code_matches(const char *in)
+{
+    const char *want = dl_code();
+    int i;
+    if (str_len(in) != 8) return 0;
+    for (i = 0; i < 8; i++) {
+        if (up(in[i]) != up(want[i])) return 0;
+    }
+    return 1;
+}
+
+static void cmd_dl(const char *args)
+{
+    if (args[0] == 0) {
+        uart_puts("  Device Lock ");
+        uart_puts(dl_locked ? "锁定 —— flash/写入全部拒绝\n" : "已解锁 —— flash 可用\n");
+        uart_puts("  解锁码     : ");
+        uart_puts(dl_code());
+        uart_puts("  （EX3 指纹末 8 位）\n");
+        uart_puts("  用法       : dl unlock <code>    /    dl lock\n");
+        return;
+    }
+    if (args[0] == 'u' && args[1] == 'n') {
+        const char *c = args + 6;              /* "unlock" 之后 */
+        while (*c == ' ') c++;
+        if (code_matches(c)) {
+            dl_locked = 0;
+            uart_puts("  Device Lock 已解锁\n");
+        } else {
+            uart_puts("  解锁失败：码与 EX3 末 8 位不符\n");
+        }
+        return;
+    }
+    if (args[0] == 'l' && args[1] == 'o') {
+        dl_locked = 1;
+        uart_puts("  Device Lock 已重新锁定\n");
+        return;
+    }
+    uart_puts("  用法: dl | dl unlock <code> | dl lock\n");
+}
+
 static int read_line(void)
 {
     int n = 0;
@@ -62,7 +129,8 @@ static void cmd_help(void)
         "  help                显示本帮助\n"
         "  info                板级与镜像信息\n"
         "  verify              重新执行 AVP 三级校验\n"
-        "  flash               进入 AFP 串口刷写\n"
+        "  flash               进入 AFP 串口刷写（需 Device Lock 已解锁）\n"
+        "  dl                  设备锁状态 / dl unlock <code> / dl lock\n"
         "  staged              查看刷写暂存区状态\n"
         "  boot                校验通过则启动内核\n"
         "  dump <addr> <len>   十六进制转储内存\n"
@@ -167,7 +235,15 @@ int shell_run(const avp_result *report)
             }
             return 1;
         }
+        else if (str_eq(line, "dl")) { cmd_dl(""); }
+        else if (line[0] == 'd' && line[1] == 'l' && line[2] == ' ') { cmd_dl(line + 3); }
         else if (str_eq(line, "flash")) {
+            if (dl_locked) {
+                uart_puts("  Device Lock 锁定中：固件刷写被拒。先 dl unlock ");
+                uart_puts(dl_code());
+                uart_puts("\n");
+                continue;
+            }
             afp_run_session();
         }
         else if (line[0] == 'd' && line[1] == 'u') {
