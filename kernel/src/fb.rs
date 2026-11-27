@@ -1000,23 +1000,6 @@ static mut FRAME: u32 = 0;
 static mut WIN_X: i32 = 138;
 static mut WIN_Y: i32 = 86;
 
-/// 拖拽专用：只擦窗口挪动扫过的并集区域，再在新位置画窗口
-pub fn move_window_to(nx: i32, ny: i32) {
-    let (ox, oy) = win_pos();
-    if nx == ox && ny == oy {
-        return;
-    }
-    let ux = ox.min(nx).max(0) as u32;
-    let uy = oy.min(ny).max(0) as u32;
-    let uw = WIN_W + (nx - ox).unsigned_abs();
-    let uh = WIN_H + (ny - oy).unsigned_abs();
-    restore_wall(ux, uy, uw.min(W - ux), uh.min(H - uy));
-    draw_sidebar();
-    set_win_pos(nx, ny);
-    draw_window(nx, ny);
-    crate::cursor::invalidate();
-}
-
 pub fn frame() -> u32 {
     unsafe { FRAME }
 }
@@ -1136,50 +1119,193 @@ pub fn restore_wall(x: u32, y: u32, w: u32, h: u32) {
 static mut LAST_TASKS: u32 = 0;
 static mut LAST_KB: u64 = 0;
 
-/// 窗口整块：大柔和阴影、圆角、标题栏+分割线、内容底板、底部状态行
-pub fn draw_window(win_x: i32, win_y: i32) {
-    // 两层阴影：一层远而淡做弥散，一层近而稍实做接触
+// ---------------- 多窗口 ----------------
+// 三个窗口：0 终端、1 系统、2 网络。ZORD[0] 在最底，ZORD[NSLOT-1] 在最上，
+// 点击任意窗口就把它抬到最上层并聚焦；重画一律按 ZORD 顺序来一遍。
+
+pub const NWIN: usize = 3;
+
+#[derive(Clone, Copy)]
+pub struct Win {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub open: bool,
+}
+
+static mut WINS: [Win; NWIN] = [
+    Win { x: 138, y: 86, w: 748, h: 546, open: true },
+    Win { x: 636, y: 108, w: 350, h: 304, open: true },
+    Win { x: 604, y: 428, w: 372, h: 224, open: true },
+];
+
+static mut ZORD: [usize; NWIN] = [0, 1, 2];
+static mut FOCUS: usize = 0;
+
+pub fn win(i: usize) -> Win {
+    unsafe { WINS[i] }
+}
+
+pub fn focus() -> usize {
+    unsafe { FOCUS }
+}
+
+pub fn win_title(i: usize) -> &'static str {
+    ["终端", "系统", "网络"][i.min(2)]
+}
+
+pub fn set_win_pos_of(i: usize, x: i32, y: i32) {
+    unsafe {
+        WINS[i].x = x;
+        WINS[i].y = y;
+    }
+}
+
+/// 抬到最上层并聚焦；关着的窗口顺手打开
+pub fn raise(i: usize) {
+    unsafe {
+        if i >= NWIN {
+            return;
+        }
+        WINS[i].open = true;
+        let mut pos = 0;
+        for k in 0..NWIN {
+            if ZORD[k] == i {
+                pos = k;
+            }
+        }
+        let v = ZORD[pos];
+        for k in pos..(NWIN - 1) {
+            ZORD[k] = ZORD[k + 1];
+        }
+        ZORD[NWIN - 1] = v;
+        FOCUS = i;
+    }
+}
+
+pub fn close_win(i: usize) {
+    unsafe {
+        WINS[i].open = false;
+        FOCUS = 0;
+        raise(0);
+    }
+}
+
+fn contains(i: usize, x: i32, y: i32) -> bool {
+    let w = unsafe { WINS[i] };
+    w.open && x >= w.x && x < w.x + w.w as i32 && y >= w.y && y < w.y + w.h as i32
+}
+
+/// 从最上层往下找命中的窗口
+pub fn hit_top(x: i32, y: i32) -> Option<usize> {
+    unsafe {
+        for k in (0..NWIN).rev() {
+            let i = ZORD[k];
+            if contains(i, x, y) {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+pub fn title_hit(i: usize, y: i32) -> bool {
+    let w = win(i);
+    y >= w.y && y < w.y + TITLE_H as i32
+}
+
+/// 拖某一扇窗：擦掉新旧位置的并集，再按 z 序把还开着的窗口全画一遍
+pub fn move_window(i: usize, nx: i32, ny: i32) {
+    let w = win(i);
+    if nx == w.x && ny == w.y {
+        return;
+    }
+    let ux = w.x.min(nx).max(0) as u32;
+    let uy = w.y.min(ny).max(0) as u32;
+    let uw = (w.w + (nx - w.x).unsigned_abs()).min(W - ux);
+    let uh = (w.h + (ny - w.y).unsigned_abs()).min(H - uy);
+    restore_wall(ux, uy, uw, uh);
+    set_win_pos_of(i, nx, ny);
+    draw_sidebar();
+    draw_all();
+    crate::cursor::invalidate();
+}
+
+pub fn draw_all() {
+    unsafe {
+        for k in 0..NWIN {
+            let i = ZORD[k];
+            if WINS[i].open {
+                draw_one(i);
+            }
+        }
+        FRAME = FRAME.wrapping_add(1);
+    }
+}
+
+fn draw_one(i: usize) {
+    let w = win(i);
+    let active = unsafe { FOCUS } == i;
+    let title = win_title(i);
+
     rounded_rect_alpha(
-        win_x - 26,
-        win_y - 8,
-        WIN_W + 52,
-        WIN_H + 52,
+        w.x - 26,
+        w.y - 8,
+        w.w + 52,
+        w.h + 52,
         34,
         0x000000,
-        18,
+        if active { 18 } else { 12 },
     );
-    rounded_rect_alpha(win_x - 8, win_y - 2, WIN_W + 16, WIN_H + 16, 20, 0x000000, 22);
+    rounded_rect_alpha(
+        w.x - 8,
+        w.y - 2,
+        w.w + 16,
+        w.h + 16,
+        20,
+        0x000000,
+        if active { 22 } else { 16 },
+    );
+    rounded_rect(w.x, w.y, w.w, w.h, 14, WIN_BG);
 
-    rounded_rect(win_x, win_y, WIN_W, WIN_H, 14, WIN_BG);
+    let bar = if active { WIN_BAR } else { 0x262a31 };
+    rounded_rect(w.x + 1, w.y + 1, w.w - 2, TITLE_H as u32, 13, bar);
+    fill_rect((w.x + 3) as u32, (w.y + 24) as u32, w.w - 6, 20, bar);
+    fill_rect(
+        (w.x + 1) as u32,
+        (w.y + TITLE_H as i32 - 1) as u32,
+        w.w - 2,
+        1,
+        WIN_LINE,
+    );
 
-    // 标题栏：上圆角，下半截补平
-    let tx = win_x + 1;
-    let ty = win_y + 1;
-    let tw = WIN_W - 2;
-    rounded_rect(tx, ty, tw, TITLE_H as u32, 13, WIN_BAR);
-    fill_rect((tx + 2) as u32, (ty + 24) as u32, tw - 4, 20, WIN_BAR);
-    fill_rect((tx + 1) as u32, (ty + TITLE_H as i32 - 1) as u32, tw - 2, 1, WIN_LINE);
-
-    let mut hx = draw_text_ui((tx + 18) as u32, (ty + 14) as u32, "终端", TEXT) + 8;
-    hx = draw_text_ui(hx, (ty + 15) as u32, "TERMINAL", DIM);
+    let mut hx = draw_text_ui((w.x + 18) as u32, (w.y + 14) as u32, title, if active { TEXT } else { TEXT2 }) + 8;
+    let sub = ["TERMINAL", "SYSTEM", "NETWORK"][i.min(2)];
+    hx = draw_text_ui(hx, (w.y + 15) as u32, sub, DIM);
     let _ = hx;
 
-    let cx = tx + tw as i32 - 26;
-    let cy = ty + 22;
-    circle(cx, cy, 5, 0xff5f57, 255);
-    circle(cx - 20, cy, 5, 0xfebc2e, 255);
-    circle(cx - 40, cy, 5, 0x28c840, 255);
+    let a = if active { 255 } else { 96 };
+    let cx = w.x + w.w as i32 - 26;
+    circle(cx, w.y + 22, 5, 0xff5f57, a);
+    circle(cx - 20, w.y + 22, 5, 0xfebc2e, a);
+    circle(cx - 40, w.y + 22, 5, 0x28c840, a);
 
-    // 终端内容区
-    term_guard(
-        (win_x + PAD_X as i32) as u32,
-        (win_y + TITLE_H as i32 + 12) as u32,
-        88 * 8 + 12,
-    );
+    match i {
+        0 => {
+            term_guard((w.x + PAD_X as i32) as u32, (w.y + TITLE_H as i32 + 12) as u32, 88 * 8 + 12);
+            draw_term_status(w);
+        }
+        1 => draw_sys_body(w),
+        2 => draw_net_body(w),
+        _ => {}
+    }
+}
 
-    let sy = (win_y + WIN_H as i32 - 25) as u32;
+fn draw_term_status(w: Win) {
+    let sy = (w.y + w.h as i32 - 25) as u32;
     let (tasks, kernel_kb) = unsafe { (LAST_TASKS, LAST_KB) };
-    let lx = (tx + 18) as u32;
+    let lx = (w.x + 18) as u32;
     draw_text_ui(lx, sy, "任务 ", DIM);
     let lx = draw_num_ui(lx + 3 * 10 + 4, sy, tasks as u64);
     draw_text_ui(lx + 10, sy, "内核 ", DIM);
@@ -1190,32 +1316,131 @@ pub fn draw_window(win_x: i32, win_y: i32) {
     let (used_pages, _total, _) = crate::frame::stats();
     let lx = draw_num_ui(lx + 3 * 10 + 4, sy, used_pages as u64);
     draw_text_ui(lx + 6, sy, "/ 32768", DIM);
-    draw_text_ui((tx + tw as i32 - 250) as u32, sy, "EX3 已校验 · AVP 三级通过", DIM);
+    draw_text_ui((w.x + w.w as i32 - 250) as u32, sy, "EX3 已校验 · AVP 三级通过", DIM);
+}
+
+fn kv(x: u32, y: u32, k: &str, v: &str, c: u32) {
+    draw_text_ui(x, y, k, DIM);
+    draw_text_ui(x + 68, y, v, c);
+}
+
+fn draw_sys_body(w: Win) {
+    let x = (w.x + 18) as u32;
+    let mut y = (w.y + TITLE_H as i32 + 18) as u32;
+    let (tasks, kernel_kb) = unsafe { (LAST_TASKS, LAST_KB) };
+    let (used_pages, _t, _) = crate::frame::stats();
+    kv(x, y, "版本", "Aster 0.7  ARM64", TEXT);
+    y += 26;
+    let kb_b = num_str(kernel_kb);
+    kv(x, y, "内核", s_of(&kb_b), TEXT);
+    draw_text_ui(x + 68 + text_len_ui(s_of(&kb_b)) + 6, y, "KB", DIM);
+    y += 26;
+    let t_b = num_str(tasks as u64);
+    kv(x, y, "任务", s_of(&t_b), TEXT);
+    y += 26;
+    let p_b = num_str(used_pages as u64);
+    kv(x, y, "页帧", s_of(&p_b), TEXT);
+    draw_text_ui(x + 68 + text_len_ui(s_of(&p_b)) + 6, y, "页", DIM);
+    y += 26;
+    kv(x, y, "磁盘", if crate::blk::available() { "已连接" } else { "未连接" }, if crate::blk::available() { OK } else { DIM });
+    y += 26;
+    kv(x, y, "文件", "AsterFS v0", TEXT);
+    y += 26;
+    kv(x, y, "信任", "EX3 已校验", OK);
+    let by = (w.y + w.h as i32 - 34) as u32;
+    fill_rect(x, by - 12, w.w - 36, 1, 0x33373e);
+    draw_text_ui(x, by, "AsterFS v0 · virtio-blk", DIM);
+}
+
+fn draw_net_body(w: Win) {
+    let x = (w.x + 18) as u32;
+    let mut y = (w.y + TITLE_H as i32 + 18) as u32;
+    if !crate::net::available() {
+        draw_text_ui(x, y, "没有 virtio-net 设备", DIM);
+        y += 26;
+        draw_text_ui(x, y, "启动时加 -device virtio-net-device", DIM);
+        return;
+    }
+    let m = crate::net::mac();
+    let mac = format_mac(m);
+    let mac_s = core::str::from_utf8(&mac[..17]).unwrap_or("?");
+    let (rx, tx, conns) = crate::net::stats();
+    kv(x, y, "MAC", mac_s, TEXT);
+    y += 26;
+    kv(x, y, "IP", "10.0.2.15/24", TEXT);
+    y += 26;
+    kv(x, y, "网关", "10.0.2.2", TEXT);
+    y += 26;
+    let rx_b = num_str(rx as u64);
+    kv(x, y, "收包", s_of(&rx_b), TEXT);
+    y += 26;
+    let tx_b = num_str(tx as u64);
+    kv(x, y, "发包", s_of(&tx_b), TEXT);
+    y += 26;
+    let cn_b = num_str(conns as u64);
+    kv(x, y, "连接", s_of(&cn_b), TEXT);
+    y += 26;
+    kv(x, y, "端口", "TCP :80", ACCENT);
+}
+
+fn s_of(b: &[u8]) -> &str {
+    let n = b.iter().position(|&c| c == b' ').unwrap_or(b.len());
+    core::str::from_utf8(&b[..n]).unwrap_or("?")
+}
+
+fn format_mac(m: [u8; 6]) -> [u8; 17] {
+    let mut b = [b'0'; 17];
+    let mut k = 0;
+    for (i, v) in m.iter().enumerate() {
+        if i > 0 {
+            b[k] = b':';
+            k += 1;
+        }
+        let hi = v >> 4;
+        let lo = v & 0x0f;
+        b[k] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+        b[k + 1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+        k += 2;
+    }
+    b
+}
+
+
+
+/// 数字转定长字符串（尾部补空格），给简单 layout 用
+fn num_str(v: u64) -> [u8; 20] {
+    let mut b = [b' '; 20];
+    let mut d = [0u8; 20];
+    let mut n = 0;
+    let mut t = v;
+    if t == 0 {
+        d[0] = b'0';
+        n = 1;
+    }
+    while t > 0 && n < 20 {
+        d[n] = b'0' + (t % 10) as u8;
+        t /= 10;
+        n += 1;
+    }
+    for i in 0..n {
+        b[i] = d[n - 1 - i];
+    }
+    b
 }
 
 fn draw_num_ui(x: u32, y: u32, v: u64) -> u32 {
-    let mut b = [0u8; 20];
-    let mut n = 0;
-    if v == 0 {
-        b[0] = b'0';
-        n = 1;
-    } else {
-        let mut d = [0u8; 20];
-        let mut k = 0;
-        let mut t = v;
-        while t > 0 && k < 20 {
-            d[k] = b'0' + (t % 10) as u8;
-            t /= 10;
-            k += 1;
-        }
-        while k > 0 {
-            k -= 1;
-            b[n] = d[k];
-            n += 1;
-        }
-    }
-    let s = core::str::from_utf8(&b[..n]).unwrap_or("0");
-    draw_text_ui(x, y, s, TEXT2)
+    let s = num_str(v);
+    let n = s.iter().position(|&c| c == b' ').unwrap_or(20);
+    let t = core::str::from_utf8(&s[..n]).unwrap_or("0");
+    draw_text_ui(x, y, t, TEXT2)
+}
+
+fn term_guard(x: u32, y: u32, w: u32) {
+    let ph = crate::term::ROWS as u32 * crate::term::LH + 16;
+    rounded_rect(x as i32 - 6, y as i32 - 6, w + 8, ph + 8, 12, 0x191b1f);
+    rounded_rect(x as i32 - 4, y as i32 - 4, w, ph, 10, TERM_BG);
+    fill_rect(x - 2, y - 4, w - 6, 1, 0x24272c);
+    crate::term::render(x, y);
 }
 
 pub fn draw_desktop(
@@ -1234,7 +1459,6 @@ pub fn draw_desktop(
     restore_wall(0, 0, W, H);
     draw_sidebar();
 
-    // 底栏动态部分：终端指示条、双色状态灯、时钟
     rounded_rect(118, (DOCK_Y + 40) as i32, 26, 3, 1, ACCENT);
     let lamp_y = (DOCK_Y + 23) as i32;
     circle((W - 232) as i32, lamp_y, 4, if kb { OK } else { 0x454b52 }, 255);
@@ -1260,21 +1484,7 @@ pub fn draw_desktop(
         LAST_TASKS = tasks;
         LAST_KB = kernel_kb;
     }
-    let (win_x, win_y) = (unsafe { WIN_X }, unsafe { WIN_Y });
-    draw_window(win_x, win_y);
-
-    unsafe {
-        FRAME = FRAME.wrapping_add(1);
-    }
-}
-
-fn term_guard(x: u32, y: u32, w: u32) {
-    let ph = crate::term::ROWS as u32 * crate::term::LH + 16;
-    rounded_rect(x as i32 - 6, y as i32 - 6, w + 8, ph + 8, 12, 0x191b1f);
-    rounded_rect(x as i32 - 4, y as i32 - 4, w, ph, 10, TERM_BG);
-    // 顶部一道极淡的高光，模拟光从上方来
-    fill_rect(x - 2, y - 4, w - 6, 1, 0x24272c);
-    crate::term::render(x, y);
+    draw_all();
 }
 
 pub fn desktop_size() -> (u32, u32) {

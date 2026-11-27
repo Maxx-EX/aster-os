@@ -291,6 +291,11 @@ fn cmd_df() {
                 st.free_blocks
             );
             println!("  inode   {}/{} 用", st.used_inodes, st.inodes);
+            let (hit, miss, used, dirty) = crate::cache::stats();
+            println!(
+                "  缓存    {} 命中 / {} 未命中 · {} 槽占用 · {} 脏",
+                hit, miss, used, dirty
+            );
         }
         None => println!("  磁盘未格式化（先 mkfs）"),
     }
