@@ -17,6 +17,7 @@ mod gic;
 mod input;
 mod mmu;
 mod blk;
+mod bootanim;
 mod board;
 mod mailbox;
 mod disk;
@@ -203,6 +204,8 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
 
     if fb::init() {
         println!("[KERNEL] 图形输出已就绪：ramfb {}x{} XRGB8888 @ {:#x}", fb::width(), fb::height(), fb::base_addr());
+        println!("[BOOT] 开机动画 2.4s（星芒生长 → 归位），shell 里 bootanim 可重播");
+        bootanim::play();
     } else {
         println!("[KERNEL] 未检测到 ramfb 设备，本次仅串口输出");
         fb::dump_fwcfg();

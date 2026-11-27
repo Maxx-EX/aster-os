@@ -18,6 +18,11 @@ pub fn tick() {
     if !fb::available() {
         return;
     }
+    // bootframe 冻结期间不要重绘，否则一帧动画立刻被桌面盖掉
+    if crate::bootanim::holding() {
+        crate::cursor::update();
+        return;
+    }
 
     // 光标闪烁是唯一"没有输入也要重画"的理由：500 ms 一个相位，相位一变就整屏重绘
     let now0 = timer::now_ms();

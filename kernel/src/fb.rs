@@ -421,7 +421,7 @@ pub fn frame_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
 
 /// 按 alpha（0..255）混合一个像素
 #[inline]
-fn blend_px(x: u32, y: u32, color: u32, a: u32) {
+pub fn blend_px(x: u32, y: u32, color: u32, a: u32) {
     if a == 0 || !available() {
         return;
     }
@@ -534,20 +534,26 @@ pub fn drop_shadow(x: i32, y: i32, w: u32, h: u32, r: u32) {
 
 /// 实心圆（边缘抗锯齿）
 pub fn circle(cx: i32, cy: i32, r: u32, color: u32, a: u32) {
+    // 内部变量不要和圆心同名：之前这里把 cx/cy 遮住了，写出去的是
+    // "3*dx-3*r+1"，圆会整体错位。现在用 sx/sy 做 2 倍的亚像素距离。
     for dy in 0..(2 * r) {
         for dx in 0..(2 * r) {
-            let px = dx as i32 - r as i32 + 0; // 像素左上角，下面用 +1 补中心
-            let py = dy as i32 - r as i32 + 0;
-            let cx = 2 * px + 1;
-            let cy = 2 * py + 1;
-            let dh = isqrt((cx * cx + cy * cy) as u32) as i32;
+            let px = dx as i32 - r as i32;
+            let py = dy as i32 - r as i32;
+            let sx = 2 * px + 1;
+            let sy = 2 * py + 1;
+            let dh = isqrt((sx * sx + sy * sy) as u32) as i32;
             let cov = 2 * r as i32 + 1 - dh;
             if cov <= 0 {
                 continue;
             }
             let av = ((cov.min(2) as u32) * a) / 2;
             if av > 0 {
-                blend_px((cx + dx as i32 - r as i32).max(0) as u32, (cy + dy as i32 - r as i32).max(0) as u32, color, av);
+                let x = cx + px;
+                let y = cy + py;
+                if x >= 0 && y >= 0 {
+                    blend_px(x as u32, y as u32, color, av);
+                }
             }
         }
     }

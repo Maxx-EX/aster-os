@@ -387,6 +387,8 @@ fn cmd_help() {
     println!("  vfw       测 fd 写路径：open(O_CREAT) → write → close 落盘");
     println!("  file      用 fd 系统调用读 /motd（EL0 + openat/read/close）");
     println!("  apk       读内置示例 APK：zip 目录 / classes.dex 头 / 二进制 XML");
+    println!("  bootanim  重播开机动画（2.4s）");
+    println!("  bootframe <ms>  把动画某一时刻静态画出来（取证用）");
     println!("  ex        Extreme 权限（等同安卓 root，提示符变 #）");
     println!("  ex off    关闭 Extreme 权限");
     println!("  peek A    读 8 字节（仅 Extreme）");
@@ -476,6 +478,7 @@ pub fn run() -> ! {
             continue;
         }
         let line = core::str::from_utf8(&buf[..n]).unwrap_or("").trim();
+        crate::bootanim::set_hold(false);
 
         if line == "ex" || line == "ex on" {
             unsafe { EXTREME = true };
@@ -505,6 +508,12 @@ pub fn run() -> ! {
         }
         if let Some(a) = line.strip_prefix("sim ") {
             cmd_sim(a);
+            continue;
+        }
+        if let Some(a) = line.strip_prefix("bootframe ") {
+            let ms: i32 = a.trim().parse().unwrap_or(1500);
+            crate::bootanim::still(ms);
+            println!("  已画到第 {} ms 并停在屏幕上", ms);
             continue;
         }
         if let Some(a) = line.strip_prefix("apk ") {
@@ -563,6 +572,7 @@ pub fn run() -> ! {
             "fd" => cmd_fd(),
             "vfw" => cmd_vfw(),
             "apk" => cmd_apk(""),
+            "bootanim" => crate::bootanim::play(),
             "file" => match crate::task::run_file() {
                 Ok(code) => println!("[VFS] 任务结束，退出码 {}", code),
                 Err(e) => println!("[TASK] 无法运行: {}", e),
