@@ -1325,3 +1325,75 @@ Log.i("array ok"); Log.n(sum);
 `make test` 的 DEX 断言从 `[DEX] 11` 换成 `[DEX] 30`，名称改为"数组：new-array + aput/aget + 循环求和 30"，总数仍是 18 项全 PASS。旧的 11 是 APK-5 对象 fixture 的产物，两个 fixture 都在仓库里（`demo3.apk` 是当前 `dex run` 用的默认包），断言跟着默认包走。
 
 APK 主线下一站是 `StringBuilder` 与静态字段；数组本身够用了，但 `new-array` 现在固定上限 8 个元素、4 个槽——真要跑有意义的 APK，得改成按需分配，那要等页帧分配器给用户态开口子。
+
+---
+
+## 44. APK-7：静态字段与 StringBuilder
+
+真实 APK 里 `StringBuilder` 出现的频率仅次于 `Log`。它和数组的区别在于：数组是 DEX 指令能直接操作的对象，`StringBuilder` 不是——它属于 `java.lang`，APK 包里**没有**这个类，它是框架（framework.jar / ART）提供的。所以我们不可能在 dex 里找到它的 `code_item` 去解释执行，只能在解释器里"桥接"：指令照常走 `invoke-virtual`，识别到类描述符是 `Ljava/lang/StringBuilder;` 就切到内核实现。
+
+### 44.1 静态字段：`sget` / `sput`
+
+`0x60` / `0x67`，21c 格式（AA 8 bit + field@BBBB 16 bit）。真实 DEX 里静态字段属于类的 `static_fields` 数组，要按类的 `static_fields_off` 定位；这里简化成一张 8 槽的全局表，直接用 `field_idx` 索引：
+
+```rust
+const NSFIELD: usize = 8;
+static mut SFIELDS: [i32; NSFIELD] = [0; NSFIELD];
+```
+
+为什么可以直接按全局 field_idx 索引：fixture 里只有一个类有静态字段（`Main.hits`），索引不会撞。多类多静态字段就要按 `(class_idx, field_idx)` 分组，等真跑别人的 APK 再说。越界（`f >= 8`）报"静态字段槽越界"，不静默。
+
+### 44.2 动态字符串槽
+
+`toString()` 生成的是运行时字符串，**没有 string_idx 可用**——`string_ids` 是编译期固化的。所以另开一张槽表：
+
+```rust
+const DYN_TAG: i32 = 0x200;
+static mut DYN: [[u8; 96]; 4];  static mut DYN_LEN: [usize; 4];
+```
+
+寄存器里的字符串值约定：`< 0x200` 是常量 `string_idx`，`>= 0x200` 是"动态字符串 `0x200+i`"。和数组的 `0x100+i` 区间错开。`str_of()` 把两种来源统一成一个 `&str`，`Log.i` 和 `append(String)` 都走它。
+
+这个约定有真实风险：大 APK 的 `string_ids` 轻松超过 512 条，常量索引会撞进 `0x200` 段。当前 fixture 只有 30 来条，安全；要修就得换成"寄存器里存 `(kind, idx)` 打包"或独立字符串寄存器堆，属于 APK-10 级别的重构。
+
+### 44.3 StringBuilder 内建
+
+```rust
+static mut SB: [u8; 128];  static mut SB_LEN: usize;
+```
+
+`<init>` 清空，`append` 追加，`toString` 把缓冲冻结成一个动态字符串槽并返回 `0x200+i`。三个方法都在内核侧，不进 `code_of`。
+
+`append` 有两个重载（`(String)` 和 `(I)`），解释器用 `shorty` 的第二个字符区分：`"LL"` 是字符串参数、`"LI"` 是整数参数。`shorty` 是 DEX 里给校验器用的简化签名（返回类型 + 各参数的短名），这里正好当类型标签用，省得再去解 `proto_ids` 的 `parameters_off`。整数转十进制是手写的（no_std 没有 `itoa`）：取绝对值、逐位取余进 buf、再反转、负数补 `-`。
+
+`append` 的返回值按 Java 语义返回 `this`（`args[0]`），虽然链式调用在 fixture 里没用到，但语义对了才不会在后面绊人。
+
+### 44.4 fixture（第五版）
+
+```java
+static int hits;
+static void run() {
+    int[] a = new int[5];
+    for (int i = 0; i < 5; i++) { a[i] = i * 3; sum += a[i]; }
+    Log.n(sum);                       // 30
+    hits = hits + 1;
+    StringBuilder sb = new StringBuilder();
+    sb.append("sum=");   sb.append(sum);
+    sb.append(" hits="); sb.append(hits);
+    Log.i(sb.toString());             // sum=30 hits=1
+}
+```
+
+63 个 code unit，dex 1228 字节，`demo3.apk` 998 字节。实拍 `[DEX] 30` / `[DEX] array ok` / `[DEX] sum=30 hits=1`，65 条指令。
+
+### 44.5 这次的坑
+
+`invoke-virtual` 的 opcode 是 `0x6e`，我按"virtual 就是 76"写成了 `0x2076`，跑出来 `不支持的 opcode 0x76 @pc 41`。`0x76` 是 `invoke-direct/range`，不是 virtual。35c 格式里 unit0 是 `argc<<12 | G<<8 | op`，`G` 是第五个参数寄存器（这里不用），所以正确的 `invoke-virtual {v6,v0}, argc=2` 是 `0x206e`。
+
+顺带把 `proto_ids` 的 `return_type_idx` 从字符串索引改成了真正的 `type_ids` 索引——之前那版写的是 `S_V`（字符串 "V" 的索引 18），而 `T_V` 才是 2。内核从不读 `return_type`，所以一直没暴露；这次既然要读 `shorty` 判类型，就顺手把这一栏改对了。
+
+### 44.6 现状与下一步
+
+`append` 只支持 `String` 和 `int` 两种重载。`append(char)`、`append(long)`、`append(Object)` 都没有；`StringBuilder` 只支持一个实例（缓冲是静态单份）；动态字符串槽只有 4 个、单个 96 字节。
+
+这些限制都写在代码注释里。下一步是 `invoke-super` 与异常（`throw` / `try-catch` 的 handler 表），有了异常才能真正跑一个会失败、会 catch 的 APK；再往后是屏幕绘制桥接，把那 1024×768 的 framebuffer 从 `Log` 后面拉出来。

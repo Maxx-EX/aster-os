@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mkdex.py — 手搓一个合法 DEX（第三版）：对象 + 字段 + 虚方法。
+"""mkdex.py — 手搓一个合法 DEX（第五版）：数组 + 静态字段 + StringBuilder。
 
 类与代码：
 
@@ -10,14 +10,19 @@
     }
 
     static void run() {
-        Counter c = new Counter(10);
-        Log.n(c.next());   // 11
-        Log.n(c.next());   // 12
-        Log.i("objects ok");
+        int[] a = new int[5];
+        for (int i = 0; i < 5; i++) { a[i] = i * 3; sum += a[i]; }
+        Log.n(sum);                     // 30
+        hits = hits + 1;                // sget / sput
+        StringBuilder sb = new StringBuilder();
+        sb.append("sum="); sb.append(sum);
+        sb.append(" hits="); sb.append(hits);
+        Log.i(sb.toString());           // sum=30 hits=1
     }
 
-用到的 opcode：new-instance、invoke-direct(<init>)、invoke-virtual、iget、iput、
-move-result、const/4、const-string、add-int/lit8、invoke-static、return/return-void。
+用到的 opcode：new-instance、new-array、array-length、aget、aput、iget、iput、sget、sput、
+invoke-direct(<init>)、invoke-virtual、invoke-static、move-result、const/4、const-string、
+mul-int、add-int、add-int/lit8、if-ge、goto、return/return-void。
 这要求解释器有对象堆、能递归调用方法、能把返回值塞回调用者的 move-result。
 
 DEX 结构仍按规范逐字段拼（header / map_list / 全部 ids / class_defs / data），
@@ -44,25 +49,34 @@ def align(buf, n=4):
         buf.append(0)
 
 STRINGS = [
+    " hits=",
     "<init>",
     "Hello from Aster, this string lives in a real DEX",
     "I",
+    "L",
+    "LI",
+    "LL",
     "Lcom/aster/Counter;",
     "Lcom/aster/Log;",
     "Lcom/aster/Main;",
     "Ljava/lang/String;",
+    "Ljava/lang/StringBuilder;",
     "V",
     "VI",
     "VL",
     "[I",
+    "append",
     "array ok",
     "hello",
+    "hits",
     "i",
     "loop done",
     "n",
     "next",
     "objects ok",
     "run",
+    "sum=",
+    "toString",
     "v",
 ]
 assert STRINGS == sorted(STRINGS), "string_ids 必须升序"
@@ -71,15 +85,23 @@ S_INIT, S_HELLO = IDX["<init>"], IDX["Hello from Aster, this string lives in a r
 S_I_T, S_COUNTER, S_LOG, S_MAIN = IDX["I"], IDX["Lcom/aster/Counter;"], IDX["Lcom/aster/Log;"], IDX["Lcom/aster/Main;"]
 S_STRING, S_V, S_VI, S_VL = IDX["Ljava/lang/String;"], IDX["V"], IDX["VI"], IDX["VL"]
 S_ARR, S_ARRAYOK = IDX["[I"], IDX["array ok"]
+S_SB, S_APPEND, S_STRM, S_SUM, S_HITS_S, S_TOSTR = (
+    IDX["Ljava/lang/StringBuilder;"], IDX["append"], IDX["toString"],
+    IDX["sum="], IDX[" hits="], IDX["toString"])
+S_HITS_F = IDX["hits"]
+S_L, S_LI, S_LL = IDX["L"], IDX["LI"], IDX["LL"]
 S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
 S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
 
-T_STRING, T_MAIN, T_V, T_LOG, T_INT, T_COUNTER, T_ARR = 0, 1, 2, 3, 4, 5, 6
-# proto：0=(String)V 1=()V 2=(I)V 3=()I
+T_STRING, T_MAIN, T_V, T_LOG, T_INT, T_COUNTER, T_ARR, T_SB = 0, 1, 2, 3, 4, 5, 6, 7
+# proto：0=(String)V 1=()V 2=(I)V 3=()I 4=(String)SB 5=(I)SB 6=()SB
 P_STR, P_VOID, P_INT_V, P_INT_I = 0, 1, 2, 3
-F_V = 0
+P_APP_STR, P_APP_INT, P_SB_VOID = 4, 5, 6
+F_V, F_HITS = 0, 1
 # method：0=Log.i 1=Log.n 2=Counter.<init> 3=Counter.next 4=Main.run 5=Main.hello
+#        6=SB.<init> 7=SB.append(String) 8=SB.append(I) 9=SB.toString
 M_I, M_N, M_INIT, M_NEXT, M_RUN, M_HELLO = 0, 1, 2, 3, 4, 5
+M_SB_INIT, M_SB_APP_S, M_SB_APP_I, M_SB_STR = 6, 7, 8, 9
 
 
 def build():
@@ -95,17 +117,21 @@ def build():
         buf += b"\0\0\0\0"
 
     type_ids_off = len(buf)
-    for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER, S_ARR):
+    for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER, S_ARR, S_SB):
         buf += struct.pack("<I", t)
 
     proto_ids_off = len(buf)
-    buf += struct.pack("<III", S_VL, S_V, 0)
-    buf += struct.pack("<III", S_V, S_V, 0)
-    buf += struct.pack("<III", S_VI, S_V, 0)
-    buf += struct.pack("<III", S_I_T, S_I_T, 0)
+    buf += struct.pack("<III", S_VL, T_V, 0)
+    buf += struct.pack("<III", S_V, T_V, 0)
+    buf += struct.pack("<III", S_VI, T_V, 0)
+    buf += struct.pack("<III", S_I_T, T_INT, 0)
+    buf += struct.pack("<III", S_LL, T_SB, 0)     # 4: (String)SB，params_size 稍后填
+    buf += struct.pack("<III", S_LI, T_SB, 0)     # 5: (I)SB
+    buf += struct.pack("<III", S_L, T_SB, 0)      # 6: ()SB
 
     field_ids_off = len(buf)
     buf += struct.pack("<HHI", T_COUNTER, T_INT, S_V_F)
+    buf += struct.pack("<HHI", T_MAIN, T_INT, S_HITS_F)
 
     method_ids_off = len(buf)
     buf += struct.pack("<HHI", T_LOG, P_STR, S_I_M)
@@ -114,6 +140,10 @@ def build():
     buf += struct.pack("<HHI", T_COUNTER, P_INT_I, S_NEXT)
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_RUN_M)
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_HELLO_M)
+    buf += struct.pack("<HHI", T_SB, P_SB_VOID, S_INIT)        # 6 <init>()V
+    buf += struct.pack("<HHI", T_SB, P_APP_STR, S_APPEND)      # 7 append(String)SB
+    buf += struct.pack("<HHI", T_SB, P_APP_INT, S_APPEND)      # 8 append(I)SB
+    buf += struct.pack("<HHI", T_SB, P_SB_VOID, S_TOSTR)       # 9 toString()SB
 
     class_defs_off = len(buf)
     main_def_pos = len(buf)
@@ -136,6 +166,14 @@ def build():
     buf += b"\0\0"
     struct.pack_into("<I", buf, proto_ids_off + 8, tl_str)
     struct.pack_into("<I", buf, proto_ids_off + 24 + 8, tl_int)
+    tl_sb_str = len(buf)
+    buf += struct.pack("<IH", 1, T_STRING)
+    buf += b"\0\0"
+    tl_sb_int = len(buf)
+    buf += struct.pack("<IH", 1, T_INT)
+    buf += b"\0\0"
+    struct.pack_into("<I", buf, proto_ids_off + 48 + 8, tl_sb_str)
+    struct.pack_into("<I", buf, proto_ids_off + 60 + 8, tl_sb_int)
 
     align(buf)
 
@@ -176,7 +214,21 @@ def build():
     # 20 invoke-static {v3}, Log.n
     # 23 const-string v0, "array ok"
     # 25 invoke-static {v0}, Log.i
-    # 28 return-void
+    # 28 sget v7, hits                  （APK-7 从这里接着排）
+    # 30 add-int/lit8 v7, v7, #1
+    # 32 sput v7, hits
+    # 34 new-instance v6, StringBuilder
+    # 36 invoke-direct {v6}, <init>()V
+    # 39 const-string v0, "sum="
+    # 41 invoke-virtual {v6, v0}, append(String)
+    # 44 invoke-virtual {v6, v3}, append(I)
+    # 47 const-string v0, " hits="
+    # 49 invoke-virtual {v6, v0}, append(String)
+    # 52 invoke-virtual {v6, v7}, append(I)
+    # 55 invoke-virtual {v6}, toString()
+    # 58 move-result v0
+    # 59 invoke-static {v0}, Log.i
+    # 62 return-void
     code_run = len(buf)
     ins = [
         0x5012,                  # const/4 v0, #5
@@ -195,10 +247,28 @@ def build():
         0x1071, M_N, 0x0003,     # Log.n(v3)
         0x001a, S_ARRAYOK,       # const-string v0, "array ok"
         0x1071, M_I, 0x0000,     # Log.i(v0)
+    ]
+
+    # —— APK-7：静态字段 + StringBuilder ——
+    ins += [
+        0x0760, F_HITS,          # sget v7, hits（21c：AA 8bit + field 16bit）
+        0x07d8, 0x0701,          # add-int/lit8 v7, v7, #1
+        0x0767, F_HITS,          # sput v7, hits
+        0x0622, T_SB,            # new-instance v6, StringBuilder
+        0x1070, M_SB_INIT, 0x0006,   # invoke-direct {v6}, <init>()V
+        0x001a, S_SUM,           # const-string v0, "sum="
+        0x206e, M_SB_APP_S, 0x0006,  # invoke-virtual {v6,v0}, append(String)
+        0x206e, M_SB_APP_I, 0x0036,  # invoke-virtual {v6,v3}, append(I)
+        0x001a, S_HITS_S,        # const-string v0, " hits="
+        0x206e, M_SB_APP_S, 0x0006,  # append(String)
+        0x206e, M_SB_APP_I, 0x0076,  # invoke-virtual {v6,v7}, append(I)
+        0x106e, M_SB_STR, 0x0006,    # invoke-virtual {v6}, toString()
+        0x000a,                  # move-result v0
+        0x1071, M_I, 0x0000,     # Log.i(v0)
         0x000e,                  # return-void
     ]
-    assert len(ins) == 29, len(ins)
-    buf += struct.pack("<HHHHII", 6, 0, 2, 0, 0, len(ins))
+    assert len(ins) == 63, len(ins)
+    buf += struct.pack("<HHHHII", 8, 0, 2, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
     # Main.hello()V  regs=1 ins=0 outs=1
@@ -215,9 +285,10 @@ def build():
     # virtual methods 的 method_idx_diff 也从 0 开始累加，不是接着 direct 的
     buf += uleb(M_NEXT - 0) + uleb(0x0001) + uleb(code_next)
 
-    # Main 的 class_data：2 个 direct
+    # Main 的 class_data：1 个静态字段 + 2 个 direct
     cd_main = len(buf)
-    buf += uleb(0) + uleb(0) + uleb(2) + uleb(0)
+    buf += uleb(1) + uleb(0) + uleb(2) + uleb(0)
+    buf += uleb(F_HITS - 0) + uleb(0x0008)       # hits：static int
     buf += uleb(M_RUN - 0) + uleb(0x0009) + uleb(code_run)
     buf += uleb(M_HELLO - M_RUN) + uleb(0x0009) + uleb(code_hello)
 
@@ -234,10 +305,10 @@ def build():
     items = [
         (0x0000, 1, 0),
         (0x0001, len(STRINGS), string_ids_off),
-        (0x0002, 7, type_ids_off),
-        (0x0003, 4, proto_ids_off),
-        (0x0004, 1, field_ids_off),
-        (0x0005, 6, method_ids_off),
+        (0x0002, 8, type_ids_off),
+        (0x0003, 7, proto_ids_off),
+        (0x0004, 2, field_ids_off),
+        (0x0005, 10, method_ids_off),
         (0x0006, 2, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
@@ -254,10 +325,10 @@ def build():
     return buf, dict(
         file_size=len(buf), map_off=map_off,
         string_ids=(len(STRINGS), string_ids_off),
-        type_ids=(7, type_ids_off),
-        proto_ids=(4, proto_ids_off),
-        field_ids=(1, field_ids_off),
-        method_ids=(6, method_ids_off),
+        type_ids=(8, type_ids_off),
+        proto_ids=(7, proto_ids_off),
+        field_ids=(2, field_ids_off),
+        method_ids=(10, method_ids_off),
         class_defs=(2, class_defs_off),
         data=(data_size, data_off),
         code_init=code_init, code_next=code_next,

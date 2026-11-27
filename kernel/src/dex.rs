@@ -279,6 +279,126 @@ fn heap_reset() {
     }
 }
 
+// —— 静态字段 + StringBuilder（APK-7）——
+// 静态字段按 field_idx 直接索引：fixture 只有一个类有静态字段，够 demo 用。
+const NSFIELD: usize = 8;
+static mut SFIELDS: [i32; NSFIELD] = [0; NSFIELD];
+
+// 运行时生成的字符串没有 string_idx 可用，单独开一张槽表。
+// 寄存器值 >= 0x200 表示"动态字符串 0x200+i"，与数组的 0x100+i 区间分开。
+const DYN_TAG: i32 = 0x200;
+const NDYN: usize = 4;
+static mut DYN: [[u8; 96]; NDYN] = [[0; 96]; NDYN];
+static mut DYN_LEN: [usize; NDYN] = [0; NDYN];
+static mut DYN_USED: usize = 0;
+
+// StringBuilder 只支持一个实例（真实实现要按对象分配缓冲）。
+static mut SB: [u8; 128] = [0; 128];
+static mut SB_LEN: usize = 0;
+
+fn sb_reset() {
+    unsafe {
+        SB_LEN = 0;
+    }
+}
+
+fn sb_push_str(s: &str) -> Result<(), &'static str> {
+    let n = s.len();
+    unsafe {
+        if SB_LEN + n > SB.len() {
+            return Err("StringBuilder 超过 128 字节");
+        }
+        let mut i = 0;
+        while i < n {
+            SB[SB_LEN + i] = s.as_bytes()[i];
+            i += 1;
+        }
+        SB_LEN += n;
+    }
+    Ok(())
+}
+
+fn sb_push_int(v: i32) -> Result<(), &'static str> {
+    let neg = v < 0;
+    let mut x: i64 = if neg { -(v as i64) } else { v as i64 };
+    let mut out = [0u8; 12];
+    let mut n = 0;
+    if x == 0 {
+        out[0] = b'0';
+        n = 1;
+    }
+    while x > 0 {
+        out[n] = b'0' + (x % 10) as u8;
+        x /= 10;
+        n += 1;
+    }
+    // 反转
+    let mut rev = [0u8; 12];
+    let mut k = 0;
+    if neg {
+        rev[0] = b'-';
+        k = 1;
+    }
+    let mut i = 0;
+    while i < n {
+        rev[k + i] = out[n - 1 - i];
+        i += 1;
+    }
+    let s = core::str::from_utf8(&rev[..k + n]).map_err(|_| "整数格式化失败")?;
+    sb_push_str(s)
+}
+
+fn sb_freeze() -> Result<i32, &'static str> {
+    unsafe {
+        if DYN_USED >= NDYN {
+            return Err("动态字符串槽用尽（4 个）");
+        }
+        let i = DYN_USED;
+        DYN_USED += 1;
+        if SB_LEN > 96 {
+            return Err("字符串超过 96 字节");
+        }
+        let mut k = 0;
+        while k < SB_LEN {
+            DYN[i][k] = SB[k];
+            k += 1;
+        }
+        DYN_LEN[i] = SB_LEN;
+        Ok(DYN_TAG + i as i32)
+    }
+}
+
+fn dyn_str(v: i32) -> Result<&'static str, &'static str> {
+    let i = (v - DYN_TAG) as usize;
+    if (v - DYN_TAG) < 0 || i >= unsafe { DYN_USED } {
+        return Err("动态字符串索引无效");
+    }
+    let n = unsafe { DYN_LEN[i] };
+    let b: &'static [u8] = unsafe { &DYN[i][..n] };
+    core::str::from_utf8(b).map_err(|_| "动态字符串不是合法 UTF-8")
+}
+
+fn str_of<'a>(d: &'a [u8], h: &Header, v: i32) -> Result<&'a str, &'static str> {
+    if v >= DYN_TAG {
+        dyn_str(v)
+    } else {
+        string(d, h, v as u32)
+    }
+}
+
+fn call_reset() {
+    unsafe {
+        SFIELDS = [0; NSFIELD];
+        DYN_USED = 0;
+        SB_LEN = 0;
+        let mut i = 0;
+        while i < NDYN {
+            DYN_LEN[i] = 0;
+            i += 1;
+        }
+    }
+}
+
 fn heap_new(class_idx: u32) -> Result<usize, &'static str> {
     let mut i = 0;
     while i < NOBJ {
@@ -500,6 +620,23 @@ fn exec(
                 };
                 pc += if take { off } else { 2 };
             }
+            0x60 | 0x67 => {
+                // sget / sput vAA, field@BBBB  (21c)
+                let a = ((u >> 8) & 0xff) as usize;
+                if (pc as usize) + 1 >= n {
+                    return Err("sget/sput 被截断");
+                }
+                let f = unit(pc as usize + 1) as usize;
+                if f >= NSFIELD {
+                    return Err("静态字段槽越界");
+                }
+                if op == 0x60 {
+                    regs[a] = unsafe { SFIELDS[f] };
+                } else {
+                    unsafe { SFIELDS[f] = regs[a] };
+                }
+                pc += 2;
+            }
             0x52 => {
                 // iget vA, vB, field@CCCC  (22c)
                 let a = ((u >> 8) & 0xf) as usize;
@@ -604,7 +741,7 @@ fn exec(
                 let m = method(d, h, midx)?;
                 if m.class == "Lcom/aster/Log;" {
                     if m.name == "i" {
-                        let s = string(d, h, args[0] as u32)?;
+                        let s = str_of(d, h, args[0])?;
                         crate::println!("  [DEX] {}", s);
                     } else if m.name == "n" {
                         crate::println!("  [DEX] {}", args[0]);
@@ -612,6 +749,26 @@ fn exec(
                         return Err("Log 上没有这个方法");
                     }
                     last = 0;
+                } else if m.class == "Ljava/lang/StringBuilder;" {
+                    // 内建类：不查 code_of，直接在内核里拼
+                    if m.name == "<init>" {
+                        sb_reset();
+                        last = 0;
+                    } else if m.name == "append" {
+                        // append(I) 与 append(String) 靠 shorty 第二个字符区分
+                        let t = m.shorty.as_bytes().get(1).copied().unwrap_or(b'?');
+                        if t == b'I' {
+                            sb_push_int(args[1])?;
+                        } else {
+                            let sv = str_of(d, h, args[1])?;
+                            sb_push_str(sv)?;
+                        }
+                        last = args[0];
+                    } else if m.name == "toString" {
+                        last = sb_freeze()?;
+                    } else {
+                        return Err("StringBuilder 上没有这个方法");
+                    }
                 } else {
                     let c2 = code_of(d, h, m.class, m.name)?;
                     last = exec(d, h, c2, &args[..argc], depth + 1, steps)?;
@@ -643,6 +800,7 @@ fn exec(
 pub fn run(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Result<u32, &'static str> {
     let coff = code_of(d, h, class_desc, method_name)?;
     heap_reset();
+    call_reset();
     let mut steps = 0u32;
     exec(d, h, coff, &[], 0, &mut steps)?;
     Ok(steps)

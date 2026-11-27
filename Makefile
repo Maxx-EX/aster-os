@@ -227,6 +227,7 @@ test: image
 	@grep -q "TASK 2" $(B)/test.log && echo "[TEST] PASS 双任务轮转" || (echo "[TEST] FAIL 无多任务输出" && exit 1)
 	@grep -q "Hello from Aster, this string lives in a real DEX" $(B)/test.log && echo "[TEST] PASS DEX 解释器：const-string + invoke-static" || (echo "[TEST] FAIL DEX hello" && exit 1)
 	@grep -q "\[DEX\] 30" $(B)/test.log && echo "[TEST] PASS DEX 数组：new-array + aput/aget + 循环求和 30" || (echo "[TEST] FAIL DEX array" && exit 1)
+	@grep -q "\[DEX\] sum=30 hits=1" $(B)/test.log && echo "[TEST] PASS DEX StringBuilder：sget/sput + append(String/I) + toString" || (echo "[TEST] FAIL DEX sb" && exit 1)
 	@grep -q "deflate 解压正确" $(B)/test.log && echo "[TEST] PASS inflate（deflate 条目还原）" || (echo "[TEST] FAIL deflate" && exit 1)
 	@grep -q "XCE ok: native program, EL0, Aster" $(B)/test.log && echo "[TEST] PASS XCE：原生程序装载 + EL0 执行 + SVC exit" || (echo "[TEST] FAIL XCE" && exit 1)
 	@grep -q "Device Lock 锁定" $(B)/test.log && echo "[TEST] PASS Device Lock 默认锁定" || (echo "[TEST] FAIL DL" && exit 1)

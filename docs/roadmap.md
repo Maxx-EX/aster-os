@@ -232,6 +232,7 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 - APK-4 ✅ 解释器扩 opcode（算术 / 分支 / 比较，循环求和在 APK 里算出来）
 - APK-5 ✅ 字段与对象（对象堆、iget/iput、new-instance、invoke-direct/virtual、move-result、递归调用栈）（已做）
 - APK-6 ✅ 数组（`new-array` / `array-length` / `aget` / `aput`，数组堆 4 × 8 槽，越界报错；fixture 循环求和 30）
+- APK-7 ✅ 静态字段与 StringBuilder（`sget`/`sput`、内核侧桥接 `append(String/I)`/`toString`、动态字符串槽；fixture 输出 `sum=30 hits=1`）
 
 APK 是 zip，目录在文件尾的 EOCD。`kernel/src/zip.rs` 会倒扫 EOCD、遍历中央目录、按本地头重算数据偏移，把 stored 条目原样取出；deflate 条目明确报"需要 inflate"。内置 `assets/demo.apk` 做自检，`apk / apk dex / apk axml / apk cat <条目>` 四个命令能看到 `classes.dex` 的 `dex\n035` 魔数和 `AndroidManifest.xml` 的 AXML 头 `03 00 08 00`。**这是 DEX 解释器的前置：先能把 dex 取出来，才谈得上解析它。**
 
