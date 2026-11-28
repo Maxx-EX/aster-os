@@ -109,6 +109,50 @@ fn put(f: &Fb, x: u32, y: u32, color: u32) {
     }
 }
 
+/// PERF-5：本轮真正需要贴回屏幕的并集（屏幕坐标，空矩形用 x0>=x1 表示）。
+/// 层里的像素只在"某个窗口重画过"的矩形内可能变，其余区域屏幕上的旧像素本来就对，
+/// 于是合成只搬这个并集，静止帧可以一块都不搬。
+static mut REPAINT: (i32, i32, i32, i32) = (0, 0, 0, 0);
+
+fn repaint_reset() {
+    unsafe {
+        REPAINT = (0, 0, 0, 0);
+    }
+}
+
+fn repaint_add(x: i32, y: i32, w: i32, h: i32) {
+    unsafe {
+        let a = &mut REPAINT;
+        if a.0 >= a.2 {
+            *a = (x, y, x + w, y + h);
+            return;
+        }
+        if x < a.0 {
+            a.0 = x;
+        }
+        if y < a.1 {
+            a.1 = y;
+        }
+        if x + w > a.2 {
+            a.2 = x + w;
+        }
+        if y + h > a.3 {
+            a.3 = y + h;
+        }
+    }
+}
+
+fn repaint_box() -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let a = REPAINT;
+        if a.0 >= a.2 || a.1 >= a.3 {
+            None
+        } else {
+            Some(a)
+        }
+    }
+}
+
 /// 统一读像素：层优先
 #[inline]
 fn get(f: &Fb, x: u32, y: u32) -> u32 {
@@ -173,6 +217,10 @@ fn layer_geo_changed(i: usize, w: Win) -> bool {
     unsafe { LP_GEO[i] != (w.x, w.y, w.w, w.h) }
 }
 
+fn layer_old_geo(i: usize) -> (i32, i32, u32, u32) {
+    unsafe { LP_GEO[i] }
+}
+
 fn layer_mark(i: usize, w: Win) {
     unsafe {
         LP_OK[i] = true;
@@ -196,6 +244,17 @@ fn blit_layer(i: usize) {
         if x1 <= x0 || y1 <= y0 {
             return;
         }
+        let clip = match repaint_box() {
+            Some(c) => c,
+            None => return,
+        };
+        let x0 = x0.max(clip.0);
+        let y0 = y0.max(clip.1);
+        let x1 = x1.min(clip.2);
+        let y1 = y1.min(clip.3);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
         let row = ((x1 - x0) as usize) * 4;
         for y in y0..y1 {
             let sy = (y - w.y) as u32;
@@ -216,6 +275,7 @@ fn compose_layers() {
                 blit_layer(i);
             }
         }
+        repaint_reset();
     }
 }
 
@@ -1846,15 +1906,40 @@ pub fn draw_all_ex(shadow: bool) {
             }
         } else {
             // 多窗口：每个窗口只在自己层里画一次，静止帧只做合成
-            for k in 0..NWIN {
-                let i = ZORD[k];
-                if !WINS[i].open {
-                    layer_invalidate(i);
-                    continue;
+            let mut full_any = false;
+            for i in 0..NWIN {
+                if WIN_FULL[i] {
+                    full_any = true;
                 }
-                let wi = win(i);
-                if shadow || take_full(i) || !layer_ok(i) || layer_geo_changed(i, wi) {
-                    draw_one_layer(i, shadow);
+            }
+            let geo_bad = (0..NWIN).any(|i| {
+                WINS[i].open && (!layer_ok(i) || layer_geo_changed(i, win(i)))
+            });
+            // PERF-5：只有终端的几行字变了（打字、回显、命令输出）时，
+            // 不必把四块层全贴一遍，只补那几行进层，再贴那几行 + 状态行。
+            let can_patch = !shadow
+                && !full_any
+                && !geo_bad
+                && WINS[0].open
+                && crate::term::pending_rows().is_some();
+            if can_patch {
+                term_patch_layer();
+            } else {
+                for k in 0..NWIN {
+                    let i = ZORD[k];
+                    if !WINS[i].open {
+                        layer_invalidate(i);
+                        continue;
+                    }
+                    let wi = win(i);
+                    if layer_geo_changed(i, wi) {
+                        // PERF-5：窗口挪走了，旧位置压过的别的窗口要重贴，不然留个洞
+                        let og = layer_old_geo(i);
+                        repaint_add(og.0, og.1, og.2 as i32, og.3 as i32);
+                    }
+                    if shadow || take_full(i) || !layer_ok(i) || layer_geo_changed(i, wi) {
+                        draw_one_layer(i, shadow);
+                    }
                 }
             }
             compose_layers();
@@ -1893,6 +1978,7 @@ fn draw_one_layer(i: usize, shadow: bool) {
     draw_body(i, w);
     clear_layer();
     layer_mark(i, w);
+    repaint_add(w.x, w.y, w.w as i32, w.h as i32);
 }
 
 fn draw_one_ex(i: usize, shadow: bool) {
@@ -2125,6 +2211,34 @@ fn draw_num_ui(x: u32, y: u32, v: u64) -> u32 {
 }
 
 /// PERF-3：终端窗口增量刷新。只擦/只画变化的那几行，标题栏和圆角面板不重画。
+/// PERF-5：多窗时把终端脏行补进它自己的层（不整窗重画，也不碰别的窗口）
+fn term_patch_layer() {
+    let w = win(0);
+    let lp = layer_prepare(0, w.w, w.h);
+    if lp == 0 {
+        term_patch();
+        return;
+    }
+    set_layer(lp, w.w, w.h, w.x, w.y);
+    let x = (w.x + PAD_X as i32) as u32;
+    let y = (w.y + TITLE_H as i32 + 12) as u32;
+    match crate::term::take_rows() {
+        Some((r0, r1)) => {
+            crate::term::render_range(x, y, r0, r1, true);
+            let top = y as i32 + (r0 as i32) * crate::term::LH as i32;
+            let h = ((r1 - r0 + 1) as i32) * crate::term::LH as i32;
+            repaint_add((w.x + PAD_X as i32) - 6, top - 4, w.w as i32 - 2 * PAD_X as i32 + 12, h + 8);
+        }
+        None => {}
+    }
+    // 状态行里的页帧数每帧都在动，一行而已
+    draw_term_status(w);
+    repaint_add(w.x + 10, w.y + w.h as i32 - 34, w.w as i32 - 24, 22);
+    clear_layer();
+    layer_mark(0, w);
+    crate::cursor::invalidate();
+}
+
 fn term_patch() {
     let w = win(0);
     if w.w == 0 || w.h == 0 {

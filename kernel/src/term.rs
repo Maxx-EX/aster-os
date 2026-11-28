@@ -70,6 +70,20 @@ pub fn take_rows() -> Option<(usize, usize)> {
     }
 }
 
+/// 看一眼脏行区间但不清空（PERF-5：多窗时决定能不能只补这几行）
+pub fn pending_rows() -> Option<(usize, usize)> {
+    unsafe {
+        if ALL {
+            return Some((0, ROWS - 1));
+        }
+        if D0 <= D1 {
+            Some((D0, D1))
+        } else {
+            None
+        }
+    }
+}
+
 /// 请求一次整屏重绘（滚动、窗口位移、字号变化）
 pub fn mark_full() {
     unsafe {

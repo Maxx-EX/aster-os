@@ -418,7 +418,8 @@ pub fn set_meta(
         return Err("不是普通文件");
     }
     if let Some(m) = mode {
-        f.mode = m & 0o777;
+        // 低 12 位都收：权限 9 位 + setuid/setgid/sticky（SEC-3）
+        f.mode = m & 0o7777;
     }
     if let Some(u) = uid {
         f.uid = u;

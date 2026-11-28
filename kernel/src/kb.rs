@@ -61,10 +61,15 @@ pub fn open() -> bool {
 
 pub fn set_open(v: bool) {
     crate::fb::ask_wall();
+    // PERF-5 之后静止帧不再整屏贴层，键盘是直接画在屏幕上的，
+    // 开合必须显式要求整窗重画，否则关掉键盘会留下它的残影
+    crate::fb::win_touch_all();
     unsafe { OPEN = v };
 }
 
 pub fn toggle() {
+    crate::fb::ask_wall();
+    crate::fb::win_touch_all();
     unsafe { OPEN = !OPEN };
 }
 

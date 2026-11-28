@@ -1002,7 +1002,7 @@ pub fn run() -> ! {
             }
             "su" => println!("  用法: su <root|aster|guest|名字>（切 root 需先 ex）"),
             "useradd" => println!("  用法: useradd <名字>（需要 root 或 EXTREME）"),
-            "chmod" => println!("  用法: chmod <八进制> <文件>   例: chmod 640 note.txt"),
+            "chmod" => println!("  用法: chmod <八进制> <文件>   例: chmod 640 note.txt / chmod 4755 tool"),
             "chown" => println!("  用法: chown <用户|uid> <文件>"),
             "fmt" => cmd_fmt(),
             "mkfs" => cmd_mkfs(),
@@ -1045,9 +1045,9 @@ pub fn run() -> ! {
                     None => ("", ""),
                 };
                 let mode = match u16::from_str_radix(m, 8) {
-                    Ok(x) if x <= 0o777 => x,
+                    Ok(x) if x <= 0o7777 => x,
                     _ => {
-                        println!("  用法: chmod <八进制> <文件>（0..777）");
+                        println!("  用法: chmod <八进制> <文件>（0..7777，前一位是 setuid/setgid/sticky）");
                         continue;
                     }
                 };

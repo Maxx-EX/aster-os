@@ -172,7 +172,24 @@ pub fn mode_str(mode: u16, typ: u16, out: &mut [u8; 11]) {
         out[i + 1] = if b & 2 != 0 { b'w' } else { b'-' };
         out[i + 2] = if b & 1 != 0 { b'x' } else { b'-' };
     }
+    // SEC-3：setuid/setgid/sticky 在 ls -l 里占权限位的 x 位置（没有 x 就是大写 S）
+    if mode & 0o4000 != 0 {
+        out[3] = if out[3] == b'x' { b's' } else { b'S' };
+    }
+    if mode & 0o2000 != 0 {
+        out[6] = if out[6] == b'x' { b's' } else { b'S' };
+    }
+    if mode & 0o1000 != 0 {
+        out[9] = if out[9] == b'x' { b't' } else { b'T' };
+    }
     out[10] = 0;
+}
+
+/// 权限位里的三位特殊标志是否被做成"真的按 owner 身份跑"？
+/// 目前 Aster 没有 exec 语义（用户程序是 APK 解释执行），所以 s/t 只到显示与 chmod 解析，
+/// 一旦有了 exec，`can` 里按 `mode & 0o4000` 抬 uid 就是一行的事。
+pub fn has_special(mode: u16) -> bool {
+    mode & 0o7000 != 0
 }
 
 /// 用户表序列化成 `name:uid:gid` 一行一条（写盘用）
