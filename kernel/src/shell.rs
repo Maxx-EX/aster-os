@@ -851,12 +851,12 @@ pub fn run() -> ! {
             "help" | "?" => cmd_help(),
             "disk" => cmd_disk(),
             "sim" => cmd_sim(""),
-            "win on 1" | "win on 2" | "win on 0" => {
+            "win on 0" | "win on 1" | "win on 2" | "win on 3" => {
                 let i = (line.as_bytes()[7] - b'0') as usize;
                 crate::fb::show_win(i);
                 println!("  [WIN] {} 打开并置顶", i);
             }
-            "win off 0" | "win off 1" | "win off 2" => {
+            "win off 0" | "win off 1" | "win off 2" | "win off 3" => {
                 let i = (line.as_bytes()[8] - b'0') as usize;
                 crate::fb::close_win(i);
                 println!("  [WIN] {} 关闭", i);
