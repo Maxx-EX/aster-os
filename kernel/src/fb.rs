@@ -1515,10 +1515,10 @@ pub struct Win {
 
 static mut WINS: [Win; NWIN] = [
     Win { x: 138, y: 86, w: 748, h: 546, open: true },
-    Win { x: 636, y: 108, w: 350, h: 304, open: true },
-    Win { x: 604, y: 428, w: 372, h: 224, open: true },
+    Win { x: 636, y: 108, w: 380, h: 330, open: false },
+    Win { x: 604, y: 424, w: 372, h: 266, open: false },
     // 浏览器：内置，但先收在 dock，点一下"网页"格子就出来
-    Win { x: 286, y: 74, w: 676, h: 468, open: true },
+    Win { x: 286, y: 74, w: 676, h: 468, open: false },
 ];
 
 // 终端放最上层：手机端最常点的就是它，原来 [0,1,2] 会让系统/网络两块压住终端右上角，
@@ -1579,7 +1579,7 @@ static mut MAXED: [bool; NWIN] = [false; NWIN];
 /// 最小化：窗口从桌面消失，但还"活着"——dock 上占一个格子，点一下回来。
 /// 和关闭的区别就在这里：关闭 = 状态清空，要重新打开得点侧栏图标。
 /// 开局就把浏览器收进 dock（其余三窗展开），dock 上点"网页"格子即可打开
-static mut MINED: [bool; NWIN] = [false, false, false, true];
+static mut MINED: [bool; NWIN] = [false, true, true, true];
 
 /// 0 = 已关闭 / 1 = 在桌面 / 2 = 最小化进 dock
 pub fn win_state(i: usize) -> u8 {
@@ -1604,6 +1604,10 @@ pub fn dock_hit(x: i32, y: i32) -> Option<usize> {
         return None;
     }
     for i in 0..4 {
+        // 关掉的窗口不在 dock 上占格子，那里也不该有隐形热区
+        if win_state(i) == 0 {
+            continue;
+        }
         let x0 = DOCK_CHIP_X + i as u32 * (DOCK_CHIP_W + DOCK_CHIP_GAP);
         if x >= x0 as i32 && x <= (x0 + DOCK_CHIP_W) as i32 {
             return Some(i);
@@ -1803,6 +1807,10 @@ pub fn show_win(i: usize) {
     unsafe {
         WINS[i].open = true;
         MINED[i] = false;
+    }
+    // 浏览器第一次露脸就先装一页内置首页，别让地址栏和内容区空着
+    if i == 3 && crate::web::url_str().is_empty() {
+        crate::web::open_home();
     }
     raise(i);
 }
@@ -2101,39 +2109,43 @@ fn kv(x: u32, y: u32, k: &str, v: &str, c: u32) {
 
 fn draw_sys_body(w: Win) {
     let x = (w.x + 18) as u32;
-    let mut y = (w.y + TITLE_H as i32 + 18) as u32;
+    let mut y = (w.y + TITLE_H as i32 + 16) as u32;
     let (tasks, kernel_kb) = unsafe { (LAST_TASKS, LAST_KB) };
     let (used_pages, _t, _) = crate::frame::stats();
     kv(x, y, "版本", "Aster 0.9  ARM64", TEXT);
-    y += 26;
+    y += 24;
     let kb_b = num_str(kernel_kb);
     kv(x, y, "内核", s_of(&kb_b), TEXT);
     draw_text_ui(x + 68 + text_len_ui(s_of(&kb_b)) + 6, y, "KB", DIM);
-    y += 26;
+    y += 24;
     let t_b = num_str(tasks as u64);
     kv(x, y, "任务", s_of(&t_b), TEXT);
-    y += 26;
+    y += 24;
     let p_b = num_str(used_pages as u64);
     kv(x, y, "页帧", s_of(&p_b), TEXT);
     draw_text_ui(x + 68 + text_len_ui(s_of(&p_b)) + 6, y, "页", DIM);
-    y += 26;
+    y += 24;
     kv(x, y, "磁盘", if crate::blk::available() { "已连接" } else { "未连接" }, if crate::blk::available() { OK } else { DIM });
-    y += 26;
-    kv(x, y, "文件", "AsterFS v0", TEXT);
-    y += 26;
+    y += 24;
+    kv(x, y, "文件", "AsterFS", TEXT);
+    y += 24;
     kv(x, y, "信任", "EX3 已校验", OK);
     let by = (w.y + w.h as i32 - 34) as u32;
     fill_rect(x, by - 12, w.w - 36, 1, 0x33373e);
-    draw_text_ui(x, by, "AsterFS v0 · virtio-blk", DIM);
+    draw_text_ui(x, by, "AsterFS · virtio-blk", DIM);
 }
 
 fn draw_net_body(w: Win) {
     let x = (w.x + 18) as u32;
-    let mut y = (w.y + TITLE_H as i32 + 18) as u32;
+    let mut y = (w.y + TITLE_H as i32 + 16) as u32;
     if !crate::net::available() {
-        draw_text_ui(x, y, "没有 virtio-net 设备", DIM);
-        y += 26;
+        kv(x, y, "设备", "未找到 virtio-net", WARN);
+        y += 24;
         draw_text_ui(x, y, "启动时加 -device virtio-net-device", DIM);
+        y += 24;
+        draw_text_ui(x, y, "加上就有 10.0.2.15 / 网关 10.0.2.2", DIM);
+        y += 24;
+        draw_text_ui(x, y, "DHCP · DNS · HTTP 客户端已就绪", TEXT2);
         return;
     }
     let m = crate::net::mac();
@@ -2141,20 +2153,20 @@ fn draw_net_body(w: Win) {
     let mac_s = core::str::from_utf8(&mac[..17]).unwrap_or("?");
     let (rx, tx, conns) = crate::net::stats();
     kv(x, y, "MAC", mac_s, TEXT);
-    y += 26;
+    y += 24;
     kv(x, y, "IP", "10.0.2.15/24", TEXT);
-    y += 26;
+    y += 24;
     kv(x, y, "网关", "10.0.2.2", TEXT);
-    y += 26;
+    y += 24;
     let rx_b = num_str(rx as u64);
     kv(x, y, "收包", s_of(&rx_b), TEXT);
-    y += 26;
+    y += 24;
     let tx_b = num_str(tx as u64);
     kv(x, y, "发包", s_of(&tx_b), TEXT);
-    y += 26;
+    y += 24;
     let cn_b = num_str(conns as u64);
     kv(x, y, "连接", s_of(&cn_b), TEXT);
-    y += 26;
+    y += 24;
     kv(x, y, "端口", "TCP :80", ACCENT);
 }
 
@@ -2377,7 +2389,6 @@ pub fn draw_desktop(
         MS_SIDEBAR = t_after_side.saturating_sub(t_side);
     }
 
-    rounded_rect(118, (DOCK_Y + 40) as i32, 26, 3, 1, ACCENT);
     let lamp_y = (DOCK_Y + 23) as i32;
     circle((W - 232) as i32, lamp_y, 4, if kb { OK } else { 0x454b52 }, 255);
     draw_text_ui(W - 220, DOCK_Y + 15, "键盘", if kb { TEXT2 } else { DIM });

@@ -401,3 +401,5 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **SEC-3 ✅ 特殊权限位**：`chmod 0..7777`、`afs` 掩码 `& 0o7777`、`mode_str` 的 s/S/t/T、`has_special()`；没有 exec 语义所以 s 位还没"真的抬 uid"，ACL 留到 inode 布局改版
 
 - **CRASH-1 ✅ 崩溃屏**：`kernel/src/crash.rs` 收口两条致命路径——Rust `panic_handler` 与 `exceptions::exception_report`（EL1 同步异常）。串口按 `{:#018x}` 打全寄存器再停机；有 framebuffer 时画一张 1024x768 的 `KERNEL PANIC` 屏：定宽寄存器区（SP/LR/ESR/FAR/SPSR/TTBR0）、`文件:行  原因` 的 NOTE 行、底部"串口已留下完整现场 · 复位后可再次开机"。用户态任务崩了仍走原来的"杀任务、内核继续"。`panic` 自检命令可在现场复现；`make test` 新增 4 条断言（统一上报 / 位置带出 / 寄存器完整 / ramfb 上真的画出 1024x768）
+
+- **UI-12 ✅ 桌面秩序与手感**：浏览窗改成默认收起（`WINS[3].open=false`），开局桌面只剩终端，点 dock「网页」或侧栏「浏览」才开；`dock_hit` 跳过 `win_state(i)==0` 的格子，关掉的窗口不再留隐形热区；侧栏第 4 个图标从 info 圆点换成地球（`tools/genfont.py` 加 globe 分支，前三个图标字节不变）；浏览器首开时 `url_str()` 为空就自动 `open_home()`，地址栏不再空白；系统窗 380×330、网络窗 372×216，body 首行提到 `TITLE_H+16`、行距 24，底部行不再被裁；滚动条换成 4px 淡轨 + 6px 半透明滑块（`rounded_rect_alpha`，ACCENT alpha=120）；删掉 dock 那条与焦点无关的固定强调线；`cursor::invalidate()` 先 `restore()` 再标不可见，拖动时一串光标残影消失；浏览器链接改成"按下记目标、松手位移 <12px 才跳"，压着链接也能拖滚动；地址栏左侧加「首页」按钮，点一下回内置起始页。`make test` 50 PASS、`make test-gfx` 3 PASS

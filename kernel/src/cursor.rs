@@ -26,9 +26,16 @@ static mut Y: i32 = 600;
 static mut SAVED: [[u32; 16]; 16] = [[0; 16]; 16];
 static mut VISIBLE: bool = false;
 
-/// 桌面整屏重绘之后必须调一次，否则光标会被画面盖住却仍以为自己在上面
+/// 桌面要重绘了：先把旧箭头擦回背景，再让整屏重画覆盖。
+/// 只置一个 false 是不够的——旧的箭头像素还留在后台帧里，
+/// 随后一次 present 就会把它推到屏幕上，形成"一串光标"的残影。
 pub fn invalidate() {
-    unsafe { VISIBLE = false };
+    unsafe {
+        if VISIBLE {
+            restore();
+            VISIBLE = false;
+        }
+    }
 }
 
 pub fn visible() -> bool {

@@ -374,12 +374,15 @@ pub fn draw(x: u32, y: u32, w: u32, h: u32) {
         return;
     }
 
-    // 地址栏：网址 + 标题 + 状态点
+    // 地址栏：[首页] 地址 网址 …… 标题 ●就绪
     fb::fill_rect(x + 8, y + 3, w - 16, 1, 0x2a2f37);
+    let home_x = x + 10;
+    fb::draw_text_ui(home_x, y + 9, "首页", fb::ACCENT);
+    fb::fill_rect(home_x + 40, y + 7, 1, 16, 0x2a2f37);
     let u = url_str();
-    fb::draw_text_ui(x + 12, y + 9, "地址 ", fb::DIM);
-    let ulen = fb::text_len_ui("地址 ") + 12;
-    fb::draw_text_ui(x + ulen, y + 9, u, fb::TEXT);
+    fb::draw_text_ui(home_x + 48, y + 9, "地址 ", fb::DIM);
+    let ulen = home_x + 48 + fb::text_len_ui("地址 ");
+    fb::draw_text_ui(ulen, y + 9, u, fb::TEXT);
     let st = unsafe { STATUS };
     let (dot, lab) = match st {
         1 => (fb::WARN, "加载中"),
@@ -393,8 +396,8 @@ pub fn draw(x: u32, y: u32, w: u32, h: u32) {
     let t = title_str();
     if !t.is_empty() {
         let tw = fb::text_len_ui(t);
-        let tx = (x + w - 66).saturating_sub(tw);
-        if tx > ulen + 24 + 12 {
+        let tx = (x + w - 74).saturating_sub(tw);
+        if tx > ulen + 24 + 16 {
             fb::draw_text_ui(tx, y + 9, t, fb::ACCENT);
         }
     }
@@ -481,15 +484,26 @@ pub fn draw(x: u32, y: u32, w: u32, h: u32) {
         }
     }
 
-    // 滚动条：只有内容超高才出现
+    // 滚动条：只有内容超高才出现。细轨 + 半透明滑块，别抢正文的视线
     if unsafe { TOTAL } > ch {
-        let track_x = x + w - 8;
-        fb::fill_rect(track_x, cy + 2, 3, ch - 4, 0x22262c);
+        let track_w = 4u32;
+        let track_x = x + w - track_w - 4;
+        fb::rounded_rect(track_x as i32, (cy + 4) as i32, track_w, ch - 8, 2, 0x1c2026);
         let maxv = max_scroll().max(1) as u32;
         let total = unsafe { TOTAL };
-        let th = (ch as u64 * ch as u64 / (total.max(1) as u64)) as u32 + 18;
-        let ty = cy + 2 + ((ch - th) as i32 * sc / maxv as i32) as u32;
-        fb::rounded_rect(track_x as i32 - 2, ty as i32, 6, th, 3, fb::ACCENT);
+        let th = ((ch as u64 * ch as u64 / total.max(1) as u64) as u32 + 18)
+            .min(ch - 12);
+        let travel = ch - 12 - th;
+        let off = (travel as u64 * sc.max(0) as u64 / maxv as u64) as u32;
+        fb::rounded_rect_alpha(
+            track_x as i32 - 1,
+            (cy + 4 + off) as i32,
+            6,
+            th,
+            3,
+            fb::ACCENT,
+            120,
+        );
     }
 }
 

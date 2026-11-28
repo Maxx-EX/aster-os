@@ -110,7 +110,7 @@ def render_cjk(ch, font, w, h):
 # ---------------- 图标 ----------------
 
 ICON_N = 32
-ICONS = ["terminal", "cpu", "wifi", "info"]
+ICONS = ["terminal", "cpu", "wifi", "globe"]
 
 
 def icon_mask(name):
@@ -140,6 +140,11 @@ def icon_mask(name):
         d.ellipse([S * 0.20, S * 0.20, S * 0.80, S * 0.80], outline=255, width=lw)
         d.line([(S * 0.5, S * 0.44), (S * 0.5, S * 0.66)], fill=255, width=lw)
         d.ellipse([S * 0.5 - S * 0.04, S * 0.5 - S * 0.20, S * 0.5 + S * 0.04, S * 0.5 - S * 0.12], fill=255)
+    elif name == "globe":
+        # 侧栏第 4 项是"浏览"，用地球而不是信息圆点
+        d.ellipse([S * 0.18, S * 0.18, S * 0.82, S * 0.82], outline=255, width=lw)
+        d.ellipse([S * 0.36, S * 0.18, S * 0.64, S * 0.82], outline=255, width=lw)
+        d.line([(S * 0.18, S * 0.50), (S * 0.82, S * 0.50)], fill=255, width=lw)
     small = img.resize((ICON_N, ICON_N), Image.LANCZOS)
     return quantize(small, ICON_N, ICON_N)
 

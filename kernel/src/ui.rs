@@ -18,6 +18,9 @@ static mut OFF_X: i32 = 0;
 static mut WSC: usize = usize::MAX;
 static mut WSC_Y0: i32 = 0;
 static mut WSC_S0: i32 = 0;
+// 按下在链接上时先挂起，松手且没拖动才真的跳转
+static mut LINK: Option<&'static str> = None;
+static mut LINK_XY: (i32, i32) = (0, 0);
 static mut OFF_Y: i32 = 0;
 
 pub fn tick() {
@@ -38,8 +41,8 @@ pub fn tick() {
             BLINK = blink;
             LAST = now0;
         }
-        redraw();
         crate::cursor::invalidate();
+        redraw();
     }
 
     let mut want = handle_mouse();
@@ -63,8 +66,8 @@ pub fn tick() {
     }
     if (want || dirty) && now.saturating_sub(unsafe { LAST }) >= MIN_INTERVAL_MS {
         unsafe { LAST = now };
-        redraw();
         crate::cursor::invalidate();
+        redraw();
     }
     crate::cursor::update();
 }
@@ -147,7 +150,19 @@ fn handle_mouse() -> bool {
                     crate::kb::set_open(true);
                     want = true;
                 }
-                // 浏览器内容区：点在带 href 的行上就跟着跳
+                // 浏览器地址栏左侧的"首页"：点一下回内置起始页
+                if i == 3
+                    && y >= w0.y + 44
+                    && y <= w0.y + 82
+                    && x >= w0.x + 14
+                    && x <= w0.x + 52
+                {
+                    crate::web::open_home();
+                    want = true;
+                    continue;
+                }
+                // 浏览器内容区：带 href 的行先记下目标，松手时没怎么动才跳，
+                // 这样手指压着链接也能上下拖动滚动
                 if i == 3 && y > w0.y + 42 {
                     // 内容起点 = 窗口顶 + 标题栏 44；link_at 内部再减 38 的地址栏
                     if let Some(href) = crate::web::link_at(
@@ -156,11 +171,12 @@ fn handle_mouse() -> bool {
                         (w0.y + 44) as u32,
                         (w0.y + w0.h as i32) as u32,
                     ) {
-                        crate::web::open_addr(href);
-                        want = true;
-                        continue;
+                        unsafe {
+                            LINK = Some(href);
+                            LINK_XY = (x, y);
+                        }
                     }
-                    // 没点在链接上 → 这一按交给内容区拖动滚动
+                    // 不论有没有压在链接上，这一按都先交给内容区拖动滚动
                     unsafe {
                         WSC = 3;
                         WSC_Y0 = y;
@@ -230,8 +246,18 @@ fn handle_mouse() -> bool {
                 continue;
             }
         } else {
-            // 松手：结束浏览器内容区拖动
-            unsafe { WSC = usize::MAX };
+            // 松手：如果按下时压在链接上、而且几乎没移动，才算一次点击
+            unsafe {
+                if let Some(href) = LINK {
+                    let (lx, ly) = LINK_XY;
+                    if (x - lx).abs() + (y - ly).abs() < 12 {
+                        crate::web::open_addr(href);
+                        want = true;
+                    }
+                    LINK = None;
+                }
+                WSC = usize::MAX;
+            }
             // 松手：拖拽期间省了阴影，这里补一次完整的
             if unsafe { DRAG } != usize::MAX {
                 let i = unsafe { DRAG };
