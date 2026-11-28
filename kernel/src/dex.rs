@@ -453,13 +453,14 @@ static mut SFIELDS: [i32; NSFIELD] = [0; NSFIELD];
 // 运行时生成的字符串没有 string_idx 可用，单独开一张槽表。
 // 寄存器值 >= 0x200 表示"动态字符串 0x200+i"，与数组的 0x100+i 区间分开。
 const DYN_TAG: i32 = 0x200;
-const NDYN: usize = 4;
-static mut DYN: [[u8; 96]; NDYN] = [[0; 96]; NDYN];
+const NDYN: usize = 16;
+const DYN_CAP: usize = 128;
+static mut DYN: [[u8; DYN_CAP]; NDYN] = [[0; DYN_CAP]; NDYN];
 static mut DYN_LEN: [usize; NDYN] = [0; NDYN];
 static mut DYN_USED: usize = 0;
 
 // StringBuilder 只支持一个实例（真实实现要按对象分配缓冲）。
-static mut SB: [u8; 128] = [0; 128];
+static mut SB: [u8; DYN_CAP] = [0; DYN_CAP];
 static mut SB_LEN: usize = 0;
 
 fn sb_reset() {
@@ -471,7 +472,7 @@ fn sb_reset() {
 fn sb_push_str(s: &str) -> Result<(), &'static str> {
     let n = s.len();
     unsafe {
-        if SB_LEN + n > SB.len() {
+        if SB_LEN + n > DYN_CAP {
             return Err("StringBuilder 超过 128 字节");
         }
         let mut i = 0;
@@ -514,24 +515,54 @@ fn sb_push_int(v: i32) -> Result<(), &'static str> {
     sb_push_str(s)
 }
 
-fn sb_freeze() -> Result<i32, &'static str> {
+/// 把任意一段字节登记成一个动态字符串引用（APK-15 起 String 方法族都走这里）
+fn dyn_push(b: &[u8]) -> Result<i32, &'static str> {
+    if b.len() > DYN_CAP {
+        return Err("字符串超过 128 字节");
+    }
     unsafe {
         if DYN_USED >= NDYN {
-            return Err("动态字符串槽用尽（4 个）");
+            return Err("动态字符串槽用尽（16 个）");
         }
         let i = DYN_USED;
         DYN_USED += 1;
-        if SB_LEN > 96 {
-            return Err("字符串超过 96 字节");
-        }
         let mut k = 0;
-        while k < SB_LEN {
-            DYN[i][k] = SB[k];
+        while k < b.len() {
+            DYN[i][k] = b[k];
             k += 1;
         }
-        DYN_LEN[i] = SB_LEN;
+        DYN_LEN[i] = b.len();
         Ok(DYN_TAG + i as i32)
     }
+}
+
+fn sb_freeze() -> Result<i32, &'static str> {
+    let n = unsafe { SB_LEN };
+    let b: &[u8] = unsafe { &SB[..n] };
+    dyn_push(b)
+}
+
+/// 两段字符串拼接，结果登记成动态字符串
+fn str_concat(a: &str, b: &str) -> Result<i32, &'static str> {
+    let n = a.len() + b.len();
+    if n > DYN_CAP {
+        return Err("字符串拼接超过 128 字节");
+    }
+    let mut tmp = [0u8; DYN_CAP];
+    let mut k = 0;
+    let mut i = 0;
+    while i < a.len() {
+        tmp[k] = a.as_bytes()[i];
+        k += 1;
+        i += 1;
+    }
+    i = 0;
+    while i < b.len() {
+        tmp[k] = b.as_bytes()[i];
+        k += 1;
+        i += 1;
+    }
+    dyn_push(&tmp[..n])
 }
 
 fn dyn_str(v: i32) -> Result<&'static str, &'static str> {
@@ -1060,6 +1091,69 @@ fn exec(
                         return Err("Log 上没有这个方法");
                     }
                     last = 0;
+                } else if m.class == "Ljava/lang/String;" {
+                    // 内建 String（APK-15）：只做 ASCII 语义，长度按字节数
+                    match m.name {
+                        "length" => last = str_of(d, h, args[0])?.len() as i32,
+                        "charAt" => {
+                            let sv = str_of(d, h, args[0])?;
+                            let i = args[1];
+                            if i < 0 || (i as usize) >= sv.len() {
+                                return Err("charAt 下标越界");
+                            }
+                            last = sv.as_bytes()[i as usize] as i32;
+                        }
+                        "equals" => {
+                            let a = str_of(d, h, args[0])?;
+                            let b = str_of(d, h, args[1])?;
+                            last = if a == b { 1 } else { 0 };
+                        }
+                        "concat" => {
+                            let a = str_of(d, h, args[0])?;
+                            let b = str_of(d, h, args[1])?;
+                            last = str_concat(a, b)?;
+                        }
+                        "substring" => {
+                            let sv = str_of(d, h, args[0])?;
+                            let mut b = args[1];
+                            let mut e = args[2];
+                            if b < 0 {
+                                b = 0;
+                            }
+                            if e > sv.len() as i32 {
+                                e = sv.len() as i32;
+                            }
+                            if b > e {
+                                return Err("substring 区间非法");
+                            }
+                            last = dyn_push(&sv.as_bytes()[b as usize..e as usize])?;
+                        }
+                        "indexOf" => {
+                            let sv = str_of(d, h, args[0])?;
+                            let ch = args[1] as u8;
+                            let mut r = -1i32;
+                            let mut k = 0;
+                            while k < sv.len() {
+                                if sv.as_bytes()[k] == ch {
+                                    r = k as i32;
+                                    break;
+                                }
+                                k += 1;
+                            }
+                            last = r;
+                        }
+                        "valueOf" => {
+                            // valueOf(I) 转字符串；valueOf(String) 直接透传
+                            if m.shorty.as_bytes().first().copied().unwrap_or(b'?') == b'I' {
+                                sb_reset();
+                                sb_push_int(args[0])?;
+                                last = sb_freeze()?;
+                            } else {
+                                last = args[0];
+                            }
+                        }
+                        _ => return Err("String 上没有这个方法"),
+                    }
                 } else if m.class == "Ljava/lang/StringBuilder;" {
                     // 内建类：不查 code_of，直接在内核里拼
                     if m.name == "<init>" {

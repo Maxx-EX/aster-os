@@ -1985,3 +1985,90 @@ Log.n(s);                  // 8386560? 不，2048 个元素求和 = 2096128
 ### 51.6 下一步
 
 内存地基到此为止：对象堆、数组都是真内存，页帧池 32768 页里随时能看到占用。下一个瓶颈不在分配器，而在**语义**——`String` 只有 `StringBuilder` 三个方法、没有任何字符串拼接/比较/取长度，`android.graphics` 还是自研 Canvas。接下来该做 `String` 的方法族（`length`/`charAt`/`equals`/`concat`/`substring`），让 fixture 能写点像样的逻辑。
+
+---
+
+## 52. APK-15：String 方法族
+
+§51 之后 `String` 是块砖：能拿到、能塞进 `StringBuilder`，但读不出长度、比不了、拼不了、切不了。这一节把 Java 里最常被调用的七个 `String` 方法补进内建表，并用一条 `Main.str()V` 把它们串起来验证。
+
+### 52.1 动态字符串表扩容
+
+原来的 `DYN: [[u8; 96]; 4]` 只够 `StringBuilder.toString()` 一次性的场景。改：
+
+| 项 | 旧 | 新 |
+| --- | --- | --- |
+| `NDYN` | 4 | **16** |
+| `DYN_CAP` | 96 | **128** |
+| `SB` | `[u8; 128]` | `[u8; DYN_CAP]` |
+
+关键是抽出一个公共登记函数 `dyn_push(b: &[u8]) -> Result<i32>`：长度超 `DYN_CAP` 报"字符串超过 128 字节"，槽用满报"动态字符串槽用尽（16 个）"，成功返回 `DYN_TAG + i`。`sb_freeze()` 直接改成 `dyn_push(&SB[..SB_LEN])`——因为 `DYN` 是独立缓冲区，不需要中转。另加 `str_concat(a, b)`：拼到临时 `[u8; DYN_CAP]` 后再 `dyn_push`，超长在拼接前就拦下。
+
+这样 §44 的 `StringBuilder` 和本节的新方法走同一条出口，引用区间仍然是 `0x200..0x1_0000`，`str_of()` 一个入口全认。
+
+### 52.2 七个方法
+
+加在 `dex.rs` 的内建 `match m.class` 链里，位置在 `Ljava/lang/StringBuilder;` 之前：
+
+| 方法 | 语义 | 返回 |
+| --- | --- | --- |
+| `length()I` | UTF-8 字节数（纯 ASCII 时等于字符数） | i32 |
+| `charAt(I)I` | 第 i 个**字节**；越界报错 | i32（不是 char） |
+| `equals(String)I` | 字节级相等 | 1 / 0 |
+| `concat(String)String` | `str_concat` | 动态字符串引用 |
+| `substring(II)String` | `[b, e)`，两端夹到合法区间，`b > e` 报错 | 动态字符串引用 |
+| `indexOf(I)I` | 找第一个匹配字节，找不到返回 −1 | i32 |
+| `valueOf(I)String` | `sb_reset` + `sb_push_int` + `sb_freeze` | 动态字符串引用 |
+
+`valueOf` 有两个重载，靠 shorty 首字符区分：`valueOf(I)` 的 shorty 是 `"IL"`（首字符 `I`），`valueOf(String)` 是 `"LL"`，后者直接透传参数引用（`last = args[0]`），不额外占槽。
+
+`charAt` 返回 i32 是刻意的简化：DEX 里 `C` 类型寄存器本质也是 32 位，只要不做 `check-cast`、不把结果当对象用，i32 完全够用。真实实现要处理 UTF-16 代理对，这里只承诺 ASCII 语义。
+
+### 52.3 fixture：Main.str()V
+
+13 版 `tools/mkdex.py` 新增 method 39（`Main.str()V`，55 code unit，regs=6），strings 表补 8 条（`" OS"`、`Aster`、`charAt`、`concat`、`equals`、`indexOf`、`length`、`substring`、`valueOf`、`IIL`、`IL`），proto 补 3 条（`(II)String` / `(String)String` / `(I)String`）。Main 的 class_data direct 7 → 8。
+
+序列（每一步都打印，谁错就停在哪一行）：
+
+```java
+String s = "Aster".concat(" OS");   // Log.i -> "Aster OS"
+int n = s.length();                  // Log.n -> 8
+String t = s.substring(0, 5);        // Log.i -> "Aster"
+int eq = t.equals("Aster");          // Log.n -> 1
+int ix = s.indexOf('S');            // Log.n -> 7
+String v = String.valueOf(42);      // Log.i -> "42"
+```
+
+`indexOf` 那行第一版注释写的是 6，实跑出来 7——`"Aster OS"` 里 `'S'` 确实在第 7 位（`A0 s1 t2 e3 r4 空格5 O6 S7`）。错的是我手算的注释，内核返回的 7 才是对的。断言按 7 落地。
+
+### 52.4 实拍
+
+`make test` 从 26 项升到 **27 项 PASS**，新增：
+
+```
+[TEST] PASS String 方法族：length/charAt/equals/concat/substring/indexOf/valueOf
+```
+
+串口实录（`uptime` + `dex str`）：
+
+```
+[DEX] Aster OS
+[DEX] 8
+[DEX] Aster
+[DEX] 1
+[DEX] 7
+[DEX] 42
+str() 执行完（52 条指令），正常 return-void
+```
+
+### 52.5 限制
+
+- 长度是字节数、`charAt` 是字节下标：非 ASCII 字符串（中文、emoji）拿到的数和 Java 对不上。
+- `substring` 不做 UTF-8 边界校验，切在半个字符中间会得到非法序列（后续 `str_of` 会报"不是合法 UTF-8"，不会 panic）。
+- 没有 `toUpperCase`/`toLowerCase`/`trim`/`startsWith`/`endsWith`/`replace`——真 APK 里这些调用频率不比 `length` 低。
+- `equalsIgnoreCase`、`compareTo`、`hashCode` 都没有，`HashMap<String, …>` 仍然跑不起来。
+- 16 槽 × 128 字节是固定的，一段循环里反复 `concat` 十几次就爆槽（`call_reset` 只在 `run`/`app start` 时清）。
+
+### 52.6 下一步
+
+字符串从"能存"到"能用"了，但**对象模型**还停在一层：没有 `ArrayList`，没有 `HashMap`，没有接口/多态分派（`invoke-interface` 根本没实现），也没有 `String[]` 之外的引用数组语义。APK-16 打算做 `invoke-interface` + 虚表，这是跑任何真实 APK 都绕不过的一步——现在 `Child`/`Base` 靠 `code_in_class` 上溯 4 层能跑，但一个类实现两个接口、同一方法名不同签名就立刻失效。

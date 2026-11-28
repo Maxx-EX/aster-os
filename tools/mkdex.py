@@ -56,14 +56,18 @@ def align(buf, n=4):
         buf.append(0)
 
 STRINGS = [
+    " OS",
     " hits=",
     "<init>",
+    "Aster",
     "Aster APK",
     "Base",
     "Boom",
     "Child",
     "Hello from Aster, this string lives in a real DEX",
     "I",
+    "IIL",
+    "IL",
     "L",
     "LI",
     "LL",
@@ -96,16 +100,21 @@ STRINGS = [
     "caught",
     "caught local",
     "caught xmethod",
+    "charAt",
     "clear",
+    "concat",
     "cvh",
     "drawRect",
     "drawText",
+    "equals",
     "frame",
     "get",
     "height",
     "hello",
     "hits",
     "i",
+    "indexOf",
+    "length",
     "loop done",
     "moveX",
     "moveY",
@@ -122,6 +131,8 @@ STRINGS = [
     "py",
     "run",
     "setColor",
+    "str",
+    "substring",
     "sum=",
     "taps",
     "toString",
@@ -129,6 +140,7 @@ STRINGS = [
     "touchX",
     "touchY",
     "v",
+    "valueOf",
     "width",
 ]
 assert STRINGS == sorted(STRINGS), "string_ids 必须升序"
@@ -159,6 +171,11 @@ S_ONCREATE, S_ONTOUCH, S_ONDESTROY = IDX["onCreate"], IDX["onTouch"], IDX["onDes
 S_ONCREATEOK, S_ONDESTROYOK = IDX["onCreate ok"], IDX["onDestroy ok"]
 S_TAPS = IDX["taps"]
 S_BIG, S_BIGOK = IDX["big"], IDX["big ok"]
+S_ASTER, S_OSP, S_STRM2 = IDX["Aster"], IDX[" OS"], IDX["str"]
+S_IIL, S_IL = IDX["IIL"], IDX["IL"]
+S_LEN, S_CHARAT = IDX["length"], IDX["charAt"]
+S_EQUALS, S_CONCAT = IDX["equals"], IDX["concat"]
+S_SUBSTR, S_INDEXOF, S_VALUEOF = IDX["substring"], IDX["indexOf"], IDX["valueOf"]
 S_APP, S_ARG = IDX["Lcom/aster/App;"], IDX["arg"]
 S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
 S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
@@ -184,7 +201,11 @@ M_CV_MVX, M_CV_MVY, M_CV_W, M_CV_H = 22, 23, 24, 25
 M_ONCREATE, M_ONTOUCH, M_ONDESTROY = 26, 27, 28
 M_APP_ARG = 29
 M_BIG = 30
+M_S_LEN, M_S_CHAR, M_S_EQ = 31, 32, 33
+M_S_CONC, M_S_SUB, M_S_IDX, M_S_VAL = 34, 35, 36, 37
+M_STR = 38
 P_III = 9
+P_SUB2, P_CONC, P_VAL = 10, 11, 12
 
 
 def build():
@@ -215,6 +236,9 @@ def build():
     buf += struct.pack("<III", S_VIIII, T_V, 0)   # 7: (IIII)V
     buf += struct.pack("<III", S_VLII, T_V, 0)    # 8: (String,II)V
     buf += struct.pack("<III", S_VI_3, T_V, 0)    # 9: (III)V，params_size 稍后填
+    buf += struct.pack("<III", S_IIL, T_STRING, 0)  # 10: (II)String
+    buf += struct.pack("<III", S_LL, T_STRING, 0)   # 11: (String)String
+    buf += struct.pack("<III", S_IL, T_STRING, 0)   # 12: (I)String
 
     field_ids_off = len(buf)
     buf += struct.pack("<HHI", T_COUNTER, T_INT, S_V_F)   # 0 Counter.v
@@ -257,6 +281,14 @@ def build():
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_ONDESTROY)    # 28 Main.onDestroy()V
     buf += struct.pack("<HHI", T_APP, P_INT_I, S_ARG)          # 29 App.arg()I（内建）
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_BIG)          # 30 Main.big()V
+    buf += struct.pack("<HHI", T_STRING, P_INT_I, S_LEN)        # 31 String.length()I
+    buf += struct.pack("<HHI", T_STRING, P_INT_I, S_CHARAT)     # 32 String.charAt(I)I
+    buf += struct.pack("<HHI", T_STRING, P_APP_STR, S_EQUALS)   # 33 String.equals(String)I
+    buf += struct.pack("<HHI", T_STRING, P_CONC, S_CONCAT)      # 34 String.concat(String)String
+    buf += struct.pack("<HHI", T_STRING, P_SUB2, S_SUBSTR)      # 35 String.substring(II)String
+    buf += struct.pack("<HHI", T_STRING, P_INT_I, S_INDEXOF)    # 36 String.indexOf(I)I
+    buf += struct.pack("<HHI", T_STRING, P_VAL, S_VALUEOF)      # 37 String.valueOf(I)String
+    buf += struct.pack("<HHI", T_MAIN, P_VOID, S_STRM2)        # 38 Main.str()V
 
     class_defs_off = len(buf)
     main_def_pos = len(buf)
@@ -665,6 +697,40 @@ def build():
     buf += struct.pack("<HHHHII", 5, 0, 0, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
+    # Main.str()V —— APK-15：String 方法族，逐条打印
+    code_str = len(buf)
+    ins = [
+        0x001a, S_ASTER,           # 0  const-string v0, "Aster"
+        0x011a, S_OSP,             # 2  const-string v1, " OS"
+        0x206e, M_S_CONC, 0x0010,  # 4  concat {v0,v1}
+        0x020a,                    # 7  move-result v2
+        0x1071, M_I, 0x0002,       # 8  Log.i(v2) -> "Aster OS"
+        0x106e, M_S_LEN, 0x0002,   # 11 length(v2)
+        0x030a,                    # 14 move-result v3
+        0x1071, M_N, 0x0003,       # 15 Log.n(v3) -> 8
+        0x0312,                    # 18 const/4 v3, #0
+        0x5412,                    # 19 const/4 v4, #5
+        0x306e, M_S_SUB, 0x0432,   # 20 substring {v2,v3,v4}
+        0x050a,                    # 23 move-result v5
+        0x1071, M_I, 0x0005,       # 24 Log.i(v5) -> "Aster"
+        0x041a, S_ASTER,           # 27 const-string v4, "Aster"
+        0x206e, M_S_EQ, 0x0045,    # 29 equals {v5,v4}
+        0x030a,                    # 32 move-result v3
+        0x1071, M_N, 0x0003,       # 33 Log.n(v3) -> 1
+        0x0313, 0x0053,            # 36 const/16 v3, #83（'S'）
+        0x206e, M_S_IDX, 0x0032,   # 38 indexOf {v2,v3}
+        0x030a,                    # 41 move-result v3
+        0x1071, M_N, 0x0003,       # 42 Log.n(v3) -> 7
+        0x0313, 0x002a,            # 45 const/16 v3, #42
+        0x1071, M_S_VAL, 0x0003,   # 47 String.valueOf(v3)
+        0x030a,                    # 50 move-result v3
+        0x1071, M_I, 0x0003,       # 51 Log.i(v3) -> "42"
+        0x000e,                    # 54 return-void
+    ]
+    assert len(ins) == 55, len(ins)
+    buf += struct.pack("<HHHHII", 6, 0, 0, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
     # Main 的 static_values：cvh=0, hits=1, px=140, py=80
     sv_main = len(buf)
     buf += uleb(5) + b"\x04\x00" + b"\x04\x01" + b"\x24\x8c\x00" + b"\x04\x50" + b"\x04\x00"
@@ -679,7 +745,7 @@ def build():
 
     # Main 的 class_data：4 个静态字段 + 3 个 direct（APK-11 加了 cvh/px/py 和 frame）
     cd_main = len(buf)
-    buf += uleb(5) + uleb(0) + uleb(7) + uleb(0)
+    buf += uleb(5) + uleb(0) + uleb(8) + uleb(0)
     buf += uleb(F_CVH - 0) + uleb(0x0008)        # cvh：static int
     buf += uleb(F_HITS - F_CVH) + uleb(0x0008)   # hits
     buf += uleb(F_PX - F_HITS) + uleb(0x0008)    # px
@@ -692,6 +758,7 @@ def build():
     buf += uleb(M_ONTOUCH - M_ONCREATE) + uleb(0x0009) + uleb(code_onTouch)
     buf += uleb(M_ONDESTROY - M_ONTOUCH) + uleb(0x0009) + uleb(code_onDestroy)
     buf += uleb(M_BIG - M_ONDESTROY) + uleb(0x0009) + uleb(code_big)
+    buf += uleb(M_STR - M_BIG) + uleb(0x0009) + uleb(code_str)
 
     # Base 的 class_data：1 实例字段 + 1 direct + 1 virtual
     cd_base = len(buf)
@@ -736,7 +803,7 @@ def build():
         (0x0002, 14, type_ids_off),
         (0x0003, 10, proto_ids_off),
         (0x0004, 7, field_ids_off),
-        (0x0005, 31, method_ids_off),
+        (0x0005, 39, method_ids_off),
         (0x0006, 7, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
@@ -756,7 +823,7 @@ def build():
         type_ids=(14, type_ids_off),
         proto_ids=(10, proto_ids_off),
         field_ids=(7, field_ids_off),
-        method_ids=(31, method_ids_off),
+        method_ids=(39, method_ids_off),
         class_defs=(7, class_defs_off),
         data=(data_size, data_off),
         code_init=code_init, code_next=code_next,
@@ -765,7 +832,7 @@ def build():
         code_child_init=code_child_init, code_boom_init=code_boom_init,
         code_frame=code_frame, code_onCreate=code_onCreate,
         code_onTouch=code_onTouch, code_onDestroy=code_onDestroy,
-        code_big=code_big,
+        code_big=code_big, code_str=code_str,
     )
 
 
@@ -800,7 +867,7 @@ def main():
     assert buf[12:32] == hashlib.sha1(bytes(buf[32:])).digest()
     for name in ("code_init", "code_next", "code_run", "code_hello",
                  "code_base_init", "code_base_get", "code_child_init", "code_boom_init",
-                 "code_frame", "code_onCreate", "code_onTouch", "code_onDestroy", "code_big"):
+                 "code_frame", "code_onCreate", "code_onTouch", "code_onDestroy", "code_big", "code_str"):
         off = info[name]
         regs, ins_n, outs, tries, dbg, n = struct.unpack_from("<HHHHII", buf, off)
         insns = [struct.unpack_from("<H", buf, off + 16 + 2 * i)[0] for i in range(n)]
