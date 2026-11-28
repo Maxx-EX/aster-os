@@ -388,4 +388,7 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **PERF-4 ⬜ 下一刀**：三窗口仍 18 ms，因为重叠时只能整窗重画；解法是每窗一块离屏层按 z 序 blit
 - **NET-4 ⬜ 下一阶段**：DHCP + DNS，让 `http get` 能用域名而不是写死 IP
 - **P6-5 ✅ 内置浏览器**：`html.rs` 自研分词与块级排版（h1/h2/hr/列表/段落折行/行内链接），`web.rs` 页面状态 + 行到像素 + 滚动 + 命中；第四窗口「浏览器」、dock 第四格、侧栏"浏览"；`web` 系列命令；首页内置可离线开，`web 10.0.2.2:8000/home.html` 走真 TCP 拉取，点链接跳转、拖动滚动均已实测
-- **P6-5+ ⬜ 浏览器下一刀**：图片解码（BMP/PNG）、表格、`https`（依赖 P6-3 TLS）、历史栈与后退
+- **P6-5+ ✅ 图片解码落进浏览器**：`img.rs` 自解 BMP/PNG（RGBA 反滤波 + 复用 inflate），内置星芒徽标真画出来；表格、`https`、历史栈仍是下一刀
+- **IMG-1 ✅ 图片解码**：`kernel/src/img.rs` 自解 BMP(24/32bpp) 与 PNG(8bit RGB/RGBA，非隔行)，反滤波 Sub/Up/Average/Paeth，zlib 头剥掉复用 APK 的 `inflate`；三块大缓冲改由页帧分配器懒要，避开 `.bss` 撑爆导致的 `ADR_PREL_LO21` 超范围
+- **SEC-1 ✅ 用户与权限**：`auth.rs` 用户表（root/aster/guest + useradd 到 8 个）、inode 上的 `mode`(+2) 与 `uid`(+56)、`afs::read_file`/`write_file` 与 `vfs::open` 三道门、`whoami/users/su/chmod/chown/ls -l`；切 root 要 EXTREME
+- **SEC-2 ⬜ 下一刀**：组与 setuid、`/etc/passwd` 落盘、目录权限、ACL

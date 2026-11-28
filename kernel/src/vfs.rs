@@ -15,6 +15,7 @@ pub const MAX_FD: usize = 16;
 pub const FIRST_USER_FD: usize = 3;
 
 pub const ENOENT: i64 = -2;
+pub const EACCES: i64 = -13;
 pub const EBADF: i64 = -9;
 pub const EFAULT: i64 = -14;
 pub const EINVAL: i64 = -22;
@@ -131,6 +132,14 @@ pub fn open(path: &str, wr: bool) -> Result<i32, i64> {
     };
     if f.typ != afs::T_FILE {
         return Err(EINVAL);
+    }
+    if wr {
+        // 写打开过一道权限门：owner 的 w 位 / 别人看 other 位 / root 全通
+        if let Some((mode, owner)) = afs::meta(name) {
+            if !crate::auth::can(mode, owner, crate::auth::W_WRITE) {
+                return Err(EACCES);
+            }
+        }
     }
     let mut buf = [0u8; BS];
     let n = afs::read_file(name, &mut buf).map_err(|_| EINVAL)?;

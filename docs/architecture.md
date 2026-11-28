@@ -2564,3 +2564,105 @@ if take_wall() || minute_changed { restore_wall_gaps(); }
 ### 59.6 诚实边界
 
 没有 CSS 层叠、没有表格布局、没有图片解码（只画 `[img]` + alt）、没有 JS、没有表单输入、没有 TLS（所以只能 `http://`）、只认 IP+端口（域名等 NET-4）、单页无历史栈（点链接不产生"后退"）、`MAX_LINES=320` 行封顶、80 列宽按窗宽固定（不随窗口拉伸重排）。
+
+---
+
+## 60. 图片解码（IMG-1）：浏览器终于能看图
+
+`img` 的占位符换成了真像素。解码器在 `kernel/src/img.rs`，只认两种格式，但两种都不靠外部库。
+
+### 60.1 支持面
+
+- **BMP**：24/32bpp、`BI_RGB` 无压缩、bottom-up 与 top-down（高度为负）都认
+- **PNG**：8bit、color type 2(RGB) / 6(RGBA)、非隔行；多 IDAT 只取连续第一段；zlib 头两字节剥掉后直接喂给 `inflate`（APK 那条 DEFLATE 复用）
+- 反滤波 Sub / Up / Average / Paeth 全做，Paeth 用整数差比
+- **不做**：调色板、16bit、隔行、Gamma/ICC、alpha 混合（`a<128` 直接跳过露出底色）
+- 源图上限 256×256；解出来先落 RGBA，再按整数倍缩小到 160×160（只缩不放，避免插值糊字）
+
+### 60.2 三块大缓冲不进 .bss
+
+一开始把三个数组（源图 256 KiB、解压临时 257 KiB、成品 100 KiB）写成 `static mut [..]`，立刻踩到坑：
+
+```
+relocation R_AARCH64_ADR_PREL_LO21 out of range: 1205492
+references 'ASTER_USER_CTX'
+```
+
+BSS 一变大，C 那边 `&ASTER_USER_CTX` 这种 `ADR` 相对取址就超出 ±1 MiB。改法是把三块缓冲从页帧分配器懒要（`frame::alloc_pages`），内核 `.bss` 回到原位。实测浏览器开图后页帧从 768 → 922（多 154 页 ≈ 616 KiB）。
+
+### 60.3 两种字节序
+
+BMP 是小端，PNG 是大端（chunk 长度、宽高全是大端）。第一版统一用 BMP 的小端读，PNG 直接报"没有 IDAT"—— chunk 长度读反了，指针一步就飞了。现在 `rd_u32`（小端，BMP 用）与 `rd_be32`（大端，PNG 用）分开。
+
+### 60.4 页面里怎么用
+
+`<img src=...>` 那一行 `kind=9`，`src` 存进行里的 `href`（72 字节）。打开页面时 `load_images()` 扫第一张图：
+
+- `aster://...` → 内置 `assets/web/logo.png`（`include_bytes!`，离线可用）
+- `http://ip:port/path` → `net::http_get` 取 body 字节 → 解码
+- 其它/失败 → 保留 `[img] alt` 占位，不空行
+
+行高由图片高度决定（`row_h(9) = img 高 + 14`），所以排版跟着图走。
+
+### 60.5 实测
+
+内置首页 `<img src="aster://home/logo.png">` 解出 120×120 的星芒徽标（深蓝径向渐变底 + 8 条白色射线），显示正常；页面 30 行；`make test` 断言首页行数。
+
+---
+
+## 61. 用户与权限（SEC-1）
+
+系统原来只有一个隐含身份。现在有用户表、有 inode 权限位、有门。
+
+### 61.1 模型
+
+- 用户：`root`(0) / `aster`(1000，默认) / `guest`(1001)，`useradd` 最多加到 8 个，名字只允许小写字母/数字/下划线
+- 权限：Unix 三位 rwx（owner/group/other），这一版只看 **owner 位** 与 **other 位**，group 位留着
+- 判定：`uid 0` 全通；否则 `owner == 当前 uid` 看 owner 位，别人看 other 位
+- 门：切到 root 必须 EXTREME 已解锁（`ex` 之后），普通用户随便切；`chown` 要 root 或 EXTREME；`useradd` 同理
+
+### 61.2 inode 布局（64 字节）
+
+`typ` 在 +0，**`mode` 在 +2**（这个位置原来写 0，正好空着），`size` +4，`parent` +8，`mtime` +12，10 个直接块 +16..56，**`uid` 在 +56**。新文件 `mode=0644`、`owner=当前 uid`；重写已有文件沿用它原来的 mode 与 owner。
+
+### 61.3 三道门
+
+| 位置 | 检查 |
+|---|---|
+| `afs::read_file` | 读位（owner/other） |
+| `afs::write_file` | 覆盖已有文件前查写位 |
+| `vfs::open(wr)` | 写打开再查一次（EACCES -13） |
+
+`chmod <八进制> <文件>`、`chown <用户|uid> <文件>`、`ls -l`（`-rw-r--r--  5  aster  a.txt`）、`whoami`/`id`、`users`、`su`。
+
+### 61.4 顺手挖出来的老坑
+
+`ls -l` 一开始文件名是空的、size 0、mode 644。根因不是权限：`inode_read` 与目录遍历共用同一张 `CELL` 缓冲，两次 `buf()` 返回同一个 `&mut [u8;4096]`——**别名 UB**，编译器认为内容没变，读回的就是旧值。表现是"有时对有时错"，单独 `stat` 永远对。
+
+修法是给 inode 读写单独一张 `CELL3`。这个坑在 AsterFS 里存在很久（只是以前没人嵌套读），现在从根上分开了。
+
+### 61.5 实测
+
+```
+$ whoami
+  aster  uid=1000 gid=1000  权限（非 root：看 owner 位，别人看 other 位）
+$ ls -l
+  -rw-r--r--       5  aster     a.txt
+  -rw-r-----       6  aster     b.txt
+$ su guest
+  → guest (uid 1001)
+$ cat b.txt
+  没有读权限（owner 不是你）
+$ wr b.txt hack
+  没有写权限（这个文件不是你的）
+$ cat a.txt
+  hello
+$ su root
+  切 root 要先解开 EXTREME（ex 命令）
+```
+
+`make test` 36 项断言，新增：用户身份、用户表、root 要 EXTREME。
+
+### 61.6 边界
+
+没有组、没有 setuid、没有 ACL、没有密码（`su` 靠 EXTREME 而不是口令）、`useradd` 只在内存里（掉电即失，还没写 `/etc/passwd` 到磁盘）、目录本身不做权限检查（只看文件 inode）、扩展属性与 xattr 都没有。

@@ -249,7 +249,7 @@ fn set_href(h: &[u8], base: &str) {
     unsafe {
         CUR_HREF = [0; 72];
         let mut k = 0usize;
-        if h.starts_with(b"http") {
+        if h.starts_with(b"http") || h.starts_with(b"aster://") {
             for c in h {
                 if k + 1 < 72 {
                     CUR_HREF[k] = *c;
@@ -430,6 +430,10 @@ pub fn parse(src: &[u8], base: &str) {
                 unsafe {
                     CUR_KIND = 9;
                     CUR_INDENT = 0;
+                    CUR_HREF = [0; 72];
+                }
+                if let Some(src) = attr(tag, b"src") {
+                    set_href(src, base);
                 }
                 add_char(b'[' as u16, 1);
                 add_char(b'i' as u16, 1);

@@ -113,6 +113,11 @@ fn read_line(buf: &mut [u8]) -> usize {
 
 static mut EXTREME: bool = false;
 
+/// 给 auth 用：EXTREME 是否已解锁
+pub fn extreme_on() -> bool {
+    unsafe { EXTREME }
+}
+
 /// 命令行历史（手机端软键盘有 UP/DN 键，PC 端也复用：↑ = 0x90、↓ = 0x91 伪键）
 const HIST_MAX: usize = 8;
 const HIST_LEN: usize = 64;
@@ -511,11 +516,20 @@ fn cmd_mkfs() {
     }
 }
 
-fn cmd_ls() {
+fn cmd_ls(a: &str) {
+    let long = a.trim() == "-l";
     let mut n = 0u32;
-    let r = crate::afs::list(&mut |name: &str, ino: u32, typ: u16, size: u32| {
-        let kind = if typ == crate::afs::T_DIR { "dir " } else { "file" };
-        println!("  {}  {:>5}  {:>4}  {}", kind, size, ino, name);
+    let r = crate::afs::list(&mut |name: &str, ino: u32, typ: u16, size: u32, mode: u16, uid: u16| {
+        if long {
+            let mut pb = [0u8; 11];
+            crate::auth::mode_str(mode, typ, &mut pb);
+            let perms = core::str::from_utf8(&pb[..10]).unwrap_or("----------");
+            let owner = crate::auth::name_of_uid(uid);
+            println!("  {}  {:>6}  {:<8}  {}", perms, size, owner, name);
+        } else {
+            let kind = if typ == crate::afs::T_DIR { "dir " } else { "file" };
+            println!("  {}  {:>5}  {:>4}  {}", kind, size, ino, name);
+        }
         n += 1;
     });
     match r {
@@ -947,9 +961,126 @@ pub fn run() -> ! {
                     println!("  {} ({},{}) {}x{} open={}", n, x, y, w, h, o);
                 }
             }
+            "whoami" | "id" => {
+                let uid = crate::auth::current_uid();
+                println!(
+                    "  {}  uid={} gid={}  权限{}",
+                    crate::auth::current_name(),
+                    uid,
+                    uid,
+                    if uid == 0 {
+                        "（root，全通）"
+                    } else {
+                        "（非 root：看 owner 位，别人看 other 位）"
+                    }
+                );
+                if unsafe { EXTREME } {
+                    println!("  EXTREME 已解锁：root 可 su");
+                }
+            }
+            "users" => {
+                println!("  用户表 {} 个（* 当前）", crate::auth::count());
+                for i in 0..crate::auth::count() {
+                    let (name, uid) = crate::auth::user(i);
+                    let me = if crate::auth::current_uid() == uid { "*" } else { " " };
+                    println!("  {} {:<8} uid={}", me, name, uid);
+                }
+            }
+            "su" => println!("  用法: su <root|aster|guest|名字>（切 root 需先 ex）"),
+            "useradd" => println!("  用法: useradd <名字>（需要 root 或 EXTREME）"),
+            "chmod" => println!("  用法: chmod <八进制> <文件>   例: chmod 640 note.txt"),
+            "chown" => println!("  用法: chown <用户|uid> <文件>"),
             "fmt" => cmd_fmt(),
             "mkfs" => cmd_mkfs(),
-            "ls" => cmd_ls(),
+            "ls" => cmd_ls(""),
+            l if l.starts_with("stat ") => {
+                let name = l[5..].trim();
+                match crate::afs::raw_inode(name) {
+                    Some(f) => println!(
+                        "  {} ino={} typ={} size={} mode={:o} uid={} parent={} blk0={}",
+                        name, f.ino, f.typ, f.size, f.mode, f.uid, f.parent, f.blocks[0]
+                    ),
+                    None => println!("  读不到 {} 的 inode", name),
+                }
+            }
+            l if l.starts_with("su ") => {
+                let name = l[3..].trim();
+                match crate::auth::su(name) {
+                    Ok(uid) => println!("  → {} (uid {})", name, uid),
+                    Err(e) => println!("  {}", e),
+                }
+            }
+            l if l.starts_with("useradd ") => {
+                let name = l[8..].trim();
+                match crate::auth::add(name) {
+                    Ok(uid) => println!("  已加用户 {} (uid {})", name, uid),
+                    Err(e) => println!("  {}", e),
+                }
+            }
+            l if l.starts_with("chmod ") => {
+                let rest = l[6..].trim();
+                let (m, name) = match rest.split_once(' ') {
+                    Some(x) => (x.0.trim(), x.1.trim()),
+                    None => ("", ""),
+                };
+                let mode = match u16::from_str_radix(m, 8) {
+                    Ok(x) if x <= 0o777 => x,
+                    _ => {
+                        println!("  用法: chmod <八进制> <文件>（0..777）");
+                        continue;
+                    }
+                };
+                if name.is_empty() {
+                    println!("  用法: chmod <八进制> <文件>");
+                    continue;
+                }
+                let (old_mode, owner) = match crate::afs::meta(name) {
+                    Some(x) => x,
+                    None => {
+                        println!("  磁盘上没有 {}（先 fmt/mkfs？）", name);
+                        continue;
+                    }
+                };
+                if !crate::auth::can(old_mode, owner, crate::auth::W_WRITE) && !unsafe { EXTREME } {
+                    println!("  没有权限改 {} 的权限位（owner 不是你）", name);
+                    continue;
+                }
+                match crate::afs::set_meta(name, Some(mode), None) {
+                    Ok((m2, _)) => {
+                        let mut pb = [0u8; 11];
+                        crate::auth::mode_str(m2, 1, &mut pb);
+                        println!("  {} → {}", name, core::str::from_utf8(&pb[..10]).unwrap_or(""));
+                    }
+                    Err(e) => println!("  {}", e),
+                }
+            }
+            l if l.starts_with("chown ") => {
+                let rest = l[6..].trim();
+                let (who, name) = match rest.split_once(' ') {
+                    Some(x) => (x.0.trim(), x.1.trim()),
+                    None => ("", ""),
+                };
+                if who.is_empty() || name.is_empty() {
+                    println!("  用法: chown <用户|uid> <文件>");
+                    continue;
+                }
+                if !crate::auth::is_root() && !unsafe { EXTREME } {
+                    println!("  chown 需要 root 或 EXTREME");
+                    continue;
+                }
+                let uid = match crate::auth::uid_of(who) {
+                    Some(u) => u,
+                    None => {
+                        println!("  没有这个用户/uid: {}", who);
+                        continue;
+                    }
+                };
+                match crate::afs::set_meta(name, None, Some(uid)) {
+                    Ok((_, u2)) => println!("  {} → owner uid {}", name, u2),
+                    Err(e) => println!("  {}", e),
+                }
+            }
+            l if l == "ls -l" || l.starts_with("ls -l") => cmd_ls("-l"),
             "cat" => cmd_cat(""),
             "wr" => cmd_wr(""),
             "df" => cmd_df(),

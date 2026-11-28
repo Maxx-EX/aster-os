@@ -36,6 +36,9 @@ unsafe impl Sync for Cell {}
 
 static CELL: Cell = Cell(core::cell::UnsafeCell::new([0; BS]));
 static CELL2: Cell = Cell(core::cell::UnsafeCell::new([0; BS]));
+/// inode_read / inode_write 专用：它们会嵌在目录遍历里调用，
+/// 跟目录块共用一张 CELL 时，`&mut` 别名会让编译器把读回当成旧值。
+static CELL3: Cell = Cell(core::cell::UnsafeCell::new([0; BS]));
 
 fn buf() -> &'static mut [u8; BS] {
     unsafe { &mut *CELL.0.get() }
@@ -45,10 +48,16 @@ fn buf2() -> &'static mut [u8; BS] {
     unsafe { &mut *CELL2.0.get() }
 }
 
+fn buf3() -> &'static mut [u8; BS] {
+    unsafe { &mut *CELL3.0.get() }
+}
+
 #[derive(Clone, Copy)]
 pub struct Inode {
     pub ino: u32,
     pub typ: u16,
+    pub mode: u16,
+    pub uid: u16,
     pub size: u32,
     pub parent: u32,
     pub mtime: u32,
@@ -182,7 +191,7 @@ fn inode_at(ino: u32) -> Option<(u32, usize)> {
 
 pub fn inode_read(ino: u32) -> Option<Inode> {
     let (blk_no, off) = inode_at(ino)?;
-    let x = buf();
+    let x = buf3();
     if !rd(blk_no, x) {
         return None;
     }
@@ -197,6 +206,8 @@ pub fn inode_read(ino: u32) -> Option<Inode> {
     Some(Inode {
         ino,
         typ,
+        mode: get_u16(x, off + 2),
+        uid: get_u16(x, off + 56),
         size: get_u32(x, off + 4),
         parent: get_u32(x, off + 8),
         mtime: get_u32(x, off + 12),
@@ -209,19 +220,20 @@ fn inode_write(f: &Inode) -> bool {
         Some(x) => x,
         None => return false,
     };
-    let x = buf();
+    let x = buf3();
     if !rd(blk_no, x) {
         return false;
     }
     put_u16(x, off, f.typ);
-    put_u16(x, off + 2, 0);
+    put_u16(x, off + 2, f.mode);
+    put_u16(x, off + 56, f.uid);
     put_u32(x, off + 4, f.size);
     put_u32(x, off + 8, f.parent);
     put_u32(x, off + 12, f.mtime);
     for i in 0..NDIRECT {
         put_u32(x, off + 16 + i * 4, f.blocks[i]);
     }
-    for i in (off + 56)..(off + 64) {
+    for i in (off + 58)..(off + 64) {
         x[i] = 0;
     }
     wr(blk_no, &*x)
@@ -380,7 +392,45 @@ pub fn inode_size(ino: u32) -> u32 {
     }
 }
 
-pub fn list(cb: &mut dyn FnMut(&str, u32, u16, u32)) -> Result<(), &'static str> {
+/// 读一行的 (mode, uid)
+pub fn meta(name: &str) -> Option<(u16, u16)> {
+    let sup = super_block()?;
+    let root = inode_read(sup.root)?;
+    let ino = dir_find(&root, name)?;
+    let f = inode_read(ino)?;
+    Some((if f.mode == 0 { 0o644 } else { f.mode }, f.uid))
+}
+
+pub fn set_meta(name: &str, mode: Option<u16>, uid: Option<u16>) -> Result<(u16, u16), &'static str> {
+    let sup = super_block().ok_or("磁盘未格式化（先 mkfs）")?;
+    let root = inode_read(sup.root).ok_or("根 inode 损坏")?;
+    let ino = dir_find(&root, name).ok_or("没有这个文件")?;
+    let mut f = inode_read(ino).ok_or("文件 inode 损坏")?;
+    if f.typ != T_FILE {
+        return Err("不是普通文件");
+    }
+    if let Some(m) = mode {
+        f.mode = m & 0o777;
+    }
+    if let Some(u) = uid {
+        f.uid = u;
+    }
+    if !inode_write(&f) {
+        return Err("写 inode 失败");
+    }
+    Ok((f.mode, f.uid))
+}
+
+/// 调试用：把 inode 原始字段吐出来
+pub fn raw_inode(name: &str) -> Option<Inode> {
+    let sup = super_block()?;
+    let root = inode_read(sup.root)?;
+    let ino = dir_find(&root, name)?;
+    let f = inode_read(ino)?;
+    Some(f)
+}
+
+pub fn list(cb: &mut dyn FnMut(&str, u32, u16, u32, u16, u16)) -> Result<(), &'static str> {
     let sup = match super_block() {
         Some(s) => s,
         None => return Err("磁盘未格式化（先 mkfs）"),
@@ -406,6 +456,9 @@ pub fn list(cb: &mut dyn FnMut(&str, u32, u16, u32)) -> Result<(), &'static str>
         if !rd(d.blocks[bi], x) {
             return Err("读目录块失败");
         }
+        // 拷一份：inode_read / inode_size 会复用同一块 CELL，直接拿 &x 会被后面的读覆盖
+        let mut blk = [0u8; BS];
+        blk.copy_from_slice(x);
         for s in 0..per {
             if done >= nents {
                 break;
@@ -413,9 +466,16 @@ pub fn list(cb: &mut dyn FnMut(&str, u32, u16, u32)) -> Result<(), &'static str>
             let o = s * ENT;
             let ino = get_u32(x, o + 24);
             if ino != 0 {
-                let typ = get_u16(x, o + 28);
-                let size = inode_size(ino);
-                cb(ent_name(&x[o..o + NAME_MAX]), ino, typ, size);
+                // 名字先拷出来：inode_read 会复用同一块 CELL 缓冲，直接传 &x.. 会被覆盖成空名
+                let mut nm = [0u8; NAME_MAX];
+                nm.copy_from_slice(&blk[o..o + NAME_MAX]);
+                let typ = get_u16(&blk, o + 28);
+                // 先拷名字、再读一次 inode，最后才回调：回调里不要再碰 inode_*（会互相覆盖 CELL）
+                let (size, m, u) = match inode_read(ino) {
+                    Some(f) => (f.size, if f.mode == 0 { 0o644 } else { f.mode }, f.uid),
+                    None => (0, 0o644, 1000),
+                };
+                cb(ent_name(&nm), ino, typ, size, m, u);
             }
             done += 1;
         }
@@ -430,6 +490,10 @@ pub fn read_file(name: &str, out: &mut [u8]) -> Result<usize, &'static str> {
     let f = inode_read(ino).ok_or("文件 inode 损坏")?;
     if f.typ != T_FILE {
         return Err("不是普通文件");
+    }
+    let m = if f.mode == 0 { 0o644 } else { f.mode };
+    if !crate::auth::can(m, f.uid, crate::auth::W_READ) {
+        return Err("没有读权限（owner 不是你）");
     }
     let mut got = 0usize;
     let x = buf();
@@ -459,6 +523,10 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<usize, &'static str> {
             if old.typ != T_FILE {
                 return Err("同名的不是普通文件");
             }
+            let m = if old.mode == 0 { 0o644 } else { old.mode };
+            if !crate::auth::can(m, old.uid, crate::auth::W_WRITE) {
+                return Err("没有写权限（这个文件不是你的）");
+            }
             for i in 0..NDIRECT {
                 if old.blocks[i] != 0 {
                     block_free(old.blocks[i]);
@@ -467,6 +535,8 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<usize, &'static str> {
             Inode {
                 ino,
                 typ: T_FILE,
+                mode: if old.mode == 0 { 0o644 } else { old.mode },
+                uid: if old.uid == 0 { crate::auth::current_uid() } else { old.uid },
                 size: 0,
                 parent: sup.root,
                 mtime: 0,
@@ -476,6 +546,8 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<usize, &'static str> {
         None => Inode {
             ino: inode_alloc().ok_or("没有空闲 inode")?,
             typ: T_FILE,
+            mode: 0o644,
+            uid: crate::auth::current_uid(),
             size: 0,
             parent: sup.root,
             mtime: 0,

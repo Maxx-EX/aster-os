@@ -28,7 +28,108 @@ fn row_h(kind: u8) -> u32 {
         2 => 26,
         7 => 18,
         8 => 10,
+        9 => {
+            let ih = crate::img::height();
+            if ih > 0 {
+                ih + 14
+            } else {
+                21
+            }
+        }
         _ => 21,
+    }
+}
+
+/// 一行的 href（img 行里存的是 src）转成 UTF-8
+fn line_href<'a>(l: &'a html::Line) -> &'a str {
+    let mut n = 0usize;
+    while n < 72 && l.href[n] != 0 {
+        n += 1;
+    }
+    core::str::from_utf8(&l.href[..n]).unwrap_or("")
+}
+
+/// 内置图：按文件名从 assets 里挑（只有一张 logo，够演示）
+fn builtin_img(name: &str) -> Option<&'static [u8]> {
+    if name.ends_with("logo.png") {
+        Some(include_bytes!("../../assets/web/logo.png"))
+    } else {
+        None
+    }
+}
+
+/// 走网络取一张图：http://ip:port/path → body 字节
+fn http_img(name: &str) -> Option<&'static [u8]> {
+    let rest = name.strip_prefix("http://")?;
+    let colon = rest.find(':')?;
+    let ip_s = &rest[..colon];
+    let after = &rest[colon + 1..];
+    let slash = after.find('/').unwrap_or(after.len());
+    let port_s = &after[..slash];
+    let path = if slash < after.len() { &after[slash..] } else { "/" };
+    let mut ip = [0u8; 4];
+    let mut part = 0usize;
+    let mut acc = 0u32;
+    let mut digits = 0u32;
+    for c in ip_s.bytes() {
+        if c == b'.' {
+            if part >= 4 {
+                return None;
+            }
+            ip[part] = acc as u8;
+            part += 1;
+            acc = 0;
+            digits = 0;
+        } else if c.is_ascii_digit() {
+            acc = acc * 10 + (c - b'0') as u32;
+            digits += 1;
+        } else {
+            return None;
+        }
+    }
+    if part != 3 || digits == 0 {
+        return None;
+    }
+    ip[3] = acc as u8;
+    let port: u16 = port_s.parse().ok()?;
+    if crate::net::http_get(ip, port, path, 3000) < 0 {
+        return None;
+    }
+    let raw = crate::net::cli_data();
+    let mut i = 0usize;
+    while i + 3 < raw.len() {
+        if raw[i] == b'\r' && raw[i + 1] == b'\n' && raw[i + 2] == b'\r' && raw[i + 3] == b'\n' {
+            return Some(&raw[i + 4..]);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 页面里第一张图去取一下（本地/网络都走这里）
+fn load_images() {
+    let n = html::count();
+    for i in 0..n {
+        let l = html::get(i);
+        if l.kind != 9 || l.href[0] == 0 {
+            continue;
+        }
+        let name = line_href(&l);
+        if crate::img::is_loaded(name) {
+            return;
+        }
+        crate::img::clear();
+        let data = if name.starts_with("aster://") {
+            builtin_img(name)
+        } else if name.starts_with("http://") {
+            http_img(name)
+        } else {
+            None
+        };
+        if let Some(d) = data {
+            let _ = crate::img::load(name, d);
+        }
+        return;
     }
 }
 
@@ -121,6 +222,7 @@ pub fn scroll_pos() -> i32 {
 
 pub fn open_home() {
     html::parse(HOME, HOME_URL);
+    load_images();
     relayout();
     set_url("aster://home");
     set_title_from_doc();
@@ -244,6 +346,7 @@ pub fn open_addr(addr: &str) -> bool {
         i += 1;
     }
     html::parse(body, "http://10.0.2.2");
+    load_images();
     relayout();
     set_url(addr);
     set_title_from_doc();
@@ -359,6 +462,17 @@ pub fn draw(x: u32, y: u32, w: u32, h: u32) {
             }
             7 => {
                 fb::fill_rect(x + 16, yy as u32 + 6, w - 40, 1, 0x333941);
+            }
+            9 => {
+                let name = line_href(&l);
+                if crate::img::is_loaded(name) && crate::img::height() > 0 {
+                    crate::img::draw(lx, yy as u32 + 4, lw, 320);
+                } else {
+                    let mut b = [0u8; 256];
+                    let k = line_utf8(&l, &mut b);
+                    let s2 = core::str::from_utf8(&b[..k]).unwrap_or("");
+                    fb::draw_text(lx, yy as u32 + 2, s2, fb::DIM, 1);
+                }
             }
             _ => {
                 let mut b = [0u8; 256];

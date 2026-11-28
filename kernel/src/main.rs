@@ -40,6 +40,8 @@ pub static UPD_DEMO: &[u8] = include_bytes!("../../assets/upd/update.aup");
 mod net;
 mod pkgidx;
 mod html;
+mod auth;
+mod img;
 mod web;
 mod rtc;
 mod sched;
@@ -256,6 +258,7 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
     let tag = ex3::EX3_TAG;
     fb::cache_wall(&tag[tag.len().saturating_sub(8)..]);
     shell::render_dashboard();
+    crate::auth::init();
     shell::run()
 }
 
