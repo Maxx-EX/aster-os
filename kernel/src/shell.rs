@@ -61,6 +61,36 @@ fn read_line(buf: &mut [u8]) -> usize {
             core::hint::spin_loop();
         }
         match c {
+            // 0x90 上一条 / 0x91 下一条（软键盘 UP/DN，PC 端复用伪键，避开真键码）
+            0x90 | 0x91 => {
+                unsafe {
+                    // HIST_AT = 1..=HIST_N 表示"正显示第几条"，HIST_N 表示"新的空行"
+                    let want = if c == 0x91 {
+                        if HIST_AT < HIST_N { HIST_AT + 1 } else { HIST_AT }
+                    } else if HIST_AT > 0 {
+                        HIST_AT - 1
+                    } else {
+                        0
+                    };
+                    HIST_AT = want;
+                    for _ in 0..n {
+                        crate::print!("\u{8} \u{8}");
+                    }
+                    n = 0;
+                    if HIST_AT > 0 {
+                        let src = HIST[(HIST_AT - 1) % HIST_MAX];
+                        let mut len = 0;
+                        while len < HIST_LEN && src[len] != 0 {
+                            len += 1;
+                        }
+                        for k in 0..len.min(buf.len() - 1) {
+                            buf[k] = src[k];
+                            crate::print!("{}", src[k] as char);
+                            n = k + 1;
+                        }
+                    }
+                }
+            }
             b'\r' | b'\n' => {
                 crate::print!("\n");
                 return n;
@@ -82,6 +112,13 @@ fn read_line(buf: &mut [u8]) -> usize {
 
 
 static mut EXTREME: bool = false;
+
+/// 命令行历史（手机端软键盘有 UP/DN 键，PC 端也复用：↑ = 0x90、↓ = 0x91 伪键）
+const HIST_MAX: usize = 8;
+const HIST_LEN: usize = 64;
+static mut HIST: [[u8; HIST_LEN]; HIST_MAX] = [[0; HIST_LEN]; HIST_MAX];
+static mut HIST_N: usize = 0;
+static mut HIST_AT: usize = 0;
 /// Device Lock：默认锁定。锁定状态下任何"动底层"的命令都不执行，
 /// 即使进了 Extreme —— 两道锁各管一层：Extreme 管"要不要放开权限"，
 /// DL 管"这台设备现在准不准动固件/内存/磁盘"。
@@ -699,6 +736,22 @@ pub fn run() -> ! {
         }
         let line = core::str::from_utf8(&buf[..n]).unwrap_or("").trim();
         crate::bootanim::set_hold(false);
+        unsafe {
+            if !line.is_empty() {
+                let at = HIST_N % HIST_MAX;
+                let mut k = 0;
+                for b in line.as_bytes() {
+                    if k + 1 >= HIST_LEN {
+                        break;
+                    }
+                    HIST[at][k] = *b;
+                    k += 1;
+                }
+                HIST[at][k] = 0;
+                HIST_N += 1;
+                HIST_AT = HIST_N;
+            }
+        }
 
         if line == "ex" || line == "ex on" {
             unsafe { EXTREME = true };

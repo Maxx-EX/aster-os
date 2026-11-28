@@ -7,17 +7,31 @@
 use crate::fb;
 
 const PANEL_W: u32 = 500;
-const PANEL_H: u32 = 244;
+const PANEL_H: u32 = 270;
 const KEY_W: u32 = 42;
 const KEY_H: u32 = 34;
 const GAP: u32 = 4;
-const ROWS_Y0: u32 = 34;
+const CHIP_Y: u32 = 26;
+const CHIP_H: u32 = 24;
+const ROWS_Y0: u32 = 58;
+
+/// 一键命令：手机上敲 "dex big" 要点八次，这些 chip 点一下就跑
+pub const CHIPS: &[&str] = &["help", "info", "dex run", "dex big", "apk", "wins", "clear"];
+
+/// 命中结果：普通字符 / 一键命令
+pub enum Key {
+    Ch(u8),
+    Chip(usize),
+}
 
 /// 特殊键的哨兵值（不会和 ASCII 冲突）
 pub const K_BACKSPACE: u8 = 0xF7;
 pub const K_ENTER: u8 = 0xF6;
 pub const K_SPACE: u8 = 0xF5;
 pub const K_CLOSE: u8 = 0xF4;
+/// 历史翻页（read_line 认这两个伪键）
+pub const K_UP: u8 = 0x90;
+pub const K_DOWN: u8 = 0x91;
 
 static mut OPEN: bool = false;
 /// 每行：字符 + 显示文本。长度不齐的行各自缩进居中。
@@ -38,8 +52,7 @@ const ROW3: &[(u8, &str)] = &[
     (b'n', "n"), (b'm', "m"), (K_BACKSPACE, "DEL"),
 ];
 const ROW4: &[(u8, &str)] = &[
-    (K_SPACE, "SPACE"), (K_ENTER, "ENTER"), (b'-', "-"), (b'_', "_"),
-    (b'/', "/"), (K_CLOSE, "HIDE"),
+    (K_UP, "UP"), (K_DOWN, "DN"), (K_SPACE, "SPACE"), (K_ENTER, "ENTER"), (K_CLOSE, "HIDE"),
 ];
 
 pub fn open() -> bool {
@@ -95,7 +108,22 @@ fn rows() -> [&'static [(u8, &'static str)]; 5] {
 }
 
 /// 命中测试：返回被点的键值
-pub fn hit(mx: i32, my: i32) -> Option<u8> {
+fn chip_rect(idx: usize) -> (u32, u32, u32) {
+    let (px, py) = panel_pos();
+    let total: u32 = CHIPS.iter().map(|c| chip_w(c)).sum::<u32>() + 4 * CHIPS.len() as u32 - 4;
+    let x0 = px + (PANEL_W.saturating_sub(total)) / 2;
+    let mut x = x0;
+    for c in CHIPS.iter().take(idx) {
+        x += chip_w(c) + 4;
+    }
+    (x, py + CHIP_Y, chip_w(CHIPS[idx]))
+}
+
+fn chip_w(label: &str) -> u32 {
+    fb::text_len_ui(label) + 16
+}
+
+pub fn hit(mx: i32, my: i32) -> Option<Key> {
     if !open() {
         return None;
     }
@@ -104,6 +132,15 @@ pub fn hit(mx: i32, my: i32) -> Option<u8> {
         || mx > (px + PANEL_W) as i32 || my > (py + PANEL_H) as i32
     {
         return None;
+    }
+    // 顶部 chip 行
+    for i in 0..CHIPS.len() {
+        let (x, y, w) = chip_rect(i);
+        if mx >= x as i32 && mx <= (x + w) as i32
+            && my >= y as i32 && my <= (y + CHIP_H) as i32
+        {
+            return Some(Key::Chip(i));
+        }
     }
     let r = rows();
     for (i, row) in r.iter().enumerate() {
@@ -114,7 +151,7 @@ pub fn hit(mx: i32, my: i32) -> Option<u8> {
         for j in 0..row.len() {
             let (x, _, w) = key_rect(i, j, row);
             if mx >= x as i32 && mx <= (x + w) as i32 {
-                return Some(row[j].0);
+                return Some(Key::Ch(row[j].0));
             }
         }
     }
@@ -130,6 +167,13 @@ pub fn draw_if_open() {
     fb::rounded_rect_alpha(px as i32 - 6, py as i32 - 6, PANEL_W + 12, PANEL_H + 12, 12, 0x1a1d22, 232);
     fb::rounded_rect(px as i32, py as i32, PANEL_W, PANEL_H, 10, 0x232830);
     fb::frame_rect(px, py, PANEL_W, PANEL_H, 0x3a3f47);
+    for i in 0..CHIPS.len() {
+        let (x, y, w) = chip_rect(i);
+        fb::rounded_rect(x as i32, y as i32, w, CHIP_H, 5, 0x2b3542);
+        fb::frame_rect(x, y, w, CHIP_H, 0x3d4a5c);
+        let tw = fb::text_len_ui(CHIPS[i]);
+        fb::draw_text_ui(x + (w - tw) / 2, y + 4, CHIPS[i], 0x8fb6f0);
+    }
     fb::draw_text_ui(px + 12, py + 9, "TOUCH KEYBOARD", 0x9aa1a9);
     fb::draw_text_ui(px + PANEL_W - 58, py + 9, "ASCII", 0x6a7179);
 

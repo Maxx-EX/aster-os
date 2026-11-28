@@ -85,10 +85,19 @@ fn handle_mouse() -> bool {
         if let Some(k) = crate::kb::hit(x, y) {
             if pressed {
                 match k {
-                    crate::kb::K_CLOSE => crate::kb::set_open(false),
-                    crate::kb::K_BACKSPACE => input::push_char(0x7F),
-                    crate::kb::K_ENTER => input::push_char(b'\r'),
-                    _ => input::push_char(k),
+                    crate::kb::Key::Chip(idx) => {
+                        // 一键命令：整串塞进字符环，末尾补回车 → 下一拍 read_line 直接执行
+                        for b in crate::kb::CHIPS[idx].as_bytes() {
+                            input::push_char(*b);
+                        }
+                        input::push_char(b'\r');
+                    }
+                    crate::kb::Key::Ch(k) => match k {
+                        crate::kb::K_CLOSE => crate::kb::set_open(false),
+                        crate::kb::K_BACKSPACE => input::push_char(0x7F),
+                        crate::kb::K_ENTER => input::push_char(b'\r'),
+                        _ => input::push_char(k),
+                    },
                 }
                 want = true;
             }
