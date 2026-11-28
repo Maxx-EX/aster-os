@@ -619,6 +619,11 @@ fn cmd_help() {
     println!("  sched     任务调度统计");
     println!("  gfx       重绘图形界面（ramfb / VNC 远程可见）");
     println!("  net       网络状态（virtio-net / IP / 收发计数）");
+    println!("  wifi      无线网现状（无 802.11 硬件，WIFI-1 未开工）");
+    println!("  date      当前时间（固定 Asia/Shanghai）");
+    println!("  tz        时区详情（UTC+8 / 无夏令时）");
+    println!("  pkg       包管理：list | info <名> | install <名> | remove <名>");
+    println!("  perf      绘制耗时（整桌 / 壁纸 / 侧栏 / 窗口 / 帧）");
     println!("  uptime    运行时长");
     println!("  mem       内存布局");
     println!("  disk      磁盘信息（virtio-blk + AsterDisk 头/分区表）");
