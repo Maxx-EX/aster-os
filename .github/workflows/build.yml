@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust 工具链 + bare-metal target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-none
+
+      - name: 交叉编译器 + QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu qemu-system-arm
+
+      - name: 编内核 + 引导器
+        run: make image
+
+      - name: 自检（28 项）
+        run: make test
+
+      - name: 产物
+        run: |
+          ls -lh build/aster-boot.elf build/aster-kernel.ast
+          python3 - <<'PY'
+          import re
+          log = open('build/test.log').read()
+          print('PASS', log.count('[TEST] PASS'), 'FAIL', log.count('[TEST] FAIL'))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aster-boot-elf
+          path: |
+            build/aster-boot.elf
+            build/aster-kernel.ast
+            build/test.log
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-${{ github.run_number }}
+          name: Aster 云端构建 #${{ github.run_number }}
+          body: |
+            由 GitHub Actions 在 ubuntu-latest 上编译。
+            ARM64 裸机 ELF：`qemu-system-aarch64 -M virt -cpu cortex-a72 -m 512M -nographic -kernel aster-boot.elf`
+          files: |
+            build/aster-boot.elf
+            build/aster-kernel.ast
