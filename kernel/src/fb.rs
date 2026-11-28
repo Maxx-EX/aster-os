@@ -31,6 +31,33 @@ pub struct Fb {
 }
 
 static mut FB: Option<Fb> = None;
+/// 双缓冲：绘制全写 BACK_PA（普通 RAM，快），present 时一次性推给真实帧缓冲。
+/// GPU 模式下 resource 直接挂在 BACK_PA 上，连 memcpy 都省了；ramfb 模式下必须
+/// 拷到 REAL_PA（QEMU 采样的那块），否则画到一半就被采样。
+static mut BACK_PA: u64 = 0;
+static mut REAL_PA: u64 = 0;
+static mut GPU_MODE: bool = false;
+
+fn alloc_back(real: u64) -> u64 {
+    let npages = ((FB_W * FB_H * 4) as usize).div_ceil(4096);
+    match crate::frame::alloc_pages(npages) {
+        Some(p) => {
+            unsafe {
+                BACK_PA = p;
+                REAL_PA = real;
+            }
+            p
+        }
+        None => {
+            // 池子不够就退化成单缓冲（还是能跑，只是又回到撕裂的老路）
+            unsafe {
+                BACK_PA = 0;
+                REAL_PA = real;
+            }
+            real
+        }
+    }
+}
 
 // ---------------- fw_cfg 字节流 ----------------
 
@@ -218,15 +245,18 @@ fn find_file(name: &[u8]) -> Option<u16> {
 
 #[cfg(not(any(feature = "rpi3", feature = "rpi4")))]
 pub fn init() -> bool {
-    // 先试 virtio-gpu：有它就走 GPU 呈现，帧是原子的，不会画到一半被采样
-    if crate::virtio_gpu::init(FB_PHYS, FB_W, FB_H) {
+    // 先要一块后台缓冲：绘制写它，present 一次推上去
+    let draw_base = alloc_back(FB_PHYS);
+    // 再试 virtio-gpu：有它就走 GPU 呈现，帧是原子的，不会画到一半被采样
+    if crate::virtio_gpu::init(draw_base, FB_W, FB_H) {
         unsafe {
-            FB = Some(Fb { w: FB_W, h: FB_H, stride: FB_W * 4, base: FB_PHYS });
+            GPU_MODE = true;
+            FB = Some(Fb { w: FB_W, h: FB_H, stride: FB_W * 4, base: draw_base });
         }
         clear(0x0B1119);
         crate::println!(
-            "[FB] virtio-gpu 2D 已接管：{}x{}  resource #1  @{:#x}（合成后 flush 才上屏）",
-            FB_W, FB_H, FB_PHYS
+            "[FB] virtio-gpu 2D 已接管：{}x{}  双缓冲 @{:#x}（画满一帧才 flush）",
+            FB_W, FB_H, draw_base
         );
         return true;
     }
@@ -250,7 +280,7 @@ pub fn init() -> bool {
     let stride = FB_W * 4;
     // fw_cfg 的写回调给到设备的 val 按大端解释，所以结构体字段要按大端排布
     let mut cfg = [0u8; 32];
-    cfg[0..8].copy_from_slice(&FB_PHYS.to_be_bytes());
+    cfg[0..8].copy_from_slice(&draw_base.to_be_bytes());
     cfg[8..12].copy_from_slice(&FOURCC_XRGB8888.to_be_bytes());
     cfg[12..16].copy_from_slice(&0u32.to_be_bytes());
     cfg[16..20].copy_from_slice(&FB_W.to_be_bytes());
@@ -263,9 +293,10 @@ pub fn init() -> bool {
     }
 
     unsafe {
-        FB = Some(Fb { w: FB_W, h: FB_H, stride, base: FB_PHYS });
+        FB = Some(Fb { w: FB_W, h: FB_H, stride, base: draw_base });
     }
     clear(0x0B1119);
+    crate::println!("[FB] ramfb 模式：绘制在 {:#x}，每帧 memcpy 到 {:#x} 再让 QEMU 采", draw_base, FB_PHYS);
     true
 }
 
@@ -277,13 +308,14 @@ pub fn init() -> bool {
         Some(v) => v,
         None => return false,
     };
+    let draw_base = alloc_back(addr);
     unsafe {
-        FB = Some(Fb { w, h, stride, base: addr });
+        FB = Some(Fb { w, h, stride, base: draw_base });
     }
     clear(0x0014_1619);
     crate::println!(
-        "[FB] mailbox 拿到 framebuffer：{:#x}  {}x{}  stride {}  自检读回 {:#x}",
-        addr, w, h, stride, read_px(w / 2, h / 2)
+        "[FB] mailbox 拿到 framebuffer：{:#x}  {}x{}  stride {}  后台缓冲 {:#x}",
+        addr, w, h, stride, draw_base
     );
     true
 }
@@ -291,6 +323,14 @@ pub fn init() -> bool {
 /// 把当前帧推上屏幕。ramfb 由 QEMU 自己采样，这里是空操作；
 /// virtio-gpu 需要显式 transfer + flush，也正因为如此帧才完整。
 pub fn present() {
+    unsafe {
+        // GPU 模式：resource 就挂在 BACK_PA 上，transfer 直接读它，不用拷
+        // ramfb / mailbox：必须整帧 memcpy 到真实帧缓冲，否则 QEMU/VideoCore 采到半帧
+        if !GPU_MODE && BACK_PA != 0 && REAL_PA != 0 && BACK_PA != REAL_PA {
+            let n = (FB_W * FB_H * 4) as usize;
+            core::ptr::copy_nonoverlapping(BACK_PA as *const u8, REAL_PA as *mut u8, n);
+        }
+    }
     crate::virtio_gpu::present();
 }
 
@@ -1148,9 +1188,9 @@ pub fn cache_wall(ex3_short: &str) {
     draw_text_ui(W - text_len_ui(ex3_short) - 16, 11, ex3_short, OK);
 
     // 底栏 dock：半透明圆角条，只画底板，内容留给动态层
-    rounded_rect_alpha(16, DOCK_Y as i32, 300, DOCK_H, 14, 0x0c0e12, 238);
-    rounded_rect_alpha(16, DOCK_Y as i32, 300, DOCK_H, 14, 0xffffff, 16);
-    fill_rect(26, DOCK_Y + 1, 280, 1, 0x3d424a);
+    rounded_rect_alpha(16, DOCK_Y as i32, 360, DOCK_H, 14, 0x0c0e12, 238);
+    rounded_rect_alpha(16, DOCK_Y as i32, 360, DOCK_H, 14, 0xffffff, 16);
+    fill_rect(26, DOCK_Y + 1, 340, 1, 0x3d424a);
 
     // 开始按钮
     circle(40, (DOCK_Y + 23) as i32, 11, ACCENT, 58);
@@ -1158,9 +1198,7 @@ pub fn cache_wall(ex3_short: &str) {
     draw_text_ui(60, DOCK_Y + 15, "开始", TEXT2);
     fill_rect(104, DOCK_Y + 12, 1, 22, 0x2a2e35);
 
-    // 终端项
-    draw_icon(118, DOCK_Y + 10, 0, 22, ACCENT, 235);
-    draw_text_ui(146, DOCK_Y + 15, "终端", TEXT);
+    // 窗口格子由 draw_dock_items() 每帧画（打开/最小化状态会变）
 
     set_base(saved);
 }
@@ -1276,6 +1314,67 @@ pub fn raise(i: usize) {
 
 static mut SAVED: [(i32, i32, u32, u32); NWIN] = [(0, 0, 0, 0); NWIN];
 static mut MAXED: [bool; NWIN] = [false; NWIN];
+/// 最小化：窗口从桌面消失，但还"活着"——dock 上占一个格子，点一下回来。
+/// 和关闭的区别就在这里：关闭 = 状态清空，要重新打开得点侧栏图标。
+static mut MINED: [bool; NWIN] = [false; NWIN];
+
+/// 0 = 已关闭 / 1 = 在桌面 / 2 = 最小化进 dock
+pub fn win_state(i: usize) -> u8 {
+    unsafe {
+        if WINS[i].open {
+            1
+        } else if MINED[i] {
+            2
+        } else {
+            0
+        }
+    }
+}
+
+/// dock 上的三个格子：终端 / 系统 / 网络
+const DOCK_CHIP_X: u32 = 116;
+const DOCK_CHIP_W: u32 = 72;
+const DOCK_CHIP_GAP: u32 = 4;
+
+pub fn dock_hit(x: i32, y: i32) -> Option<usize> {
+    if y < DOCK_Y as i32 - 4 || y > (DOCK_Y + DOCK_H) as i32 + 4 {
+        return None;
+    }
+    for i in 0..3 {
+        let x0 = DOCK_CHIP_X + i as u32 * (DOCK_CHIP_W + DOCK_CHIP_GAP);
+        if x >= x0 as i32 && x <= (x0 + DOCK_CHIP_W) as i32 {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn draw_dock_items() {
+    for i in 0..3 {
+        let st = win_state(i);
+        if st == 0 {
+            continue;
+        }
+        let x0 = DOCK_CHIP_X + i as u32 * (DOCK_CHIP_W + DOCK_CHIP_GAP);
+        let y0 = DOCK_Y + 8;
+        let h = DOCK_H - 16;
+        let focused = unsafe { FOCUS } == i && st == 1;
+        if st == 2 {
+            rounded_rect(x0 as i32, y0 as i32, DOCK_CHIP_W, h, 8, 0x191c21);
+            frame_rect(x0, y0, DOCK_CHIP_W, h, 0x2b3038);
+        } else if focused {
+            rounded_rect(x0 as i32, y0 as i32, DOCK_CHIP_W, h, 8, 0x22304a);
+            frame_rect(x0, y0, DOCK_CHIP_W, h, ACCENT);
+        } else {
+            rounded_rect(x0 as i32, y0 as i32, DOCK_CHIP_W, h, 8, 0x2a2f37);
+            frame_rect(x0, y0, DOCK_CHIP_W, h, 0x3a3f47);
+        }
+        let t = ["终端", "系统", "网络"][i];
+        let tw = text_len_ui(t);
+        let fg = if st == 2 { DIM } else if focused { TEXT } else { TEXT2 };
+        draw_text_ui(x0 + (DOCK_CHIP_W - tw) / 2, y0 + (h - 16) / 2, t, fg);
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Btn {
@@ -1308,6 +1407,7 @@ pub fn title_button_at(i: usize, x: i32, y: i32) -> Option<Btn> {
 pub fn close_win(i: usize) {
     unsafe {
         WINS[i].open = false;
+        MINED[i] = false;
         MAXED[i] = false;
         let mut next = usize::MAX;
         for k in (0..NWIN).rev() {
@@ -1325,7 +1425,24 @@ pub fn close_win(i: usize) {
 
 /// 最小化等同收起：窗口留在 dock，点侧栏或 dock 再抬起来
 pub fn minimize_win(i: usize) {
-    close_win(i);
+    unsafe {
+        WINS[i].open = false;
+        MINED[i] = true;
+    }
+    // 焦点交给还在桌面上的最上层窗口
+    unsafe {
+        let mut next = usize::MAX;
+        for k in (0..NWIN).rev() {
+            let j = ZORD[k];
+            if j != i && WINS[j].open {
+                next = j;
+                break;
+            }
+        }
+        if next != usize::MAX {
+            FOCUS = next;
+        }
+    }
 }
 
 /// 最大化/还原：记住原几何，铺到桌面可用区（让出顶栏与 dock）
@@ -1334,10 +1451,11 @@ pub fn toggle_max(i: usize) {
         let w = WINS[i];
         if !MAXED[i] {
             SAVED[i] = (w.x, w.y, w.w, w.h);
-            WINS[i].x = 16;
-            WINS[i].y = 56;
-            WINS[i].w = W - 32;
-            WINS[i].h = H - 56 - 96;
+            // 让出左侧栏（不然最大化之后连侧栏都点不到）和底部 dock
+            WINS[i].x = 112;
+            WINS[i].y = 52;
+            WINS[i].w = W - 112 - 16;
+            WINS[i].h = H - 52 - 88;
             MAXED[i] = true;
         } else {
             let (x, y, ww, hh) = SAVED[i];
@@ -1411,6 +1529,7 @@ pub fn dump_wins() -> [(&'static str, i32, i32, u32, u32, bool); 3] {
 pub fn show_win(i: usize) {
     unsafe {
         WINS[i].open = true;
+        MINED[i] = false;
     }
     raise(i);
 }
@@ -1447,6 +1566,8 @@ pub fn draw_all_ex(shadow: bool) {
         LAST_MS = dt;
         MS_WIN = dt;
     }
+    // dock 上的窗口格子属于动态层（窗口开关状态每帧都可能变）
+    draw_dock_items();
 }
 
 fn draw_one(i: usize) {

@@ -368,3 +368,4 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - 每次提交前跑：`make test && make test-gfx && make test-net`
 - **UI-9 ✅ GPU 真实呈现（virtio-gpu 2D + 整帧 flush）、终端置顶、屏幕软键盘、标题栏热区放大、输入回显上屏**：ramfb 撕裂（闪/空白）、z 序（点不着）、`uart::putc` 回显（打不了字）三个根因逐个收掉；`make test` 28 PASS
 - **UI-10 ✅ 软键盘一键命令 chip + 历史键（UP/DN 伪键 0x90/0x91）**：手机上 `dex big` 从八次点击变成一次；`make test` 28 PASS
+- **UI-11 ✅ 窗口三态闭环（关闭/最小化/最大化 + dock 任务栏格子 + 侧栏开关）、双缓冲（GPU 零拷贝挂载 3 MiB 后台帧缓冲）**：关掉的窗口能重开，最小化的能点回，最大化让出侧栏；`make test` 28 PASS

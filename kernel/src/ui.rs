@@ -104,6 +104,19 @@ fn handle_mouse() -> bool {
             crate::cursor::invalidate();
             continue;
         }
+        // dock 上的窗口格子：点已聚焦的 → 最小化回 dock；点其它 → 打开并抬升
+        if let Some(i) = fb::dock_hit(x, y) {
+            if pressed {
+                if fb::win_state(i) == 1 && fb::focus() == i {
+                    fb::minimize_win(i);
+                } else {
+                    fb::show_win(i);
+                }
+                crate::kb::set_open(false);
+                want = true;
+            }
+            continue;
+        }
         // 画布优先：落在 APK 画布上的点不给桌面（否则会当成点窗口）
         if crate::apkcanvas::active() {
             if let Some((cx, cy)) = crate::apkcanvas::screen_to_canvas(x, y) {
@@ -135,6 +148,8 @@ fn handle_mouse() -> bool {
                         fb::Btn::Min => fb::minimize_win(i),
                         fb::Btn::Max => fb::toggle_max(i),
                     }
+                    // 最小化/最大化之后窗口几何变了，键盘留着自己挡自己 → 一并收起
+                    crate::kb::set_open(false);
                     // 旧位置（最大化时还要连新位置一起）擦回壁纸再整桌重画
                     fb::restore_wall(
                         (w.x - 30).max(0) as u32,
@@ -176,7 +191,13 @@ fn handle_mouse() -> bool {
                     2 => 2,
                     _ => 1,
                 };
-                fb::show_win(which);
+                // 点自己已经聚焦的图标 = 收起来；否则打开
+                if fb::win_state(which) == 1 && fb::focus() == which {
+                    fb::minimize_win(which);
+                } else {
+                    fb::show_win(which);
+                }
+                crate::kb::set_open(false);
                 want = true;
                 continue;
             }

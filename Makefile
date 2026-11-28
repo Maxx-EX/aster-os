@@ -259,8 +259,8 @@ test: image
 	@grep -q "WX start" $(B)/test-wx.log && grep -q "数据中止(低 EL)" $(B)/test-wx.log && \
 	    grep -q "FAR     = 0x0000000044400" $(B)/test-wx.log && \
 	    echo "[TEST] PASS W^X（EL0 写代码页被拦）" || (echo "[TEST] FAIL W^X 未生效" && exit 1)
-	# 页帧分配器：两个任务各 5 页，加内核页表共 10 页
-	@grep -q "页帧池 10 / 32768 页已用" $(B)/test.log && \
+	# 页帧分配器：两个任务各 5 页 + 内核页表 10 页 + 双缓冲 768 页（3 MiB 后台帧缓冲）
+	@grep -q "页帧池 778 / 32768 页已用" $(B)/test.log && \
 	    echo "[TEST] PASS 页帧分配器" || (echo "[TEST] FAIL 页帧计数不对" && exit 1)
 
 	# sched_yield：两个任务各 8 行，必须严格交替
