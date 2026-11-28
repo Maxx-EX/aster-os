@@ -248,18 +248,107 @@ pub fn code_of(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> Res
     }
 }
 
-/// 执行 `class_desc` 里的 `method_name`。
-/// 返回执行的指令条数；调用的外部方法只有 `Lcom/aster/Log;->i(String)`。
-/// 极小的对象堆：每对象 8 个整型字段。够 demo 用，也是后面真堆的雏形。
-#[derive(Clone, Copy)]
-struct ObjState {
-    used: bool,
-    class_idx: u32,
-    fields: [i32; 8],
+// —— 对象堆（APK-13）：页帧承载，不再有固定槽数上限 ——
+//
+// 一页 4 KiB 由 frame::alloc() 供给：页头 64 字节放链指针，后面 63 个 64 字节槽。
+// 页头：
+//   +0  next  u64     下一页（0 = 链尾）
+//   +8  nslot u16     本页槽数（固定 63，留给将来变长）
+//   +10 used  u16     本页已用槽数
+// 槽（64 字节）：
+//   +0  used      u32   0 = 空，1 = 活
+//   +4  class_idx u32
+//   +8  pad 8
+//   +16 fields    [i32; 8]
+//   +48 16 字节余量（将来 monitor / refcount / GC 标记）
+//
+// 引用不再是 0..NOBJ 的小整数，而是 OBJ_TAG + 全局槽号。全局槽号跨页单调递增，
+// 只在 heap_reset 时归零；没有单个释放，所以不是 GC，只是"只增不减的分配器"。
+const OBJ_TAG: i32 = 0x1_0000;
+const SLOT_SIZE: usize = 64;
+const PG_HDR: usize = 64;
+const PG_SIZE: usize = 4096;
+const SLOTS_PER_PAGE: usize = (PG_SIZE - PG_HDR) / SLOT_SIZE; // 63
+const SF_SIZE: usize = 8;
+
+static mut HEAP_HEAD: u64 = 0; // 页链头（恒等映射，物理地址即虚拟地址）
+static mut HEAP_TAIL: u64 = 0; // 页链尾，新页直接接上，避免每次 O(页数) 走链
+static mut HEAP_PAGES: usize = 0;
+static mut HEAP_GIDX: usize = 0; // 已分配槽数（单调）
+
+#[inline]
+fn rd_u64(p: u64) -> u64 {
+    unsafe { core::ptr::read_volatile(p as *const u64) }
+}
+#[inline]
+fn wv_u64(p: u64, v: u64) {
+    unsafe { core::ptr::write_volatile(p as *mut u64, v) }
+}
+#[inline]
+fn rd_u32(p: u64) -> u32 {
+    unsafe { core::ptr::read_volatile(p as *const u32) }
+}
+#[inline]
+fn wv_u32(p: u64, v: u32) {
+    unsafe { core::ptr::write_volatile(p as *mut u32, v) }
+}
+#[inline]
+fn rd_i32(p: u64) -> i32 {
+    unsafe { core::ptr::read_volatile(p as *const i32) }
+}
+#[inline]
+fn wv_i32(p: u64, v: i32) {
+    unsafe { core::ptr::write_volatile(p as *mut i32, v) }
 }
 
-const NOBJ: usize = 32;
-static mut HEAP: [ObjState; NOBJ] = [ObjState { used: false, class_idx: 0, fields: [0; 8] }; NOBJ];
+/// 遍历页链，取第 `pg` 页的物理地址
+fn page_at(pg: usize) -> Option<u64> {
+    let mut p = unsafe { HEAP_HEAD };
+    let mut k = 0;
+    while k < pg {
+        if p == 0 {
+            return None;
+        }
+        p = rd_u64(p);
+        k += 1;
+    }
+    if p == 0 {
+        None
+    } else {
+        Some(p)
+    }
+}
+
+/// 保证至少有 `need_pages` 页挂在链上
+fn grow_pages(need_pages: usize) -> Result<(), &'static str> {
+    while unsafe { HEAP_PAGES } <= need_pages {
+        let pa = match crate::frame::alloc() {
+            Some(p) => p,
+            None => return Err("物理页耗尽，对象堆无法继续增长"),
+        };
+        wv_u64(pa, 0);
+        wv_u32(pa + 8, SLOTS_PER_PAGE as u32);
+        wv_u32(pa + 12, 0);
+        let tail = unsafe { HEAP_TAIL };
+        if tail == 0 {
+            unsafe {
+                HEAP_HEAD = pa;
+                HEAP_TAIL = pa;
+            }
+        } else {
+            wv_u64(tail, pa);
+            unsafe { HEAP_TAIL = pa };
+        }
+        unsafe { HEAP_PAGES += 1 };
+    }
+    Ok(())
+}
+
+fn slot_ptr(g: usize) -> Option<u64> {
+    let pg = g / SLOTS_PER_PAGE;
+    let base = page_at(pg)?;
+    Some(base + (PG_HDR + (g % SLOTS_PER_PAGE) * SLOT_SIZE) as u64)
+}
 
 // —— 数组（APK-6）——
 // 寄存器里对象用 0..NOBJ，数组用 0x100+i 这一段，两者不会撞车。
@@ -309,14 +398,20 @@ fn arr_reset() {
 }
 
 fn heap_reset() {
-    arr_reset();
-    let mut i = 0;
-    while i < NOBJ {
-        unsafe {
-            HEAP[i] = ObjState { used: false, class_idx: 0, fields: [0; 8] };
+    // 整堆还页：页链逐页 free，页帧池的位图跟着回落
+    unsafe {
+        let mut p = HEAP_HEAD;
+        while p != 0 {
+            let nx = rd_u64(p);
+            crate::frame::free(p);
+            p = nx;
         }
-        i += 1;
+        HEAP_HEAD = 0;
+        HEAP_TAIL = 0;
+        HEAP_PAGES = 0;
+        HEAP_GIDX = 0;
     }
+    arr_reset();
 }
 
 // —— 静态字段 + StringBuilder（APK-7）——
@@ -419,7 +514,7 @@ fn dyn_str(v: i32) -> Result<&'static str, &'static str> {
 }
 
 fn str_of<'a>(d: &'a [u8], h: &Header, v: i32) -> Result<&'a str, &'static str> {
-    if v >= DYN_TAG {
+    if v >= DYN_TAG && v < OBJ_TAG {
         dyn_str(v)
     } else {
         string(d, h, v as u32)
@@ -439,25 +534,42 @@ fn call_reset() {
     }
 }
 
-fn heap_new(class_idx: u32) -> Result<usize, &'static str> {
-    let mut i = 0;
-    while i < NOBJ {
-        if !unsafe { HEAP[i].used } {
-            unsafe {
-                HEAP[i] = ObjState { used: true, class_idx, fields: [0; 8] };
-            }
-            return Ok(i);
-        }
-        i += 1;
+fn heap_new(class_idx: u32) -> Result<i32, &'static str> {
+    let g = unsafe { HEAP_GIDX };
+    grow_pages(g / SLOTS_PER_PAGE)?;
+    let sp = slot_ptr(g).ok_or("对象槽定位失败")?;
+    wv_u32(sp, 1);
+    wv_u32(sp + 4, class_idx);
+    wv_u64(sp + 8, 0);
+    let mut f = 0;
+    while f < SF_SIZE {
+        wv_i32(sp + 16 + (f * 4) as u64, 0);
+        f += 1;
     }
-    Err("对象堆满（8 个）")
+    unsafe { HEAP_GIDX += 1 };
+    Ok(OBJ_TAG + g as i32)
 }
 
-fn heap_idx(v: i32) -> Result<usize, &'static str> {
-    if v < 0 || v as usize >= NOBJ || !unsafe { HEAP[v as usize].used } {
+/// 引用 → 槽地址。同时校验 tag、槽号范围和槽是否还活着。
+fn heap_idx(v: i32) -> Result<u64, &'static str> {
+    let g = v - OBJ_TAG;
+    if g < 0 {
         return Err("不是有效对象引用");
     }
-    Ok(v as usize)
+    let g = g as usize;
+    if g >= unsafe { HEAP_GIDX } {
+        return Err("不是有效对象引用");
+    }
+    let sp = slot_ptr(g).ok_or("对象槽定位失败")?;
+    if rd_u32(sp) == 0 {
+        return Err("对象已释放");
+    }
+    Ok(sp)
+}
+
+/// (页数, 已用槽, 总槽容量)
+pub fn heap_stats() -> (usize, usize, usize) {
+    (unsafe { HEAP_PAGES }, unsafe { HEAP_GIDX }, unsafe { HEAP_PAGES } * SLOTS_PER_PAGE)
 }
 
 // —— 异常（APK-8）——
@@ -465,6 +577,19 @@ fn heap_idx(v: i32) -> Result<usize, &'static str> {
 // exec 收到哨兵时先在本方法的 try 表里找 handler，找不到才继续往上抛。
 const THROW_SENTINEL: &str = "__aster_throw";
 static mut THROW_VAL: i32 = 0;
+
+// —— 启动参数（APK-13）——
+// `app start <n>` 把 n 存进来，APK 侧用 `Lcom/aster/App;->arg()I` 取回。
+// 语义故意做得极窄：一个 i32，没有 Bundle、没有 key。
+static mut START_ARG: i32 = 0;
+
+pub fn set_start_arg(v: i32) {
+    unsafe { START_ARG = v };
+}
+
+pub fn start_arg() -> i32 {
+    unsafe { START_ARG }
+}
 
 /// DEX 里的 sleb128（handler 的 size 字段是有符号的）
 fn sleb(d: &[u8], mut p: usize) -> Result<(i32, usize), &'static str> {
@@ -528,6 +653,10 @@ fn find_handler(d: &[u8], coff: u32, pc: usize) -> Result<Option<u32>, &'static 
 }
 
 /// 执行一个方法。`args` 是调用方传进来的寄存器值（this 在第一个位置）。
+/// 单次调用允许的指令上限：正常 fixture 几十条，真 APK 也远小于这个数。
+/// 到顶就报错而不是把内核转死 —— 这条是死循环的保险丝。
+const STEP_LIMIT: u32 = 200_000;
+
 fn exec(
     d: &[u8],
     h: &Header,
@@ -571,6 +700,11 @@ fn exec(
     let mut rv = 0i32;
 
     while pc >= 0 && (pc as usize) < n && !ret {
+        *steps += 1;
+        if *steps > STEP_LIMIT {
+            crate::println!("  [DEX] 执行超过指令上限，pc={}（疑似死循环）", pc);
+            return Err("执行超过指令上限（疑似死循环）");
+        }
         let u = unit(pc as usize);
         let op = (u & 0xff) as u8;
         match op {
@@ -636,7 +770,7 @@ fn exec(
                 }
                 let type_idx = unit(pc as usize + 1) as u32;
                 type_desc(d, h, type_idx)?;
-                regs[a] = heap_new(type_idx)? as i32;
+                regs[a] = heap_new(type_idx)?;
                 pc += 2;
             }
             0x21 => {
@@ -717,7 +851,9 @@ fn exec(
                 }
                 pc += unit(pc as usize + 1) as i16 as i32;
             }
-            0x31..=0x36 => {
+            0x32..=0x37 => {
+                // 22t if-test：0x32 if-eq / 0x33 if-ne / 0x34 if-lt
+                //               0x35 if-ge / 0x36 if-gt / 0x37 if-le
                 let a = ((u >> 8) & 0xf) as usize;
                 let b = ((u >> 12) & 0xf) as usize;
                 if (pc as usize) + 1 >= n {
@@ -727,11 +863,11 @@ fn exec(
                 let x = regs[a];
                 let y = regs[b];
                 let take = match op {
-                    0x31 => x == y,
-                    0x32 => x != y,
-                    0x33 => x < y,
-                    0x34 => x >= y,
-                    0x35 => x > y,
+                    0x32 => x == y,
+                    0x33 => x != y,
+                    0x34 => x < y,
+                    0x35 => x >= y,
+                    0x36 => x > y,
                     _ => x <= y,
                 };
                 pc += if take { off } else { 2 };
@@ -783,7 +919,7 @@ fn exec(
                 if f >= 8 {
                     return Err("字段槽越界");
                 }
-                regs[a] = unsafe { HEAP[obj].fields[f] };
+                regs[a] = rd_i32(obj + 16 + (f * 4) as u64);
                 pc += 2;
             }
             0x59 => {
@@ -799,7 +935,7 @@ fn exec(
                 if f >= 8 {
                     return Err("字段槽越界");
                 }
-                unsafe { HEAP[obj].fields[f] = regs[a] };
+                wv_i32(obj + 16 + (f * 4) as u64, regs[a]);
                 pc += 2;
             }
             0x90..=0x94 => {
@@ -872,7 +1008,13 @@ fn exec(
                     k += 1;
                 }
                 let m = method(d, h, midx)?;
-                if m.class == "Lcom/aster/Log;" {
+                if m.class == "Lcom/aster/App;" {
+                    if m.name == "arg" {
+                        last = unsafe { START_ARG };
+                    } else {
+                        return Err("App 上没有这个方法");
+                    }
+                } else if m.class == "Lcom/aster/Log;" {
                     if m.name == "i" {
                         let s = str_of(d, h, args[0])?;
                         crate::println!("  [DEX] {}", s);

@@ -67,6 +67,7 @@ STRINGS = [
     "L",
     "LI",
     "LL",
+    "Lcom/aster/App;",
     "Lcom/aster/Base;",
     "Lcom/aster/Boom;",
     "Lcom/aster/Canvas;",
@@ -87,6 +88,7 @@ STRINGS = [
     "[I",
     "apk8 ok",
     "append",
+    "arg",
     "array ok",
     "canvas ok",
     "caught",
@@ -154,11 +156,13 @@ S_MVX, S_MVY, S_W, S_H = IDX["moveX"], IDX["moveY"], IDX["width"], IDX["height"]
 S_ONCREATE, S_ONTOUCH, S_ONDESTROY = IDX["onCreate"], IDX["onTouch"], IDX["onDestroy"]
 S_ONCREATEOK, S_ONDESTROYOK = IDX["onCreate ok"], IDX["onDestroy ok"]
 S_TAPS = IDX["taps"]
+S_APP, S_ARG = IDX["Lcom/aster/App;"], IDX["arg"]
 S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
 S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
 
 T_STRING, T_MAIN, T_V, T_LOG, T_INT, T_COUNTER, T_ARR, T_SB = 0, 1, 2, 3, 4, 5, 6, 7
 T_BASE, T_CHILD, T_RTE, T_BOOM, T_CV = 8, 9, 10, 11, 12
+T_APP = 13
 # proto：0=(String)V 1=()V 2=(I)V 3=()I 4=(String)SB 5=(I)SB 6=()SB
 P_STR, P_VOID, P_INT_V, P_INT_I = 0, 1, 2, 3
 P_APP_STR, P_APP_INT, P_SB_VOID = 4, 5, 6
@@ -175,6 +179,7 @@ M_CV_TX, M_CV_TY = 19, 20
 M_FRAME = 21
 M_CV_MVX, M_CV_MVY, M_CV_W, M_CV_H = 22, 23, 24, 25
 M_ONCREATE, M_ONTOUCH, M_ONDESTROY = 26, 27, 28
+M_APP_ARG = 29
 P_III = 9
 
 
@@ -192,7 +197,7 @@ def build():
 
     type_ids_off = len(buf)
     for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER, S_ARR, S_SB,
-              S_BASE, S_BOOM, S_CHILD, S_RTE, S_CV):
+              S_BASE, S_BOOM, S_CHILD, S_RTE, S_CV, S_APP):
         buf += struct.pack("<I", t)
 
     proto_ids_off = len(buf)
@@ -246,6 +251,7 @@ def build():
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_ONCREATE)     # 26 Main.onCreate()V
     buf += struct.pack("<HHI", T_MAIN, P_III, S_ONTOUCH)       # 27 Main.onTouch(III)V
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_ONDESTROY)    # 28 Main.onDestroy()V
+    buf += struct.pack("<HHI", T_APP, P_INT_I, S_ARG)          # 29 App.arg()I（内建）
 
     class_defs_off = len(buf)
     main_def_pos = len(buf)
@@ -360,7 +366,7 @@ def build():
         0x0312,                  # const/4 v3, #0
         0x3512,                  # const/4 v5, #3（lit 在高 4 位、A 在 bits8-11）
         0x1421,                  # array-length v4, v1
-        0x4234, 0x0D00,          # if-ge v2, v4 -> +13（end 在 pc 20）
+        0x4235, 0x0D00,          # if-ge v2, v4 -> +13（end 在 pc 20）
         0x0492, 0x0205,          # mul-int v4, v2, v5（unit1 = B<<8 | C）
         0x044b, 0x0201,          # aput v4, v1, v2
         0x0444, 0x0201,          # aget v4, v1, v2
@@ -446,7 +452,7 @@ def build():
         0x0212,                  # const/4 v2, #0
         0x106e, M_CV_TX, 0x0006, # invoke-virtual {v6}, touchX()I
         0x000a,                  # move-result v0
-        0x2033, 0x1E00,          # if-lt v0, v2 -> +30（跳到 no-touch 211）
+        0x2034, 0x1E00,          # if-lt v0, v2 -> +30（跳到 no-touch 211）
         0x4412,                  # const/4 v4, #4
         0x0591, 0x0004,          # sub-int v5, v0, v4（高=BB0 低=CC4）
         0x106e, M_CV_TY, 0x0006, # invoke-virtual {v6}, touchY()I
@@ -515,7 +521,7 @@ def build():
     code_frame = len(buf)
     ins = [
         0x0060, F_CVH,               # 0  sget v0, cvh
-        0x0038, 0x0700,              # 2  if-eqz v0, +7 -> 9
+        0x0039, 0x0700,              # 2  if-nez v0, +7 -> 9（已建过就跳过）
         0x0022, T_CV,                # 4  new-instance v0, Canvas
         0x1070, M_CV_INIT, 0x0000,   # 6  invoke-direct {v0}, <init>()V
         0x0067, F_CVH,               # 9  sput cvh, v0
@@ -545,7 +551,7 @@ def build():
         0x106e, M_CV_MVX, 0x0006,    # 62 moveX()
         0x000a,                      # 65 move-result v0
         0x0212,                      # 66 const/4 v2, #0
-        0x2033, 0x0E00,              # 67 if-lt v0, v2 -> +14（跳到 81）
+        0x2034, 0x0E00,              # 67 if-lt v0, v2 -> +14（跳到 81）
         0x03d8, 0x00F0,              # 69 add-int/lit8 v3, v0, #-16
         0x0367, F_PX,                # 71 sput px, v3
         0x106e, M_CV_MVY, 0x0006,    # 73 moveY()
@@ -555,7 +561,7 @@ def build():
         0x106e, M_CV_TX, 0x0006,     # 81 touchX()
         0x000a,                      # 84 move-result v0
         0x0212,                      # 85 const/4 v2, #0
-        0x2033, 0x0E00,              # 86 if-lt v0, v2 -> +14（跳到 100）
+        0x2034, 0x0E00,              # 86 if-lt v0, v2 -> +14（跳到 100）
         0x03d8, 0x00F0,              # 88 add-int/lit8 v3, v0, #-16
         0x0367, F_PX,                # 90 sput px, v3
         0x106e, M_CV_TY, 0x0006,     # 92 touchY()
@@ -568,18 +574,34 @@ def build():
     buf += struct.pack("<HHHHII", 8, 0, 0, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
-    # Main.onCreate()V —— APK-12：只跑一次，建画布
+    # Main.onCreate()V —— APK-13：只跑一次。建画布、读启动参数、分配 70 个对象
+    # 70 > 63（每页槽数），正好验证对象堆跨页增长。
     code_onCreate = len(buf)
     ins = [
         0x0022, T_CV,              # 0  new-instance v0, Canvas
         0x1070, M_CV_INIT, 0x0000, # 2  invoke-direct {v0}, <init>()V
         0x0067, F_CVH,             # 5  sput cvh, v0
-        0x001a, S_ONCREATEOK,      # 7  const-string v0, "onCreate ok"
-        0x1071, M_I, 0x0000,       # 9  Log.i(v0)
-        0x000e,                    # 12 return-void
+        0x0071, M_APP_ARG, 0x0000, # 7  invoke-static {}, App.arg()I（argc=0）
+        0x000a,                    # 10 move-result v0
+        0x0112,                    # 11 const/4 v1, #0
+        0x1036, 0x0200,            # 12 if-le v0, v1 -> +2（arg<=0 不动 px）
+        0x0067, F_PX,              # 14 sput px, v0
+        0x0113, 0x0046,            # 16 const/16 v1, #70（循环上限）
+        0x0212,                    # 18 const/4 v2, #0（i）
+        0x0312,                    # 19 const/4 v3, #0（last）
+        0x1235, 0x0C00,            # 20 if-ge v2, v1 -> +12（跳到 32 的 Log.n）
+        0x0022, T_COUNTER,         # 22 new-instance v0, Counter
+        0x2070, M_INIT, 0x0020,    # 24 invoke-direct {v0, v2}, <init>(I)V
+        0x0352, F_V,               # 27 iget v3, v0, Counter.v
+        0x02d8, 0x0201,            # 29 add-int/lit8 v2, v2, #1（BB=v2、lit=1）
+        0xF528,                    # 31 goto -11（回到 20 的 if-ge 出口判断）
+        0x1071, M_N, 0x0003,       # 33 Log.n(v3)，最后一个对象的 v = 69
+        0x001a, S_ONCREATEOK,      # 36 const-string v0, "onCreate ok"
+        0x1071, M_I, 0x0000,       # 38 Log.i(v0)
+        0x000e,                    # 41 return-void
     ]
-    assert len(ins) == 13, len(ins)
-    buf += struct.pack("<HHHHII", 1, 0, 0, 0, 0, len(ins))
+    assert len(ins) == 41, len(ins)
+    buf += struct.pack("<HHHHII", 4, 0, 0, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
     # Main.onTouch(III)V —— kind 0/1 跟手，kind 2 打印累计次数
@@ -587,7 +609,7 @@ def build():
     # 关键：ins_size=3 时参数落在最后 3 个寄存器 v1(kind) v2(x) v3(y)，v0 是空闲临时
     ins = [
         0x0012,                    # 0  const/4 v0, #1
-        0x1035, 0x1000,            # 1  if-gt v1, v0 -> +16（kind>1 跳到 17，不更新位置）
+        0x1036, 0x1000,            # 1  if-gt v1, v0 -> +16（kind>1 跳到 17，不更新位置）
         0x02d8, 0x02F0,            # 3  add-int/lit8 v2, v2, #-16
         0x0267, F_PX,              # 5  sput px, v2
         0x03d8, 0x03F0,            # 7  add-int/lit8 v3, v3, #-16
@@ -681,10 +703,10 @@ def build():
     items = [
         (0x0000, 1, 0),
         (0x0001, len(STRINGS), string_ids_off),
-        (0x0002, 13, type_ids_off),
+        (0x0002, 14, type_ids_off),
         (0x0003, 10, proto_ids_off),
         (0x0004, 7, field_ids_off),
-        (0x0005, 29, method_ids_off),
+        (0x0005, 30, method_ids_off),
         (0x0006, 7, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
@@ -701,10 +723,10 @@ def build():
     return buf, dict(
         file_size=len(buf), map_off=map_off,
         string_ids=(len(STRINGS), string_ids_off),
-        type_ids=(13, type_ids_off),
+        type_ids=(14, type_ids_off),
         proto_ids=(10, proto_ids_off),
         field_ids=(7, field_ids_off),
-        method_ids=(29, method_ids_off),
+        method_ids=(30, method_ids_off),
         class_defs=(7, class_defs_off),
         data=(data_size, data_off),
         code_init=code_init, code_next=code_next,

@@ -234,6 +234,7 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 - APK-6 ✅ 数组（`new-array` / `array-length` / `aget` / `aput`，数组堆 4 × 8 槽，越界报错；fixture 循环求和 30）
 - APK-7 ✅ 静态字段与 StringBuilder（`sget`/`sput`、内核侧桥接 `append(String/I)`/`toString`、动态字符串槽；fixture 输出 `sum=30 hits=1`）
 - APK-9 ✅ 画布桥接（自研 `Lcom/aster/Canvas;`：clear/setColor/drawRect/drawText，命令表 + 桌面重绘时叠加；`canvas on|off` 可收起）
+- APK-13 ✅ 对象堆接到页帧分配器（4 KiB 页 / 63 槽 / 页链 + 尾指针，引用改 `0x1_0000+g`）、`App.arg()` 启动参数；顺手把 if 系列对齐规范、修 goto 单字与 `add-int/lit8` 源寄存器
 - APK-12 ✅ Activity 生命周期（`onCreate` 一次性、`onTouch(III)` 事件分发、`onDestroy`；合并事件队列，对象堆 32 / 数组 16×32 / 命令 128）
 - APK-11 ✅ 驻留 app（`Main.frame()` 帧回调 30ms、down/move 双队列（`touchX`/`moveX`）、`static_values` 初值、`app start|stop|status|step`）
 - APK-10 ✅ 画布点击回传（触摸环形队列、`screen_to_canvas`、`touchX`/`touchY`；fixture 输出 `touch hit`）

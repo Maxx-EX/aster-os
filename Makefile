@@ -231,6 +231,7 @@ test: image
 	@grep -q "caught xmethod" $(B)/test.log && echo "[TEST] PASS DEX 异常：跨方法 throw + try/catch + 方法解析上溯" || (echo "[TEST] FAIL DEX throw" && exit 1)
 	@grep -q "canvas ok" $(B)/test.log && echo "[TEST] PASS APK 画布：Canvas clear/setColor/drawRect/drawText 落到 framebuffer" || (echo "[TEST] FAIL canvas" && exit 1)
 	@grep -q "no touch" $(B)/test.log && echo "[TEST] PASS APK 画布触摸：touchX/touchY 无事件返回 -1" || (echo "[TEST] FAIL canvas touch" && exit 1)
+	@grep -q "\[DEX\] 69" $(B)/test.log && echo "[TEST] PASS 对象堆跨页：onCreate 分配 70 个对象，最后一个字段读回 69" || (echo "[TEST] FAIL heap-grow" && exit 1)
 	@grep -q "onCreate ok" $(B)/test.log && grep -q "onDestroy ok" $(B)/test.log && echo "[TEST] PASS Activity 生命周期：onCreate 只跑一次 / onDestroy 在停止时调用" || (echo "[TEST] FAIL lifecycle" && exit 1)
 	@grep -q "帧 2 完成，画布命令 3 条" $(B)/test.log && echo "[TEST] PASS APK 驻留：Main.frame()V 帧回调 + 静态字段初值" || (echo "[TEST] FAIL app frame" && exit 1)
 	@grep -q "deflate 解压正确" $(B)/test.log && echo "[TEST] PASS inflate（deflate 条目还原）" || (echo "[TEST] FAIL deflate" && exit 1)

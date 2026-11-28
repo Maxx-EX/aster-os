@@ -787,6 +787,7 @@ pub fn run() -> ! {
                 println!("  [WIN] {} 关闭", i);
             }
             "app" | "app on" | "app off" | "app start" | "app stop" | "app status" | "app step" => cmd_app(line),
+            l if l.starts_with("app start ") => cmd_app(line),
             "canvas" | "canvas on" | "canvas off" => {
                 let (nc, dropped) = crate::apkcanvas::stats();
                 if line == "canvas off" || line == "canvas" {
@@ -1003,6 +1004,12 @@ fn app_dex() -> Result<(&'static [u8], crate::dex::Header), &'static str> {
 }
 
 fn app_start() -> Result<bool, &'static str> {
+    app_start_arg(0)
+}
+
+/// 带启动参数的起动（APK-13）：arg 由 APK 用 App.arg() 取回
+fn app_start_arg(arg: i32) -> Result<bool, &'static str> {
+    crate::dex::set_start_arg(arg);
     let (d, h) = app_dex()?;
     let (_steps, created) = crate::dex::app_begin(d, &h, "Lcom/aster/Main;")?;
     unsafe {
@@ -1057,9 +1064,12 @@ fn cmd_app(line: &str) {
         "app" | "app status" => {
             if app_active() {
                 let (nc, drop) = crate::apkcanvas::stats();
+                let (pages, used, cap) = crate::dex::heap_stats();
                 println!("  [APP] 运行中，已画 {} 帧，命令 {} 条（丢弃 {}）", app_frames(), nc, drop);
+                println!("  [APP] 对象堆 {} 页 / 槽 {} 用 {}（容量 {}）", pages, used, used, cap);
+                println!("  [APP] 启动参数 arg={}", crate::dex::start_arg());
             } else {
-                println!("  [APP] 未运行。app start 起动 Main.frame()V");
+                println!("  [APP] 未运行。app start [n] 起动 Main.frame()V，n 用 App.arg() 取回");
             }
         }
         "app step" => {
@@ -1099,13 +1109,21 @@ fn cmd_app(line: &str) {
                 if destroyed { "，onDestroy 已调用" } else { "" }
             );
         }
-        _ => match app_start() {
-            Ok(created) => println!(
-                "  [APP] 起动：{}onCreate()，之后每 30ms 一帧 Main.frame()V；触摸走 onTouch(kind,x,y)。app stop 停止",
-                if created { "" } else { "无" }
-            ),
-            Err(e) => println!("  [APP] 起动失败: {}", e),
-        },
+        _ => {
+            // app start [n]
+            let arg = line
+                .strip_prefix("app start")
+                .and_then(|r| r.trim().parse::<i32>().ok())
+                .unwrap_or(0);
+            match app_start_arg(arg) {
+                Ok(created) => println!(
+                    "  [APP] 起动：{}onCreate()，arg={}，之后每 30ms 一帧 Main.frame()V；触摸走 onTouch(kind,x,y)。app stop 停止",
+                    if created { "" } else { "无" },
+                    arg
+                ),
+                Err(e) => println!("  [APP] 起动失败: {}", e),
+            }
+        }
     }
 }
 
