@@ -370,11 +370,11 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 ## 当前位置
 
 - 已完成：阶段一全部；阶段二 1/2/3/4/5/6/8/9/10/11/12/13；sched_yield(124)
-- 当前 v0.6，正在做阶段 2.5：
+- 内核实际版本 v0.9（`update.rs::CURRENT_VER`），阶段 2.5 与阶段三~七的已完成条目都记在下面：
   1. ✅ UI-1 灰度字模 / UI-2 圆角抗锯齿 / UI-3 投影 / UI-4 壁纸质感 / UI-5 配色与状态行
   2. UI-6 鼠标、UI-7 窗口管理（三窗 + z 序）已落地，下一步 UI-8 过渡动效
   3. 之后进阶段三 A（virtio-blk + AsterFS + 从盘加载用户程序），再进 B（引导器从盘加载内核）
-- 阶段二遗留（不急，等需要时补）：#7 其余 syscall、#14 每任务内核栈、#15 SMP、#16 panic 屏
+- 阶段二遗留（不急，等需要时补）：#7 其余 syscall、#14 每任务内核栈、#15 SMP（#16 panic 屏已由 CRASH-1 收掉）
 - 每次提交前跑：`make test && make test-gfx && make test-net`
 - **UI-9 ✅ GPU 真实呈现（virtio-gpu 2D + 整帧 flush）、终端置顶、屏幕软键盘、标题栏热区放大、输入回显上屏**：ramfb 撕裂（闪/空白）、z 序（点不着）、`uart::putc` 回显（打不了字）三个根因逐个收掉；`make test` 28 PASS
 - **UI-10 ✅ 软键盘一键命令 chip + 历史键（UP/DN 伪键 0x90/0x91）**：手机上 `dex big` 从八次点击变成一次；`make test` 28 PASS
@@ -399,3 +399,5 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **SEC-2 ✅**：组（gid 进 inode、`can` 认组位、`chgrp`）、目录权限（根 inode 0o755 + `list` 查读位）、`passwd` 落盘（mkfs 自动写、useradd 写回、开机加载）
 - **PERF-5 ✅ 只贴脏矩形**：`REPAINT` 并集 + `blit_layer` 裁剪，静止帧 0 ms（零拷贝）、打字帧 0 ms（只贴两行）；窗口挪走补旧矩形、键盘开合显式整窗重画
 - **SEC-3 ✅ 特殊权限位**：`chmod 0..7777`、`afs` 掩码 `& 0o7777`、`mode_str` 的 s/S/t/T、`has_special()`；没有 exec 语义所以 s 位还没"真的抬 uid"，ACL 留到 inode 布局改版
+
+- **CRASH-1 ✅ 崩溃屏**：`kernel/src/crash.rs` 收口两条致命路径——Rust `panic_handler` 与 `exceptions::exception_report`（EL1 同步异常）。串口按 `{:#018x}` 打全寄存器再停机；有 framebuffer 时画一张 1024x768 的 `KERNEL PANIC` 屏：定宽寄存器区（SP/LR/ESR/FAR/SPSR/TTBR0）、`文件:行  原因` 的 NOTE 行、底部"串口已留下完整现场 · 复位后可再次开机"。用户态任务崩了仍走原来的"杀任务、内核继续"。`panic` 自检命令可在现场复现；`make test` 新增 4 条断言（统一上报 / 位置带出 / 寄存器完整 / ramfb 上真的画出 1024x768）

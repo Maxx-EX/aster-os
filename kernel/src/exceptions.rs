@@ -245,10 +245,18 @@ pub extern "C" fn exception_report(esr: u64, elr: u64, far: u64) -> ! {
     println!("  FAR_EL1 = {:#018x}", far);
     let ec = (esr >> 26) & 0x3F;
     println!("  EC      = {:#04x} ({})", ec, ec_name(ec));
-    println!("  系统已停机，需要复位。");
-    loop {
-        unsafe { asm!("wfe") };
+    let sp: u64;
+    let spsr: u64;
+    unsafe {
+        asm!("mov {}, sp", out(reg) sp);
+        asm!("mrs {}, spsr_el1", out(reg) spsr);
     }
+    crate::crash::show(
+        "KERNEL EXCEPTION",
+        "内核已停机，关机后重新开机",
+        ec_name(ec),
+        &[("ELR", elr), ("ESR", esr), ("FAR", far), ("EC", ec), ("SP", sp), ("SPSR", spsr)],
+    )
 }
 
 /// 定时器中断：清掉本次、装下一次，然后让调度器在帧上换人

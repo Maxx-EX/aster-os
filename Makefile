@@ -203,7 +203,7 @@ test-gfx: image
 	@printf '\ngfx\nhalt\n' | timeout 45 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -device ramfb -display none -nographic \
 	    -kernel $(BOOT_ELF) > $(B)/test-gfx.log 2>&1 || true
-	@grep -q "图形输出已就绪：ramfb 1024x768" $(B)/test-gfx.log && echo "[TEST] PASS ramfb framebuffer" || (echo "[TEST] FAIL 图形未就绪" && exit 1)
+	@grep -q "图形输出已就绪：1024x768" $(B)/test-gfx.log && echo "[TEST] PASS ramfb framebuffer" || (echo "[TEST] FAIL 图形未就绪" && exit 1)
 	@grep -q "界面已重绘" $(B)/test-gfx.log && echo "[TEST] PASS 界面绘制" || (echo "[TEST] FAIL 未绘制" && exit 1)
 	@python3 tools/screenshot.py $(B)/screen.png 7 >/dev/null && \
 	    python3 -c "from PIL import Image;import sys; im=Image.open('$(B)/screen.png'); \
@@ -300,6 +300,19 @@ seq=[m for m in re.findall(r'Z\\d|Y[12]', t)]; \
 ok = seq[:16]==['Y1','Y2']*8; \
 print('[TEST] PASS sched_yield 主动让出（严格交替）' if ok else '[TEST] FAIL yield 未交替: '+str(seq[:16])); \
 sys.exit(0 if ok else 1)"
+	# 崩溃屏：手动触发 panic，串口要留下 KERNEL PANIC 与寄存器现场，
+	# 带 ramfb 时还要真的画到屏幕上（nographic 只是没有窗口，帧仍在画）
+	@(sleep 9; printf 'panic\n'; sleep 6) | timeout 24 \
+	    qemu-system-aarch64 -M virt -cpu cortex-a72 -m 512M -device ramfb -display none -nographic \
+	    -kernel $(B)/aster-boot.elf 2>&1 | tr -d '\r' > $(B)/test-panic.log || true
+	@grep -q "\[CRASH\] KERNEL PANIC" $(B)/test-panic.log && \
+	    echo "[TEST] PASS 崩溃屏：panic 落到统一上报" || (echo "[TEST] FAIL panic 上报" && exit 1)
+	@grep -q "NOTE    : shell.rs:" $(B)/test-panic.log && \
+	    echo "[TEST] PASS 崩溃屏：位置与原因带出" || (echo "[TEST] FAIL panic 位置" && exit 1)
+	@grep -q "TTBR0   : 0x" $(B)/test-panic.log && grep -q "SP      : 0x" $(B)/test-panic.log && \
+	    echo "[TEST] PASS 崩溃屏：寄存器现场完整" || (echo "[TEST] FAIL panic 寄存器" && exit 1)
+	@grep -q "崩溃屏已绘制 1024x768" $(B)/test-panic.log && \
+	    echo "[TEST] PASS 崩溃屏：ramfb 上真的画出 1024x768" || (echo "[TEST] FAIL panic 屏未画" && exit 1)
 
 # ---------- 5. 树莓派 ----------
 rpi4:

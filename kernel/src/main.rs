@@ -32,6 +32,7 @@ mod kb;
 mod usb;
 mod xce;
 mod update;
+mod crash;
 
 /// 内嵌的原生程序（XCE）：构建时由 tools/mkxce.py 打包
 pub static XCE_DEMO: &[u8] = include_bytes!("../../assets/xce/demo.xce");
@@ -283,16 +284,50 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(p: &PanicInfo) -> ! {
-    println!();
-    println!("!!! ASTER 内核 panic !!!");
+    let sp: u64;
+    let lr: u64;
+    unsafe {
+        core::arch::asm!("mov {}, sp", out(reg) sp);
+        core::arch::asm!("mov {}, x30", out(reg) lr);
+    }
+    let mut note = [0u8; 96];
+    let mut used = 0usize;
     if let Some(loc) = p.location() {
-        println!("  位置: {}:{}", loc.file(), loc.line());
+        let file = loc.file();
+        let f = file.rsplit('/').next().unwrap_or(file);
+        used = push_str(&mut note, used, f);
+        used = push_str(&mut note, used, ":");
+        used = push_num(&mut note, used, loc.line() as u64);
     }
     if let Some(msg) = p.message().as_str() {
-        println!("  信息: {}", msg);
+        used = push_str(&mut note, used, "  ");
+        used = push_str(&mut note, used, msg);
     }
-    println!("  系统停机。");
-    loop {
-        unsafe { core::arch::asm!("wfe") };
-    }
+    let note_s = core::str::from_utf8(&note[..used]).unwrap_or("panic");
+    println!("!!! ASTER 内核 panic !!!");
+    crash::show("KERNEL PANIC", "内核已停机，关机后重新开机", note_s,
+        &[("SP", sp), ("LR", lr), ("ESR", read_esr()), ("FAR", read_far()), ("SPSR", read_spsr()), ("TTBR0", read_ttbr0())])
 }
+
+fn push_str(buf: &mut [u8; 96], mut at: usize, s: &str) -> usize {
+    for b in s.bytes() {
+        if at + 1 >= buf.len() { break; }
+        buf[at] = b;
+        at += 1;
+    }
+    at
+}
+
+fn push_num(buf: &mut [u8; 96], mut at: usize, mut v: u64) -> usize {
+    let mut tmp = [0u8; 20];
+    let mut n = 0;
+    if v == 0 { tmp[0] = b'0'; n = 1; }
+    while v > 0 { tmp[n] = b'0' + (v % 10) as u8; v /= 10; n += 1; }
+    while n > 0 { if at + 1 >= buf.len() { break; } buf[at] = tmp[n - 1]; at += 1; n -= 1; }
+    at
+}
+
+fn read_esr() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, esr_el1", out(reg) v) }; v }
+fn read_far() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) v) }; v }
+fn read_spsr() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, spsr_el1", out(reg) v) }; v }
+fn read_ttbr0() -> u64 { let v: u64; unsafe { core::arch::asm!("mrs {}, ttbr0_el1", out(reg) v) }; v }

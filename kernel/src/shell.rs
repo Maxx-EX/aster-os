@@ -903,6 +903,11 @@ pub fn run() -> ! {
                     }
                 }
             },
+            "panic" => {
+                println!("  这是自检命令：接下来内核会真的停下，用来验证崩溃屏");
+                println!("  串口留证据，屏幕（如果有）画一张红屏，然后不再回来");
+                panic!("shell 手动触发内核 panic");
+            },
             "wifi" | "wifi scan" | "wifi status" => {
                 let st = crate::wifi::probe();
                 println!("  后端      : {}", crate::wifi::backend_name(st.backend));
