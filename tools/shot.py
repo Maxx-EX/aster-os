@@ -29,7 +29,13 @@ if disk:
         "-drive", "if=none,file=" + str(ROOT / "build/aster.img") + ",format=raw,id=d0,file.locking=off,cache=writethrough",
         "-device", "virtio-blk-device,drive=d0",
     ]
-Q = ["qemu-system-aarch64", "-M", "virt", "-cpu", "cortex-a72", "-m", "512M", "-device", "ramfb"] + img_arg + [
+GPU = os.environ.get("GFX", "ramfb")
+gpu_arg = (
+    ["-global", "virtio-mmio.force-legacy=false", "-device", "virtio-gpu-device"]
+    if GPU == "virtio"
+    else ["-device", "ramfb"]
+)
+Q = ["qemu-system-aarch64", "-M", "virt", "-cpu", "cortex-a72", "-m", "512M"] + gpu_arg + img_arg + [
     "-device", "virtio-keyboard-device", "-device", "virtio-mouse-device",
     "-display", "none",
     "-serial", f"tcp:127.0.0.1:{SPORT},server,nowait",

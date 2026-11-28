@@ -63,6 +63,8 @@ pub fn tick() {
 
 pub fn redraw() {
     crate::shell::render_dashboard();
+    // virtio-gpu：整帧画完才推一次，主机不会看到半成品（ramfb 时这里是空操作）
+    fb::present();
 }
 
 /// 处理悬停、点击、拖拽，返回"需要重绘"
@@ -79,6 +81,20 @@ fn handle_mouse() -> bool {
     }
 
     while let Some((x, y, pressed)) = input::take_click() {
+        // 软键盘最优先：手机上没有硬件键盘，点一下键就等于敲一下字
+        if let Some(k) = crate::kb::hit(x, y) {
+            if pressed {
+                match k {
+                    crate::kb::K_CLOSE => crate::kb::set_open(false),
+                    crate::kb::K_BACKSPACE => input::push_char(0x7F),
+                    crate::kb::K_ENTER => input::push_char(b'\r'),
+                    _ => input::push_char(k),
+                }
+                want = true;
+            }
+            crate::cursor::invalidate();
+            continue;
+        }
         // 画布优先：落在 APK 画布上的点不给桌面（否则会当成点窗口）
         if crate::apkcanvas::active() {
             if let Some((cx, cy)) = crate::apkcanvas::screen_to_canvas(x, y) {
@@ -91,6 +107,16 @@ fn handle_mouse() -> bool {
         if pressed {
             // 点窗口：抬到最上层并聚焦；落在标题栏上就开始拖
             if let Some(i) = fb::hit_top(x, y) {
+                // 点终端窗口的内容区 → 弹出软键盘（手机端唯一的输入入口）
+                let w0 = fb::win(i);
+                if i == 0
+                    && y > w0.y + 44
+                    && y < w0.y + w0.h as i32 - 24
+                    && !crate::kb::open()
+                {
+                    crate::kb::set_open(true);
+                    want = true;
+                }
                 // 标题栏三个圆点：红关、黄收起、绿最大化/还原
                 if let Some(b) = fb::title_button_at(i, x, y) {
                     let w = fb::win(i);

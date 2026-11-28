@@ -2152,3 +2152,64 @@ poly() 执行完（40 条指令），正常 return-void
 ### 53.7 下一步
 
 方法解析这块基本齐了，剩下的硬骨头在**容器**：`ArrayList`/`HashMap` 需要对象数组（`new-array [Lxxx;` 存引用）、`instanceof`（`0x20`）、`check-cast`（`0x1f`）、以及 `String.hashCode`。APK-17 打算先把 `code_of` 也升级成双键匹配，再补 `instanceof`/`check-cast` + 引用数组，为 `ArrayList` 铺路。
+
+## §54 UI-9：GPU 真实呈现 + 手机端可输入可点击
+
+这一节解决用户拿手机（Termux 里的 QEMU 前端）跑 Aster 时看到的三个现象：**画面一闪一闪、终端内容区经常一片空白、点不着也打不了字**。三个都是真实缺陷，不是"手机性能不够"。
+
+### 54.1 三个根因
+
+1. **ramfb 是"共享内存 + 主机随时采样"，没有帧的概念。** 内核每 70ms 调一次 `render_dashboard()`，而 `draw_desktop` 的第一件事是 `restore_wall(0,0,W,H)` 把整屏 3 MiB 擦回壁纸，然后画侧栏、再逐窗画。QEMU 的前端以 60Hz 从 `0x5000_0000` 采内存：**几乎每一帧都采在"壁纸已擦、窗口还没画"的中间态**，于是终端区是空的；偶尔采到完整帧，就闪一下。`fb::present()` 在 ramfb 路径下是空操作，等于放弃了"整帧原子呈现"这条唯一能救命的能力。
+2. **`ZORD = [0,1,2]` 让终端窗口在最底层。** 终端（0）是最常用的窗口，却被"系统""网络"两块盖住右上角——手指点在红点上的其实是**上面那块窗口的标题栏**，所以"关不掉""点不动"。z 序在启动时定死，除非点到终端本体才会抬上来，而点到的是别的窗口，越点越乱。
+3. **回显走的是串口，不是屏幕。** `shell::read_line` 用 `uart::putc(c)` 回显，只写 PL011；而 `uart::puts()`（`print!` 走的路径）才是"两份输出：屏幕 + 串口"。所以手机上敲字**屏幕毫无反应**——看起来就是"没法输入"。
+
+### 54.2 改动
+
+**走 virtio-gpu（DeviceID 16），一帧一次 flush**
+
+`kernel/src/virtio_gpu.rs` 早就有 2D 资源路径（CREATE_2D → ATTACH_BACKING 挂 `0x5000_0000` 的 768 页 → TRANSFER_TO_HOST_2D → RESOURCE_FLUSH），但启动串从来没带 `-device virtio-gpu-device`，所以一直回落到 ramfb，这段代码等于没跑过。这次真正跑通，顺手修了三个 bug：
+
+- **legacy 队列的 `used` 偏移**：legacy 规范把它放在 `desc` 之后按 4 KiB 对齐处（QSIZE=8 时正好 `+4096`），驱动原来写成 `+2048`，主机写 `+4096`、驱动读 `+2048`，永远等不到 → `create_2d 命令超时`。环缓冲同时从 4 KiB 扩到 8 KiB。
+- **像素格式号**：QEMU 的 `virtio_gpu_formats` 里 `1 = B8G8R8A8_UNORM`、`3 = A8R8G8B8`。内核像素是 `0x00RRGGBB`、内存字节序 `B,G,R,X`，所以该填 **1**。填 3 时整屏偏绿（红蓝通道互换），第一版截图就是这个绿屏。
+- **光标只 flush 小块**：`cursor.rs` 原来走 `present_rect`，和整屏 flush 交替，QEMU 侧 surface 出现"半新半旧"，文字重影。改成整屏 `present()`，重影消失。
+
+启动参数从 `-device ramfb` 换成 `-global virtio-mmio.force-legacy=false -device virtio-gpu-device`（modern 队列用寄存器指定 desc/avail/used，比 legacy 的 PFN 推导少一层猜测）。`fb::init()` 的顺序不变：先试 GPU，失败才退 ramfb，所以老参数也还能跑。
+
+**终端窗口置顶**
+
+`ZORD` 初值 `[0,1,2]` → `[1,2,0]`。终端在最上层，点击必然命中终端；关窗、拖动、打字都落在"看得见的那块"上。
+
+**屏幕软键盘（`kernel/src/kb.rs`，新文件）**
+
+手机上 QEMU 前端送不进可靠 scancode，所以键盘画在 Aster 自己的界面里：
+
+- 面板 500×244 贴在屏幕右下，5 行 ASCII（数字 / qwerty / asdfghjkl / zxcvbnm+DEL / SPACE+ENTER+-_+/+HIDE）；
+- 键宽按内容算（SPACE、ENTER 双宽），每行居中，命中测试与绘制共用 `key_rect()`，不会错位；
+- 点终端窗口的内容区（`y > w.y+44` 且没到底栏）自动弹出键盘，按 `HIDE` 收起；
+- 字符直接进 `input` 的字符环（新增 `input::push_char`，与真键盘同一个 128 字节环），`read_line` 一行代码都不用改。
+
+**标题栏热区放大**：`title_button_at` 从 `y ∈ [w.y+14, w.y+30]`、半径 ±8 改成 `y ∈ [w.y+8, w.y+38]`、半径 ±14 —— 32×30 的方块，手指能点中，视觉上的三色点大小不变。
+
+**回显上屏**：`read_line` 的 `uart::putc` 全换成 `crate::print!`（屏幕 + 串口双写）；退格发 `\u{8} \u{8}`，`term::write` 新增 `\u{8}` 分支（光标退一格并抹白）——原来的 `term` 只认 `\n`/`\r`/`\t`。
+
+### 54.3 现场
+
+- `build/gpu3.png`：GPU 接管（`[FB] virtio-gpu 2D 已接管：1024x768 resource #1 @0x50000000（合成后 flush 才上屏）`），颜色正确、文字清晰、无重影；对比 `build/kb2b.png`（ramfb，同一份 elf）正好是"终端区全黑 + 只有标题栏"的撕裂帧——用户截图里的那个画面。
+- `build/kb2.png`：点终端内容区弹出键盘，点 `h` 键，屏幕提示符后面真的出现 `h`，并与后续排队的命令拼成 `hsim click ...` → 软键盘字符确实进了 `read_line` 的缓冲区。
+- `build/close3.png`：点红点（真实标题栏坐标 y≈108，此前按截图目测的 134 落在热区外）后终端关闭，焦点自动交给"系统"窗口，两块小窗完整显示。
+- `make test` 仍 **28 PASS / 0 FAIL**。
+
+### 54.4 限制
+
+- 软键盘只有 ASCII，没有中文 IME（要另做候选串 + 拼音表，工作量和一套输入法编辑器相当）。
+- 触摸仍是**相对位移**（`EV_REL`）语义：QEMU 前端的"触摸当鼠标"模式能用，但真正的绝对坐标设备（`virtio-tablet`）还没接，手指与光标在长距离上会漂。
+- 键盘是浮层，会盖住终端下半部分（能 HIDE，但会反复开关）。
+- 只有一块 resource、没有双缓冲：绘制仍在同一块内存上就地改，靠"画完才 flush"保证原子性；真正的前后台双缓冲 + 脏区合批还没做。
+- GPU 路径要求 modern virtio-mmio（`force-legacy=false`）；legacy 那条路径这次没有回归验证（QEMU 默认就是 legacy，加了参数才 modern）。
+
+### 54.5 下一步（UI-10）
+
+1. 接 `virtio-tablet`（`EV_ABS` + `ABS_X/ABS_Y` + `BTN_TOUCH`），让手指坐标就是屏幕坐标，去掉漂移；
+2. 双缓冲：`FB_BACK` 另一块 3 MiB，画完 `memcpy` 到前台再一次 flush，同时按脏区合批，省掉每帧 3 MiB 的 transfer；
+3. 软键盘加"最近命令"行（把 `↑` 历史做成三个可点的 chip），手机上少打字；
+4. 窗口开合过渡（缩放 + 淡入），补上 UI-8 欠的动效。

@@ -366,3 +366,4 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
   3. 之后进阶段三 A（virtio-blk + AsterFS + 从盘加载用户程序），再进 B（引导器从盘加载内核）
 - 阶段二遗留（不急，等需要时补）：#7 其余 syscall、#14 每任务内核栈、#15 SMP、#16 panic 屏
 - 每次提交前跑：`make test && make test-gfx && make test-net`
+- **UI-9 ✅ GPU 真实呈现（virtio-gpu 2D + 整帧 flush）、终端置顶、屏幕软键盘、标题栏热区放大、输入回显上屏**：ramfb 撕裂（闪/空白）、z 序（点不着）、`uart::putc` 回显（打不了字）三个根因逐个收掉；`make test` 28 PASS

@@ -424,6 +424,11 @@ fn push(c: u8) {
     }
 }
 
+/// 从别处喂一个字符（软键盘用）：和真键盘走同一条环，shell 不用改
+pub fn push_char(c: u8) {
+    push(c);
+}
+
 /// 取一个字符（非阻塞）
 pub fn read_char() -> Option<u8> {
     unsafe {

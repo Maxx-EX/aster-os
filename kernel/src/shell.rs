@@ -62,17 +62,18 @@ fn read_line(buf: &mut [u8]) -> usize {
         }
         match c {
             b'\r' | b'\n' => {
-                uart::putc(b'\n');
+                crate::print!("\n");
                 return n;
             }
             0x7F | 0x08 if n > 0 => {
                 n -= 1;
-                uart::puts("\x08 \x08");
+                // 屏幕和串口一起擦：term 的 \x08 处理会把光标退一格并抹白
+                crate::print!("\u{8} \u{8}");
             }
             0x20..=0x7E | 0x80..=0xFF if n < buf.len() - 1 => {
                 buf[n] = c;
                 n += 1;
-                uart::putc(c);
+                crate::print!("{}", c as char);
             }
             _ => {}
         }
@@ -943,6 +944,8 @@ pub fn render_dashboard() {
     crate::term::mark_clean(uptime_ms());
     // APK 跑过画布就盖在最上层（桌面重绘不擦掉它）
     crate::apkcanvas::draw_if_active();
+    // 软键盘盖在所有窗口之上（手机端唯一能用的输入手段）
+    crate::kb::draw_if_open();
 }
 
 fn cmd_net() {

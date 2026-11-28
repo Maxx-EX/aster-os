@@ -104,6 +104,8 @@ pub fn update() -> bool {
         if VISIBLE && mx == X && my == Y && frame == LAST_FRAME {
             return false;
         }
+        let ox = X;
+        let oy = Y;
         if VISIBLE {
             restore();
         }
@@ -113,6 +115,12 @@ pub fn update() -> bool {
         paint();
         VISIBLE = true;
         LAST_FRAME = frame;
+        // 旧位置和新位置合成一块矩形推上去，别为了 16x16 的光标搬整个 3 MiB
+        let x0 = ox.min(X).max(0) as u32;
+        let y0 = oy.min(Y).max(0) as u32;
+        let x1 = (ox.max(X) + 18).max(0) as u32;
+        let y1 = (oy.max(Y) + 18).max(0) as u32;
+        fb::present();
     }
     true
 }

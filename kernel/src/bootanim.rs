@@ -277,6 +277,8 @@ pub fn play() {
             break;
         }
         frame(el, w, h, cx, cy, 600);
+        fb::present();
     }
     fb::fill_rect(0, 0, w, h, 0x1a1d22);
+    fb::present();
 }

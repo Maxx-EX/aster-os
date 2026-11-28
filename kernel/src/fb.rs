@@ -218,6 +218,19 @@ fn find_file(name: &[u8]) -> Option<u16> {
 
 #[cfg(not(any(feature = "rpi3", feature = "rpi4")))]
 pub fn init() -> bool {
+    // 先试 virtio-gpu：有它就走 GPU 呈现，帧是原子的，不会画到一半被采样
+    if crate::virtio_gpu::init(FB_PHYS, FB_W, FB_H) {
+        unsafe {
+            FB = Some(Fb { w: FB_W, h: FB_H, stride: FB_W * 4, base: FB_PHYS });
+        }
+        clear(0x0B1119);
+        crate::println!(
+            "[FB] virtio-gpu 2D 已接管：{}x{}  resource #1  @{:#x}（合成后 flush 才上屏）",
+            FB_W, FB_H, FB_PHYS
+        );
+        return true;
+    }
+    crate::println!("[FB] 没有 virtio-gpu，退回 ramfb（fw_cfg 采样模式）");
     let sel = match find_file(b"etc/ramfb") {
         Some(s) => s,
         None => {
@@ -273,6 +286,17 @@ pub fn init() -> bool {
         addr, w, h, stride, read_px(w / 2, h / 2)
     );
     true
+}
+
+/// 把当前帧推上屏幕。ramfb 由 QEMU 自己采样，这里是空操作；
+/// virtio-gpu 需要显式 transfer + flush，也正因为如此帧才完整。
+pub fn present() {
+    crate::virtio_gpu::present();
+}
+
+/// 只推一块矩形（光标这种小面积更新）
+pub fn present_rect(x: u32, y: u32, w: u32, h: u32) {
+    crate::virtio_gpu::present_rect(x, y, w, h);
 }
 
 pub fn dump_fwcfg() {
@@ -1204,7 +1228,9 @@ static mut WINS: [Win; NWIN] = [
     Win { x: 604, y: 428, w: 372, h: 224, open: true },
 ];
 
-static mut ZORD: [usize; NWIN] = [0, 1, 2];
+// 终端放最上层：手机端最常点的就是它，原来 [0,1,2] 会让系统/网络两块压住终端右上角，
+// 点"关窗"实际点到别的窗口上（这就是"关不掉、点不动"的根因）
+static mut ZORD: [usize; NWIN] = [1, 2, 0];
 static mut FOCUS: usize = 0;
 
 pub fn win(i: usize) -> Win {
@@ -1261,17 +1287,18 @@ pub enum Btn {
 /// 标题栏三个圆点（左起 绿/黄/红）的命中判定，半径 8px 好点
 pub fn title_button_at(i: usize, x: i32, y: i32) -> Option<Btn> {
     let w = win(i);
-    if y < w.y + 14 || y > w.y + 30 {
+    // 手指比鼠标粗：热区从 16×16 放大到 32×30（视觉上的三色点不变）
+    if y < w.y + 8 || y > w.y + 38 {
         return None;
     }
     let cx = w.x + w.w as i32 - 26;
-    if (x - cx).abs() <= 8 {
+    if (x - cx).abs() <= 14 {
         return Some(Btn::Close);
     }
-    if (x - (cx - 20)).abs() <= 8 {
+    if (x - (cx - 20)).abs() <= 14 {
         return Some(Btn::Min);
     }
-    if (x - (cx - 40)).abs() <= 8 {
+    if (x - (cx - 40)).abs() <= 14 {
         return Some(Btn::Max);
     }
     None

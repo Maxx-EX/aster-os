@@ -66,6 +66,15 @@ pub fn write(s: &str) {
         match ch {
             '\n' => newline(),
             '\r' => unsafe { COL = 0 },
+            '\u{8}' => {
+                unsafe {
+                    if COL > 0 {
+                        COL -= 1;
+                    }
+                    CELLS[ROW][COL] = b' ' as u16;
+                    DIRTY = true;
+                }
+            }
             '\t' => {
                 for _ in 0..4 {
                     put(b' ' as u16);

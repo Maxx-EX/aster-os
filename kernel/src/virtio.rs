@@ -32,6 +32,7 @@ pub const VIRTIO_MMIO_SLOTS: u64 = 32;
 pub const DEV_NET: u32 = 1;
 pub const DEV_BLOCK: u32 = 2;
 pub const DEV_INPUT: u32 = 18;
+pub const DEV_GPU: u32 = 16;
 
 pub const STATUS_ACK: u32 = 1;
 pub const STATUS_DRIVER: u32 = 2;
@@ -165,6 +166,11 @@ impl Device {
     pub fn add_status(&self, bits: u32) {
         let v = self.status() | bits;
         self.set_status(v);
+    }
+
+    pub fn queue_max(&self, idx: u32) -> u32 {
+        w32(self.base, 0x030, idx);
+        r32(self.base, 0x034)
     }
 
     pub fn device_features(&self) -> u64 {

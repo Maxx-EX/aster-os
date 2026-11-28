@@ -28,6 +28,7 @@ mod zip;
 mod inflate;
 mod dex;
 mod apkcanvas;
+mod kb;
 mod usb;
 mod xce;
 mod update;
@@ -46,6 +47,7 @@ mod ui;
 mod timer;
 mod uart;
 mod virtio;
+mod virtio_gpu;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
