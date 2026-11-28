@@ -350,37 +350,62 @@ fn slot_ptr(g: usize) -> Option<u64> {
     Some(base + (PG_HDR + (g % SLOTS_PER_PAGE) * SLOT_SIZE) as u64)
 }
 
-// —— 数组（APK-6）——
-// 寄存器里对象用 0..NOBJ，数组用 0x100+i 这一段，两者不会撞车。
+// —— 数组（APK-14）：元素放在页帧里，长度不再有固定上限 ——
+//
+// 每个数组一个槽：长度、页数、元素缓冲区地址。元素是连在一起的 i32，
+// aget/aput 直接按 data + k*4 读写。上限只受"连续物理页"约束（见 MAX_ELEMS）。
+// len=0 的数组不占页，data=0。
+const NARR: usize = 64;
+const ARR_TAG: i32 = 0x100;
+const ELEM_BYTES: u64 = 4;
+const MAX_ELEMS: u32 = 4096; // 16 KiB / 4 页
+
 #[derive(Clone, Copy)]
-struct Arr {
+struct ArrSlot {
+    used: bool,
     len: u32,
-    d: [i32; 32],
+    npages: u16,
+    data: u64,
 }
 
-const NARR: usize = 16;
-const ARR_TAG: i32 = 0x100;
-static mut ARRS: [Arr; NARR] = [Arr { len: 0, d: [0; 32] }; NARR];
-static mut NARR_USED: usize = 0;
+static mut ARRS: [ArrSlot; NARR] =
+    [ArrSlot { used: false, len: 0, npages: 0, data: 0 }; NARR];
 
 fn arr_new(len: u32) -> Result<i32, &'static str> {
     unsafe {
-        if NARR_USED >= NARR {
-            return Err("数组堆满（最多 16 个）");
+        let bytes = (len as u64) * ELEM_BYTES;
+        let npages = ((bytes + 4095) / 4096) as usize;
+        let data = if npages == 0 {
+            0
+        } else {
+            match crate::frame::alloc_pages(npages) {
+                Some(p) => p,
+                None => return Err("连续物理页不足，数组开不出来"),
+            }
+        };
+        let mut i = 0;
+        while i < NARR {
+            if !ARRS[i].used {
+                ARRS[i] = ArrSlot { used: true, len, npages: npages as u16, data };
+                return Ok(ARR_TAG + i as i32);
+            }
+            i += 1;
         }
-        if len > 32 {
-            return Err("数组超过 32 个元素（v0 上限）");
+        // 槽位满了，把刚分配的页还回去再报错
+        if npages > 0 {
+            let mut p = 0usize;
+            while p < npages {
+                crate::frame::free(data + (p as u64) * 4096);
+                p += 1;
+            }
         }
-        let i = NARR_USED;
-        ARRS[i] = Arr { len, d: [0; 32] };
-        NARR_USED += 1;
-        Ok(ARR_TAG + i as i32)
+        Err("数组槽用尽（最多 64 个）")
     }
 }
 
 fn arr_idx(v: i32) -> Result<usize, &'static str> {
     let i = v - ARR_TAG;
-    if i < 0 || i as usize >= unsafe { NARR_USED } {
+    if i < 0 || (i as usize) >= NARR || !unsafe { ARRS[i as usize].used } {
         return Err("不是有效的数组引用");
     }
     Ok(i as usize)
@@ -388,10 +413,16 @@ fn arr_idx(v: i32) -> Result<usize, &'static str> {
 
 fn arr_reset() {
     unsafe {
-        NARR_USED = 0;
         let mut i = 0;
         while i < NARR {
-            ARRS[i] = Arr { len: 0, d: [0; 32] };
+            if ARRS[i].used && ARRS[i].npages > 0 {
+                let mut p = 0u16;
+                while p < ARRS[i].npages {
+                    crate::frame::free(ARRS[i].data + (p as u64) * 4096);
+                    p += 1;
+                }
+            }
+            ARRS[i] = ArrSlot { used: false, len: 0, npages: 0, data: 0 };
             i += 1;
         }
     }
@@ -796,6 +827,9 @@ fn exec(
                 if regs[b] < 0 {
                     return Err("数组长度是负数");
                 }
+                if regs[b] as u32 > MAX_ELEMS {
+                    return Err("数组超过 4096 个元素");
+                }
                 regs[a] = arr_new(regs[b] as u32)?;
                 pc += 2;
             }
@@ -814,7 +848,8 @@ fn exec(
                 if k < 0 || k >= len {
                     return Err("数组下标越界（aget）");
                 }
-                regs[a] = unsafe { ARRS[i].d[k as usize] };
+                let base = unsafe { ARRS[i].data };
+                regs[a] = rd_i32(base + k as u64 * ELEM_BYTES);
                 pc += 2;
             }
             0x4b => {
@@ -832,7 +867,8 @@ fn exec(
                 if k < 0 || k >= len {
                     return Err("数组下标越界（aput）");
                 }
-                unsafe { ARRS[i].d[k as usize] = regs[a] };
+                let base = unsafe { ARRS[i].data };
+                wv_i32(base + k as u64 * ELEM_BYTES, regs[a]);
                 pc += 2;
             }
             0x27 => {

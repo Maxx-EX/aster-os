@@ -90,6 +90,8 @@ STRINGS = [
     "append",
     "arg",
     "array ok",
+    "big",
+    "big ok",
     "canvas ok",
     "caught",
     "caught local",
@@ -156,6 +158,7 @@ S_MVX, S_MVY, S_W, S_H = IDX["moveX"], IDX["moveY"], IDX["width"], IDX["height"]
 S_ONCREATE, S_ONTOUCH, S_ONDESTROY = IDX["onCreate"], IDX["onTouch"], IDX["onDestroy"]
 S_ONCREATEOK, S_ONDESTROYOK = IDX["onCreate ok"], IDX["onDestroy ok"]
 S_TAPS = IDX["taps"]
+S_BIG, S_BIGOK = IDX["big"], IDX["big ok"]
 S_APP, S_ARG = IDX["Lcom/aster/App;"], IDX["arg"]
 S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
 S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
@@ -180,6 +183,7 @@ M_FRAME = 21
 M_CV_MVX, M_CV_MVY, M_CV_W, M_CV_H = 22, 23, 24, 25
 M_ONCREATE, M_ONTOUCH, M_ONDESTROY = 26, 27, 28
 M_APP_ARG = 29
+M_BIG = 30
 P_III = 9
 
 
@@ -252,6 +256,7 @@ def build():
     buf += struct.pack("<HHI", T_MAIN, P_III, S_ONTOUCH)       # 27 Main.onTouch(III)V
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_ONDESTROY)    # 28 Main.onDestroy()V
     buf += struct.pack("<HHI", T_APP, P_INT_I, S_ARG)          # 29 App.arg()I（内建）
+    buf += struct.pack("<HHI", T_MAIN, P_VOID, S_BIG)          # 30 Main.big()V
 
     class_defs_off = len(buf)
     main_def_pos = len(buf)
@@ -636,6 +641,30 @@ def build():
     buf += struct.pack("<HHHHII", 1, 0, 0, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
+    # Main.big()V —— APK-14：2048 元素数组（8192 字节 / 2 页），写一遍再读一遍求和
+    # 旧上限是每数组 32 元素，这条直接越过它。
+    code_big = len(buf)
+    ins = [
+        0x0113, 0x0800,            # 0  const/16 v1, #2048（8192 字节 = 2 页）
+        0x1023, T_ARR,             # 2  new-array v0, v1, [I
+        0x0312,                    # 4  const/4 v3, #0（s）
+        0x0212,                    # 5  const/4 v2, #0（i）
+        0x1235, 0x0D00,            # 6  if-ge v2, v1 -> +13（跳到 19）
+        0x0444, 0x0200,            # 8  aget v4, v0, v2（23x 的 A 是 8 位）
+        0x024b, 0x0200,            # 10 aput v2, v0, v2（a[i]=i）
+        0x0444, 0x0200,            # 12 aget v4, v0, v2（读回来）
+        0x0390, 0x0403,            # 14 add-int v3, v3, v4
+        0x02d8, 0x0201,            # 16 add-int/lit8 v2, v2, #1
+        0xF428,                    # 18 goto -12（回 6）
+        0x1071, M_N, 0x0003,       # 19 Log.n(v3) -> 2096128
+        0x001a, S_BIGOK,           # 22 const-string v0, "big ok"
+        0x1071, M_I, 0x0000,       # 24 Log.i(v0)
+        0x000e,                    # 27 return-void
+    ]
+    assert len(ins) == 28, len(ins)
+    buf += struct.pack("<HHHHII", 5, 0, 0, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
     # Main 的 static_values：cvh=0, hits=1, px=140, py=80
     sv_main = len(buf)
     buf += uleb(5) + b"\x04\x00" + b"\x04\x01" + b"\x24\x8c\x00" + b"\x04\x50" + b"\x04\x00"
@@ -650,7 +679,7 @@ def build():
 
     # Main 的 class_data：4 个静态字段 + 3 个 direct（APK-11 加了 cvh/px/py 和 frame）
     cd_main = len(buf)
-    buf += uleb(5) + uleb(0) + uleb(6) + uleb(0)
+    buf += uleb(5) + uleb(0) + uleb(7) + uleb(0)
     buf += uleb(F_CVH - 0) + uleb(0x0008)        # cvh：static int
     buf += uleb(F_HITS - F_CVH) + uleb(0x0008)   # hits
     buf += uleb(F_PX - F_HITS) + uleb(0x0008)    # px
@@ -662,6 +691,7 @@ def build():
     buf += uleb(M_ONCREATE - M_FRAME) + uleb(0x0009) + uleb(code_onCreate)
     buf += uleb(M_ONTOUCH - M_ONCREATE) + uleb(0x0009) + uleb(code_onTouch)
     buf += uleb(M_ONDESTROY - M_ONTOUCH) + uleb(0x0009) + uleb(code_onDestroy)
+    buf += uleb(M_BIG - M_ONDESTROY) + uleb(0x0009) + uleb(code_big)
 
     # Base 的 class_data：1 实例字段 + 1 direct + 1 virtual
     cd_base = len(buf)
@@ -706,7 +736,7 @@ def build():
         (0x0002, 14, type_ids_off),
         (0x0003, 10, proto_ids_off),
         (0x0004, 7, field_ids_off),
-        (0x0005, 30, method_ids_off),
+        (0x0005, 31, method_ids_off),
         (0x0006, 7, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
@@ -726,7 +756,7 @@ def build():
         type_ids=(14, type_ids_off),
         proto_ids=(10, proto_ids_off),
         field_ids=(7, field_ids_off),
-        method_ids=(30, method_ids_off),
+        method_ids=(31, method_ids_off),
         class_defs=(7, class_defs_off),
         data=(data_size, data_off),
         code_init=code_init, code_next=code_next,
@@ -735,6 +765,7 @@ def build():
         code_child_init=code_child_init, code_boom_init=code_boom_init,
         code_frame=code_frame, code_onCreate=code_onCreate,
         code_onTouch=code_onTouch, code_onDestroy=code_onDestroy,
+        code_big=code_big,
     )
 
 
@@ -769,7 +800,7 @@ def main():
     assert buf[12:32] == hashlib.sha1(bytes(buf[32:])).digest()
     for name in ("code_init", "code_next", "code_run", "code_hello",
                  "code_base_init", "code_base_get", "code_child_init", "code_boom_init",
-                 "code_frame", "code_onCreate", "code_onTouch", "code_onDestroy"):
+                 "code_frame", "code_onCreate", "code_onTouch", "code_onDestroy", "code_big"):
         off = info[name]
         regs, ins_n, outs, tries, dbg, n = struct.unpack_from("<HHHHII", buf, off)
         insns = [struct.unpack_from("<H", buf, off + 16 + 2 * i)[0] for i in range(n)]

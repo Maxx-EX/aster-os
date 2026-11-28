@@ -1138,8 +1138,12 @@ fn cmd_dex(a: &str) {
         }
     };
     let d = &buf[..n];
-    if t == "run" || t == "hello" {
-        let which = if t == "run" { "run" } else { "hello" };
+    if t == "run" || t == "hello" || t == "big" {
+        let which = match t {
+            "run" => "run",
+            "big" => "big",
+            _ => "hello",
+        };
         match crate::dex::header(d) {
             Ok(h) => match crate::dex::run(d, &h, "Lcom/aster/Main;", which) {
                 Ok(steps) => println!("  {}() 执行完（{} 条指令），正常 return-void", which, steps),
@@ -1152,7 +1156,7 @@ fn cmd_dex(a: &str) {
             Ok(_) => {}
             Err(e) => println!("  {}", e),
         }
-        println!("  → dex run 执行 Main->run()V（循环求和 1..5 + 打印整数）；dex hello 执行 hello()V");
+        println!("  → dex run 执行 Main->run()V（循环求和 1..5 + 打印整数）；dex big 跑 64 元素数组求和；dex hello 执行 hello()V");
     }
 }
 
