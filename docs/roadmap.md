@@ -125,8 +125,8 @@
 | AF-2 ✅ | virtio-blk 驱动（Rust） | DeviceID 2，复用 `virtio.rs` 的 modern 队列；一次请求三段：请求头（16 B：类型/保留/sector/数据长度）+ 数据 + 状态字节。读走只读请求（类型 0），写走类型 1 |
 | AF-3 ✅ | **AsterFS v0** | 4 KiB 块；块 0 超级块（`AFS1` magic + 块大小 + 块数 + inode 数 + 根 inode + CRC32）；块 1..N inode 表（每 inode 64 B：类型/大小/直接块指针 12 个/时间）；位图块；数据块。**目录项就是 inode 里的 `名字→inode` 列表**，不做 B 树 |
 | AF-4 | 块缓存 | 32 个 4 KiB 缓冲 + LRU，读命中直接返回，写标脏，`sync` 刷盘。内存从页帧池要（`alloc_pages`） |
-| AF-5 🔶 | VFS 薄层 | **已做**：内核一份 fd 表 16 槽（0/1/2 留标准流），每 fd 4 KiB 页缓冲，路径逐段解析（24 字节段名）。**待做**：每任务一份、`readdir`、`lseek`、>4 KiB 长文件 |
-| AF-6 🔶 | syscall 接上 | **已做**：56 openat（O_WRONLY/O_CREAT）、57 close、63 read，64 write 扩到 fd≥3。**待做**：62 lseek、80 fstat |
+| AF-5 ✅ | VFS 薄层 | 16 槽 fd 表（0/1/2 留标准流）、路径逐段解析。只读打开不再整文件搬运：`read` 按偏移走 `afs::read_at` 从块缓存取，文件多大都不占内存（README 19 KiB 全文可行）；`readdir` 目录句柄（32 字节/项 ino/typ/namelen/name）；`lseek` SEEK_SET/CUR/END。**仍待做**：每任务一份 fd 表 |
+| AF-6 ✅ | syscall 接上 | 56 openat（含目录 → 目录句柄）、57 close、61 readdir、62 lseek、63 read、64 write、80 fstat（64 字节 8×u64：size/ino/mode/typ/uid/gid/mtime/首块） |
 | AF-7 ✅ | shell 命令 | `ls / cat / load / sync / df` 全部到位。`load <名字>` 把盘上程序读进新地址空间并跑起来，跑完自动回 shell |
 | AF-8 ✅ | 用户程序脱离内嵌 | 新增 `tools/mkafs.py`：主机侧直接写 AsterDisk 头 + AsterFS 根目录，`build/user/*.bin` 由 `make img` 打进镜像。`task::pick()` 先读盘、盘上没有才退回内嵌副本，`run / runp / runf / iso / fp / wx / yield / load` 全部走磁盘；串口会打印「程序来源：磁盘 xxx」。`make test-fs` 7 项断言把这条链路钉住 |
 
@@ -405,3 +405,5 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **UI-12 ✅ 桌面秩序与手感**：浏览窗改成默认收起（`WINS[3].open=false`），开局桌面只剩终端，点 dock「网页」或侧栏「浏览」才开；`dock_hit` 跳过 `win_state(i)==0` 的格子，关掉的窗口不再留隐形热区；侧栏第 4 个图标从 info 圆点换成地球（`tools/genfont.py` 加 globe 分支，前三个图标字节不变）；浏览器首开时 `url_str()` 为空就自动 `open_home()`，地址栏不再空白；系统窗 380×330、网络窗 372×216，body 首行提到 `TITLE_H+16`、行距 24，底部行不再被裁；滚动条换成 4px 淡轨 + 6px 半透明滑块（`rounded_rect_alpha`，ACCENT alpha=120）；删掉 dock 那条与焦点无关的固定强调线；`cursor::invalidate()` 先 `restore()` 再标不可见，拖动时一串光标残影消失；浏览器链接改成"按下记目标、松手位移 <12px 才跳"，压着链接也能拖滚动；地址栏左侧加「首页」按钮，点一下回内置起始页。`make test` 50 PASS、`make test-gfx` 3 PASS
 
 - **FS-1 ✅ 从盘加载用户程序闭环**：`tools/mkafs.py` 在主机上按 `kernel/src/disk.rs` / `afs.rs` 的布局写镜像（磁盘头 ADSK + 分区表 64 B 项 + 4 KiB 块 AFS1 超级块 + inode 位图/块位图/inode 表/根目录项），`build/user/*.bin` 一次打进去；`make img` 自动调用。内核侧 `load <名字>` 读文件 → `task::run_from()` 装新地址空间 → 切 EL0 → 任务 exit 自动回 shell；`task::pick()` 让原有 `run/runp/runf/iso/fp/wx/yield` 也优先吃盘，盘不在才用内嵌副本（树莓派无盘路径不断）。新增 `make test-fs`：virtio-blk 上线、根目录有 hello、`load` 真读盘、EL0 跑起来、跑完回 shell、错名字有提示、`run` 也走磁盘 —— 7 项全 PASS
+
+- **FS-2 ✅ 随机读与目录遍历（AF-5 / AF-6 收口）**：`afs::read_at()` 按字节偏移逐块从块缓存取，不再整文件复制；`afs::dir_ent()/dir_count()` 让 `readdir` 能翻目录。VFS 层加目录句柄（`dir/dino/dpos`）、`lseek`（SEEK_SET/CUR/END，允许指到尾部之后）、`meta_of()`；`openat("/")` 与非只读目录自动走 `opendir`。syscall 补 61 readdir（32 字节项：ino/typ/namelen/name[24]）、62 lseek、80 fstat。`cat` 改流式（一次一块，19 KiB 的 README 能从头打到尾）。新增用户程序 `user/fss.S`（lseek→fstat→read→readdir），`make test-fs` 加到 11 项断言：`lseek → 19455`、`fstat size=19455 ino=8 mode=644`、`readdir → 256 字节`、从 19 KiB 文件里真的读到了第一块之后的内容

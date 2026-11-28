@@ -732,3 +732,77 @@ pub fn format(name: &str) -> bool {
     crate::cache::flush();
     true
 }
+
+/// 按字节偏移读一段：不整文件复制，逐块从块缓存取，所以文件多大都不吃内存。
+/// 返回实际读到的字节数（越过文件尾就截断）。
+pub fn read_at(ino: u32, off: u32, out: &mut [u8]) -> usize {
+    let f = match inode_read(ino) {
+        Some(f) => f,
+        None => return 0,
+    };
+    if f.typ != T_FILE {
+        return 0;
+    }
+    let size = f.size as usize;
+    let mut pos = off as usize;
+    if pos >= size {
+        return 0;
+    }
+    let mut n = 0usize;
+    while n < out.len() && pos < size {
+        let bi = pos / BS;
+        if bi >= NDIRECT {
+            break;
+        }
+        let b = f.blocks[bi];
+        if b == 0 {
+            break;
+        }
+        let in_blk = pos % BS;
+        let mut chunk = BS - in_blk;
+        if chunk > out.len() - n {
+            chunk = out.len() - n;
+        }
+        if chunk > size - pos {
+            chunk = size - pos;
+        }
+        match crate::cache::get(b) {
+            Some(data) => out[n..n + chunk].copy_from_slice(&data[in_blk..in_blk + chunk]),
+            None => break,
+        }
+        pos += chunk;
+        n += chunk;
+    }
+    n
+}
+
+/// 目录第 idx 项（0 = "."，1 = ".."，之后是真实条目）。
+/// 返回 (inode, 类型, 名字字节, 名字长度)；越界返回 None。
+pub fn dir_ent(dino: u32, idx: usize) -> Option<(u32, u16, [u8; 24], usize)> {
+    let d = inode_read(dino)?;
+    if d.typ != T_DIR {
+        return None;
+    }
+    let byte = idx * ENT;
+    if byte + ENT > d.size as usize {
+        return None;
+    }
+    let bi = byte / BS;
+    if bi >= NDIRECT || d.blocks[bi] == 0 {
+        return None;
+    }
+    let o = byte % BS;
+    let data = crate::cache::get(d.blocks[bi])?;
+    let mut name = [0u8; 24];
+    name.copy_from_slice(&data[o..o + 24]);
+    let nlen = name.iter().position(|&c| c == 0).unwrap_or(24);
+    Some((get_u32(data, o + 24), get_u16(data, o + 28), name, nlen))
+}
+
+/// 目录项总数（含 . 与 ..）
+pub fn dir_count(dino: u32) -> usize {
+    match inode_read(dino) {
+        Some(d) if d.typ == T_DIR => (d.size as usize) / ENT,
+        _ => 0,
+    }
+}

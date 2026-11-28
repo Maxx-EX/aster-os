@@ -552,23 +552,54 @@ fn cmd_cat(a: &str) {
         println!("  用法: cat <文件>");
         return;
     }
-    let out = cat_out();
-    match crate::afs::read_file(name, out) {
-        Ok(n) => {
-            let mut i = 0usize;
-            while i < n {
-                let mut end = (i + 64).min(n);
-                while end < n && (out[end] & 0xc0) == 0x80 {
-                    end += 1;
-                }
-                match core::str::from_utf8(&out[i..end]) {
-                    Ok(s) => println!("  {}", s),
-                    Err(_) => println!("  <非 UTF-8 数据，{} 字节>", n),
-                }
-                i = end;
-            }
+    let f = match crate::afs::raw_inode(name) {
+        Some(f) => f,
+        None => {
+            println!("  {}", if crate::blk::available() { "没有这个文件" } else { "没有磁盘" });
+            return;
         }
-        Err(e) => println!("  {}", e),
+    };
+    if f.typ == crate::afs::T_DIR {
+        println!("  {} 是目录，用 ls 看", name);
+        return;
+    }
+    if f.size == 0 {
+        println!("  （空文件）");
+        return;
+    }
+    // 流式：一次读一块，多大的文件都能从头打到尾（不再受页缓冲上限）
+    let out = cat_out();
+    let mut off = 0u32;
+    while off < f.size {
+        let n = crate::afs::read_at(f.ino, off, out);
+        if n == 0 {
+            break;
+        }
+        let mut i = 0usize;
+        while i < n {
+            let mut end = (i + 64).min(n);
+            while end < n && (out[end] & 0xc0) == 0x80 {
+                end += 1;
+            }
+            match core::str::from_utf8(&out[i..end]) {
+                Ok(s) if !s.is_empty() => println!("  {}", s),
+                _ => {
+                    // 块尾切在多字节字符中间：退回上一个完整字符再试
+                    let mut e = end;
+                    while e > i + 1 && (out[e - 1] & 0xc0) == 0x80 {
+                        e -= 1;
+                    }
+                    if let Ok(s) = core::str::from_utf8(&out[i..e]) {
+                        if !s.is_empty() {
+                            println!("  {}", s);
+                        }
+                    }
+                    end = e.max(i + 1);
+                }
+            }
+            i = end;
+        }
+        off += n as u32;
     }
 }
 

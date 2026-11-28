@@ -337,6 +337,69 @@ pub extern "C" fn svc_handler(esr: u64, frame: *mut u64) -> u64 {
                 }
                 r
             }
+            61 => {
+                // readdir（getdents64 的简版布局：每项 32 字节 ino/typ/namelen/name[24]）
+                if !mmu::user_ptr_ok(a1, a2) {
+                    println!("[SVC] readdir(buf={:#x}) → EFAULT", a1);
+                    -14
+                } else {
+                    let out = core::slice::from_raw_parts_mut(a1 as *mut u8, a2 as usize);
+                    let r = crate::vfs::readdir(a0 as i32, out);
+                    println!("[SVC] readdir(fd={}, {}) → {} 字节", a0, a2, r);
+                    r
+                }
+            }
+            62 => {
+                let r = crate::vfs::lseek(a0 as i32, a1 as i64, a2 as u32);
+                println!(
+                    "[SVC] lseek(fd={}, off={}, whence={}) → {}",
+                    a0,
+                    a1 as i64,
+                    a2,
+                    r
+                );
+                r
+            }
+            80 => {
+                // fstat：64 字节，8 个 u64（size/ino/mode/typ/uid/gid/mtime/首块）
+                if !mmu::user_ptr_ok(a1, 64) {
+                    println!("[SVC] fstat(wbuf={:#x}) → EFAULT", a1);
+                    -14
+                } else {
+                    match crate::vfs::meta_of(a0 as i32) {
+                        Ok((size, ino, mode, typ, uid, gid, mtime, blk)) => {
+                            let p = a1 as *mut u8;
+                            let vals = [
+                                size as u64,
+                                ino as u64,
+                                mode as u64,
+                                typ as u64,
+                                uid as u64,
+                                gid as u64,
+                                mtime as u64,
+                                blk as u64,
+                            ];
+                            for (i, v) in vals.iter().enumerate() {
+                                unsafe {
+                                    core::ptr::write_unaligned(
+                                        p.add(i * 8) as *mut u64,
+                                        *v,
+                                    );
+                                }
+                            }
+                            println!(
+                                "[SVC] fstat(fd={}) → size={} ino={} mode={:o} type={}",
+                                a0, size, ino, mode, typ
+                            );
+                            0
+                        }
+                        Err(e) => {
+                            println!("[SVC] fstat(fd={}) → {}", a0, e);
+                            e
+                        }
+                    }
+                }
+            }
             63 => {
                 if a0 == 0 {
                     0

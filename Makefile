@@ -54,9 +54,10 @@ FILE_BIN  := $(B)/user/file.bin
 FAULT_BIN := $(B)/user/fault.bin
 BUSY_BIN  := $(B)/user/busy.bin
 XCE_BIN   := $(B)/user/xce.bin
+FSS_BIN   := $(B)/user/fss.bin
 XCE_PKG   := assets/xce/demo.xce
 
-user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN) $(FILE_BIN) $(XCE_BIN)
+user: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN) $(FILE_BIN) $(XCE_BIN) $(FSS_BIN)
 
 $(B)/user/%.o: user/%.S
 	@mkdir -p $(B)/user
@@ -103,10 +104,14 @@ $(FILE_BIN): $(B)/user/file.elf
 	$(CROSS)-objcopy -O binary $< $@
 	@echo "[BUILD] 用户程序 file: $$(stat -c%s $@) bytes"
 
+$(FSS_BIN): $(B)/user/fss.elf
+	$(CROSS)-objcopy -O binary $< $@
+	@echo "[BUILD] 用户程序 fss: $$(stat -c%s $@) bytes"
+
 # ---------- 1. 内核（Rust + C） ----------
 kernel: $(KBIN)
 
-$(KBIN): FORCE $(XCE_BIN) $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN)
+$(KBIN): FORCE $(XCE_BIN) $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN) $(FSS_BIN)
 	@mkdir -p $(B)
 	@test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
 	@python3 tools/aster-sign.py --build-id "aster-$(BOARD)" gen-ex3
@@ -116,6 +121,7 @@ $(KBIN): FORCE $(XCE_BIN) $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_B
 	    ASTER_USER_FAULT_BIN="$(CURDIR)/$(FAULT_BIN)" \
 	    ASTER_USER_BUSY_BIN="$(CURDIR)/$(BUSY_BIN)" \
 	    ASTER_USER_ISO_BIN="$(CURDIR)/$(ISO_BIN)" \
+	    ASTER_USER_FSS_BIN="$(CURDIR)/$(FSS_BIN)" \
 	    ASTER_USER_FP_BIN="$(CURDIR)/$(FP_BIN)" \
 	    ASTER_USER_WX_BIN="$(CURDIR)/$(WX_BIN)" \
 	    ASTER_USER_YIELD_BIN="$(CURDIR)/$(YL_BIN)" \
@@ -155,12 +161,12 @@ run: image
 # 图形 + 远程：画面走 VNC（默认 5901），命令行走 TCP（默认 4444）
 # 磁盘镜像：AsterDisk 头 + AsterFS 根目录，顺手把用户程序打进根目录，
 # 开机后 `load hello` 直接读盘装载（不再靠内核里的 include_bytes!）
-img: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN) $(FILE_BIN)
+img: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN) $(FILE_BIN) $(FSS_BIN)
 	@mkdir -p build
 	@python3 tools/mkafs.py $(IMG) $(IMG_MB) \
 	    hello=$(USER_BIN) fault=$(FAULT_BIN) busy=$(BUSY_BIN) \
 	    iso=$(ISO_BIN) fp=$(FP_BIN) wx=$(WX_BIN) yield=$(YL_BIN) \
-	    note=docs/asterfs.md
+	    note.txt=README.md fss=$(FSS_BIN)
 
 run-disk: image img
 	@echo "  磁盘: $(IMG) ($(IMG_MB) MiB)   控制台: nc 0.0.0.0 4455"
@@ -195,7 +201,7 @@ run-net: image
 # 从盘加载冒烟：带 virtio-blk 起内核，盘里是 mkafs 打进去的用户程序，
 # `load hello` 必须真的从 AsterFS 读出字节并在 EL0 跑完回到 shell
 test-fs: image img
-	@printf '\nls\ndf\nload hello\nload nope\nrun\nhalt\n' | timeout 45 \
+	@printf '\nls\ndf\nload hello\nload nope\nrun\nload fss\nhalt\n' | timeout 45 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic \
 	    -global virtio-mmio.force-legacy=false \
 	    -drive if=none,file=$(IMG),format=raw,id=d0,file.locking=off,cache=writethrough \
@@ -207,6 +213,10 @@ test-fs: image img
 	@grep -qF "[LOAD] 任务结束" $(B)/test-fs.log && echo "[TEST] PASS 跑完回到 shell" || (echo "[TEST] FAIL 没回 shell" && exit 1)
 	@grep -q "nope" $(B)/test-fs.log && echo "[TEST] PASS 不存在的名字有提示" || (echo "[TEST] FAIL 无提示" && exit 1)
 	@grep -qF "[TASK] 程序来源：磁盘 hello" $(B)/test-fs.log && echo "[TEST] PASS run 也走磁盘（不再吃内嵌）" || (echo "[TEST] FAIL 仍在用内嵌" && exit 1)
+	@grep -qE "lseek\(fd=3, off=0, whence=2\) → [1-9][0-9]{3,}" $(B)/test-fs.log && echo "[TEST] PASS lseek：SEEK_END 拿到长文件真实长度" || (echo "[TEST] FAIL lseek" && exit 1)
+	@grep -qE "fstat\(fd=3\) → size=[1-9][0-9]{3,} ino=8 mode=644 type=1" $(B)/test-fs.log && echo "[TEST] PASS fstat：size/ino/mode/type 全对" || (echo "[TEST] FAIL fstat" && exit 1)
+	@grep -qF "[SVC] readdir(fd=3, 256) → 256 字节" $(B)/test-fs.log && echo "[TEST] PASS readdir：根目录 8 项 × 32 字节" || (echo "[TEST] FAIL readdir" && exit 1)
+	@grep -qF "从零写起的 ARM64 系统" $(B)/test-fs.log && echo "[TEST] PASS 流式读：从 19 KiB 文件里读到第 1 块之后的内容" || (echo "[TEST] FAIL 长文件读" && exit 1)
 
 # 网络端到端冒烟：起 QEMU，等内核起 HTTP，宿主 curl 应拿到 200 和页面
 test-net: image

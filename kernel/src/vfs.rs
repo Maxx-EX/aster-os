@@ -28,6 +28,10 @@ pub const ENAMETOOLONG: i64 = -36;
 #[derive(Clone, Copy)]
 struct Fd {
     used: bool,
+    /// 目录句柄：readdir 用，dpos 是游标
+    dir: bool,
+    dino: u32,
+    dpos: usize,
     ino: u32,
     off: u32,
     len: u32,
@@ -39,6 +43,9 @@ struct Fd {
 
 const EMPTY: Fd = Fd {
     used: false,
+    dir: false,
+    dino: 0,
+    dpos: 0,
     ino: 0,
     off: 0,
     len: 0,
@@ -91,7 +98,7 @@ fn resolve(name: &str) -> Option<afs::Inode> {
     }
 }
 
-fn slot_for(name: &str, ino: u32, len: u32, wr: bool, buf: &[u8; VFS_CAP]) -> Result<i32, i64> {
+fn slot_for(name: &str, ino: u32, len: u32, wr: bool, buf: Option<&[u8; VFS_CAP]>) -> Result<i32, i64> {
     let bytes = name.as_bytes();
     if bytes.len() > 24 {
         return Err(ENAMETOOLONG);
@@ -103,6 +110,9 @@ fn slot_for(name: &str, ino: u32, len: u32, wr: bool, buf: &[u8; VFS_CAP]) -> Re
     }?;
     let f = unsafe { &mut FDS[idx as usize] };
     f.used = true;
+    f.dir = false;
+    f.dino = 0;
+    f.dpos = 0;
     f.ino = ino;
     f.off = 0;
     f.len = len;
@@ -110,7 +120,10 @@ fn slot_for(name: &str, ino: u32, len: u32, wr: bool, buf: &[u8; VFS_CAP]) -> Re
     f.nlen = bytes.len() as u8;
     f.name = [0; 24];
     f.name[..bytes.len()].copy_from_slice(bytes);
-    f.buf = *buf;
+    match buf {
+        Some(b) => f.buf = *b,
+        None => f.buf = [0; VFS_CAP],
+    }
     unsafe { OPENS += 1 };
     Ok(idx as i32)
 }
@@ -118,7 +131,11 @@ fn slot_for(name: &str, ino: u32, len: u32, wr: bool, buf: &[u8; VFS_CAP]) -> Re
 /// 打开文件。`wr` 为真时若文件不存在则创建空文件，close 时整体写回。
 pub fn open(path: &str, wr: bool) -> Result<i32, i64> {
     let name = path.trim_start_matches('/');
-    if name.is_empty() || name.len() > 24 {
+    if name.is_empty() {
+        // "/"：根目录句柄
+        return if wr { Err(EACCES) } else { opendir("") };
+    }
+    if name.len() > 24 {
         return Err(EINVAL);
     }
     let f = match resolve(name) {
@@ -133,6 +150,10 @@ pub fn open(path: &str, wr: bool) -> Result<i32, i64> {
         }
     };
     if f.typ != afs::T_FILE {
+        // 打开一个目录：只读时给目录句柄，读用 readdir
+        if !wr {
+            return opendir(&name);
+        }
         return Err(EINVAL);
     }
     if wr {
@@ -143,10 +164,14 @@ pub fn open(path: &str, wr: bool) -> Result<i32, i64> {
             }
         }
     }
+    if !wr {
+        // 只读打开不搬内容：read 时按偏移从块缓存取，文件多大都不占内存
+        return slot_for(name, f.ino, f.size, false, None);
+    }
     let mut buf = [0u8; VFS_CAP];
     let n = afs::read_file(name, &mut buf).map_err(|_| EINVAL)?;
-    let len = (f.size as usize).min(n) as u32;
-    slot_for(name, f.ino, len, wr, &buf)
+    let len = n as u32;
+    slot_for(name, f.ino, len, wr, Some(&buf))
 }
 
 pub fn read(fd: i32, out: &mut [u8]) -> i64 {
@@ -157,12 +182,22 @@ pub fn read(fd: i32, out: &mut [u8]) -> i64 {
     if !f.used {
         return EBADF;
     }
+    if f.dir {
+        return EINVAL;
+    }
     let avail = f.len.saturating_sub(f.off) as usize;
-    let n = out.len().min(avail);
-    if n == 0 {
+    if avail == 0 {
         return 0;
     }
-    out[..n].copy_from_slice(&f.buf[f.off as usize..f.off as usize + n]);
+    if f.wr {
+        let n = out.len().min(avail);
+        out[..n].copy_from_slice(&f.buf[f.off as usize..f.off as usize + n]);
+        f.off += n as u32;
+        unsafe { READS += 1 };
+        return n as i64;
+    }
+    let want = out.len().min(avail);
+    let n = afs::read_at(f.ino, f.off, &mut out[..want]);
     f.off += n as u32;
     unsafe { READS += 1 };
     n as i64
@@ -175,6 +210,9 @@ pub fn write(fd: i32, data: &[u8]) -> i64 {
     let f = unsafe { &mut FDS[fd as usize] };
     if !f.used {
         return EBADF;
+    }
+    if f.dir {
+        return EINVAL;
     }
     if !f.wr {
         return EROFS;
@@ -217,6 +255,110 @@ pub fn close(fd: i32) -> i64 {
     code
 }
 
+/// 打开目录：拿到一个只用于 readdir 的句柄
+pub fn opendir(path: &str) -> Result<i32, i64> {
+    let name = path.trim_start_matches('/');
+    if name.len() > 24 {
+        return Err(ENAMETOOLONG);
+    }
+    let d = if name.is_empty() {
+        match resolve(".") {
+            Some(x) => x,
+            None => afs::inode_read(0).ok_or(ENOENT)?,
+        }
+    } else {
+        match resolve(name) {
+            Some(x) => x,
+            None => return Err(ENOENT),
+        }
+    };
+    if d.typ != afs::T_DIR {
+        return Err(EINVAL);
+    }
+    let idx = unsafe {
+        (FIRST_USER_FD..MAX_FD)
+            .find(|i| !FDS[*i].used)
+            .ok_or(EBADF as i64)
+    }?;
+    let f = unsafe { &mut FDS[idx as usize] };
+    *f = EMPTY;
+    f.used = true;
+    f.dir = true;
+    f.dino = d.ino;
+    f.dpos = 0;
+    f.len = d.size;
+    f.ino = d.ino;
+    f.nlen = name.len() as u8;
+    f.name[..name.len()].copy_from_slice(name.as_bytes());
+    unsafe { OPENS += 1 };
+    Ok(idx as i32)
+}
+
+/// 读目录：每次填 32 字节一项（ino u32 / typ u16 / namelen u16 / name[24]），
+/// 返回字节数，0 = 读完了。
+pub fn readdir(fd: i32, out: &mut [u8]) -> i64 {
+    if fd < 0 || fd as usize >= MAX_FD {
+        return EBADF;
+    }
+    let f = unsafe { &mut FDS[fd as usize] };
+    if !f.used || !f.dir {
+        return EBADF;
+    }
+    let total = afs::dir_count(f.dino);
+    let mut n = 0usize;
+    while f.dpos < total && n + 32 <= out.len() {
+        if let Some((ino, typ, name, nl)) = afs::dir_ent(f.dino, f.dpos) {
+            out[n..n + 4].copy_from_slice(&ino.to_le_bytes());
+            out[n + 4..n + 6].copy_from_slice(&typ.to_le_bytes());
+            out[n + 6..n + 8].copy_from_slice(&(nl as u16).to_le_bytes());
+            out[n + 8..n + 32].copy_from_slice(&name);
+        }
+        f.dpos += 1;
+        n += 32;
+    }
+    n as i64
+}
+
+/// lseek：SEEK_SET=0 / SEEK_CUR=1 / SEEK_END=2，返回新偏移（允许指到文件尾之后）
+pub fn lseek(fd: i32, off: i64, whence: u32) -> i64 {
+    if fd < 0 || fd as usize >= MAX_FD {
+        return EBADF;
+    }
+    let f = unsafe { &mut FDS[fd as usize] };
+    if !f.used {
+        return EBADF;
+    }
+    let base = match whence {
+        0 => 0i64,
+        1 => f.off as i64,
+        2 => f.len as i64,
+        _ => return EINVAL,
+    };
+    let np = base.saturating_add(off);
+    if np < 0 || np > 0x7fff_ffff {
+        return EINVAL;
+    }
+    f.off = np as u32;
+    np
+}
+
+/// fstat：把 fd 的元信息摊平给 syscall 层（size/ino/mode/typ/uid/gid/mtime）
+pub fn meta_of(fd: i32) -> Result<(u32, u32, u16, u16, u16, u16, u32, u32), i64> {
+    if fd < 0 || fd as usize >= MAX_FD {
+        return Err(EBADF);
+    }
+    let f = unsafe { &FDS[fd as usize] };
+    if !f.used {
+        return Err(EBADF);
+    }
+    if f.dir {
+        let d = afs::inode_read(f.dino).ok_or(ENOENT)?;
+        return Ok((d.size, d.ino, d.mode, d.typ, d.uid, d.gid, d.mtime, d.blocks[0]));
+    }
+    let d = afs::inode_read(f.ino).ok_or(ENOENT)?;
+    Ok((f.len, d.ino, d.mode, d.typ, d.uid, d.gid, d.mtime, d.blocks[0]))
+}
+
 pub fn stat(path: &str) -> Result<(u32, u32), i64> {
     let name = path.trim_start_matches('/');
     match resolve(name) {
@@ -240,7 +382,7 @@ pub fn dump() {
         crate::println!(
             "  {}  {}  {}  {}/{}  ino {}",
             i,
-            if f.wr { "rw" } else { "ro" },
+            if f.dir { "dir" } else if f.wr { "rw" } else { "ro" },
             name,
             f.off,
             f.len,

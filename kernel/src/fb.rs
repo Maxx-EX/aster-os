@@ -2390,6 +2390,9 @@ pub fn draw_desktop(
     }
 
     let lamp_y = (DOCK_Y + 23) as i32;
+    let disk = crate::blk::available() && crate::afs::super_block().is_some();
+    circle((W - 312) as i32, lamp_y, 4, if disk { OK } else { 0x454b52 }, 255);
+    draw_text_ui(W - 300, DOCK_Y + 15, "磁盘", if disk { TEXT2 } else { DIM });
     circle((W - 232) as i32, lamp_y, 4, if kb { OK } else { 0x454b52 }, 255);
     draw_text_ui(W - 220, DOCK_Y + 15, "键盘", if kb { TEXT2 } else { DIM });
     circle((W - 152) as i32, lamp_y, 4, if net { OK } else { 0x454b52 }, 255);
