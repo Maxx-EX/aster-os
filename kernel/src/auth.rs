@@ -11,19 +11,20 @@
 pub struct User {
     pub name: [u8; 12],
     pub uid: u16,
+    pub gid: u16,
 }
 
 const MAXU: usize = 8;
 
 static mut USERS: [User; MAXU] = [
-    User { name: *b"root\0\0\0\0\0\0\0\0", uid: 0 },
-    User { name: *b"aster\0\0\0\0\0\0\0", uid: 1000 },
-    User { name: *b"guest\0\0\0\0\0\0\0", uid: 1001 },
-    User { name: [0; 12], uid: 0 },
-    User { name: [0; 12], uid: 0 },
-    User { name: [0; 12], uid: 0 },
-    User { name: [0; 12], uid: 0 },
-    User { name: [0; 12], uid: 0 },
+    User { name: *b"root\0\0\0\0\0\0\0\0", uid: 0, gid: 0 },
+    User { name: *b"aster\0\0\0\0\0\0\0", uid: 1000, gid: 1000 },
+    User { name: *b"guest\0\0\0\0\0\0\0", uid: 1001, gid: 1001 },
+    User { name: [0; 12], uid: 0, gid: 0 },
+    User { name: [0; 12], uid: 0, gid: 0 },
+    User { name: [0; 12], uid: 0, gid: 0 },
+    User { name: [0; 12], uid: 0, gid: 0 },
+    User { name: [0; 12], uid: 0, gid: 0 },
 ];
 static mut NU: usize = 3;
 static mut CUR: usize = 1;
@@ -73,6 +74,19 @@ pub fn current_name() -> &'static str {
 
 pub fn current_uid() -> u16 {
     unsafe { user(CUR).1 }
+}
+
+pub fn gid_of(uid: u16) -> u16 {
+    for i in 0..count() {
+        if user(i).1 == uid {
+            return unsafe { USERS[i].gid };
+        }
+    }
+    uid
+}
+
+pub fn current_gid() -> u16 {
+    gid_of(current_uid())
 }
 
 pub fn is_root() -> bool {
@@ -128,18 +142,21 @@ pub fn add(name: &str) -> Result<u16, &'static str> {
             k += 1;
         }
         USERS[i].uid = 1000 + i as u16;
+        USERS[i].gid = USERS[i].uid;
         NU += 1;
         Ok(USERS[i].uid)
     }
 }
 
-/// 权限判定：uid 0 全通；owner 看 owner 位，其它看 other 位（group 位留着以后用）
-pub fn can(mode: u16, owner: u16, want: u8) -> bool {
+/// 权限判定：uid 0 全通；owner 看 owner 位；同组看 group 位；其余看 other 位
+pub fn can(mode: u16, owner: u16, file_gid: u16, want: u8) -> bool {
     if current_uid() == 0 {
         return true;
     }
     let bits: u16 = if owner == current_uid() {
         (mode >> 6) & 7
+    } else if file_gid == current_gid() {
+        (mode >> 3) & 7
     } else {
         mode & 7
     };
@@ -158,10 +175,147 @@ pub fn mode_str(mode: u16, typ: u16, out: &mut [u8; 11]) {
     out[10] = 0;
 }
 
+/// 用户表序列化成 `name:uid:gid` 一行一条（写盘用）
+pub fn serialize(out: &mut [u8; 512]) -> usize {
+    let mut k = 0usize;
+    for i in 0..count() {
+        let (name, uid) = user(i);
+        let gid = unsafe { USERS[i].gid };
+        for b in name.as_bytes() {
+            if k + 1 >= out.len() { return k; }
+            out[k] = *b;
+            k += 1;
+        }
+        for (n, v) in [(0usize, uid), (1, gid)] {
+            if k + 1 >= out.len() { return k; }
+            out[k] = if n == 0 { b':' } else { b':' };
+            k += 1;
+            let mut tmp = [0u8; 6];
+            let mut t = 0usize;
+            let mut x = v;
+            if x == 0 {
+                tmp[0] = b'0';
+                t = 1;
+            }
+            while x > 0 {
+                tmp[t] = b'0' + (x % 10) as u8;
+                x /= 10;
+                t += 1;
+            }
+            while t > 0 {
+                if k + 1 >= out.len() { return k; }
+                t -= 1;
+                out[k] = tmp[t];
+                k += 1;
+            }
+        }
+        if k + 1 < out.len() {
+            out[k] = b'\n';
+            k += 1;
+        }
+    }
+    k
+}
+
+/// 从 `name:uid:gid` 文本恢复用户表（root/aster/guest 始终在，缺的补回来）
+pub fn parse(src: &[u8]) -> usize {
+    let mut n = 0usize;
+    let mut line = [0u8; 24];
+    let mut ln = 0usize;
+    for &b in src {
+        if b == b'\n' || b == b'\r' {
+            if ln > 0 {
+                if load_line(&line[..ln]) {
+                    n += 1;
+                }
+                ln = 0;
+            }
+            continue;
+        }
+        if ln < line.len() {
+            line[ln] = b;
+            ln += 1;
+        }
+    }
+    if ln > 0 && load_line(&line[..ln]) {
+        n += 1;
+    }
+    n
+}
+
+fn load_line(l: &[u8]) -> bool {
+    let mut c1 = None;
+    let mut c2 = None;
+    for (i, &b) in l.iter().enumerate() {
+        if b == b':' {
+            if c1.is_none() {
+                c1 = Some(i);
+            } else if c2.is_none() {
+                c2 = Some(i);
+            }
+        }
+    }
+    let (c1, c2) = match (c1, c2) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return false,
+    };
+    let name = match core::str::from_utf8(&l[..c1]) {
+        Ok(x) => x,
+        Err(_) => return false,
+    };
+    let uid: u16 = match core::str::from_utf8(&l[c1 + 1..c2]).ok().and_then(|x| x.parse().ok()) {
+        Some(x) => x,
+        None => return false,
+    };
+    let gid: u16 = match core::str::from_utf8(&l[c2 + 1..]).ok().and_then(|x| x.parse().ok()) {
+        Some(x) => x,
+        None => return false,
+    };
+    unsafe {
+        if let Some(i) = find(name) {
+            USERS[i].uid = uid;
+            USERS[i].gid = gid;
+            return true;
+        }
+        if NU >= MAXU || name.is_empty() || name.len() > 11 {
+            return false;
+        }
+        let i = NU;
+        USERS[i].name = [0; 12];
+        let b = name.as_bytes();
+        let mut k = 0usize;
+        while k < b.len() && k + 1 < 12 {
+            USERS[i].name[k] = b[k];
+            k += 1;
+        }
+        USERS[i].uid = uid;
+        USERS[i].gid = gid;
+        NU += 1;
+    }
+    true
+}
+
 /// 名字 → uid（供 chown 用），也接受纯数字
 pub fn uid_of(s: &str) -> Option<u16> {
     if let Some(i) = find(s) {
         return Some(user(i).1);
     }
     s.parse::<u16>().ok()
+}
+/// 开机时从磁盘上的 `passwd` 恢复用户表（没有这个文件就保持内置三个）
+pub fn load_from_disk() -> bool {
+    let mut buf = [0u8; 512];
+    match crate::afs::read_file("passwd", &mut buf) {
+        Ok(n) => {
+            parse(&buf[..n]) > 0
+        }
+        Err(_) => false,
+    }
+}
+
+/// 把用户表写回 `passwd`（v0 没有 /etc 子目录，就落在根上）
+pub fn save_to_disk() -> bool {
+    let mut buf = [0u8; 512];
+    let n = serialize(&mut buf);
+    crate::afs::write_file("passwd", &buf[..n]).is_ok()
 }

@@ -223,7 +223,7 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 | PKG-1b | ✅ 包管理器骨架 | `ASEPKG1` 索引（python3/gcc/git/gh）+ `pkg list/info/install/remove`；`install` 走 VFS 落 AsterFS，真包下载待 P6-4 |
 | PERF-2 | ✅ 阴影按需 | 投影四层 alpha 是最大开销；只在窗口位移/开关后 150 ms 内画，静态帧 38 ms → 16 ms |
 | PERF-3 | ✅ 壁纸惰性 + 终端行级 | 壁纸只在窗口动/键盘开合/分钟跳格时重擦；终端只补脏行。单窗口整桌 0 ms，三窗口 ~18 ms |
-| PERF-4 | ⬜ 窗口离屏合成 | 每窗一块离屏层，按 z 序 blit 合成；目标三窗口 4–5 ms，且彻底摆脱"多层重叠只能整画"的限制 |
+| PERF-4 | ✅ 窗口离屏合成 | 每窗一块离屏层，按 z 序 blit 合成；三窗口 18–20 ms → **2 ms**，单窗 1 ms |
 | PKG-2b | ✅ 包生态 80 个 | 10 类（lang/build/vcs/net/edit/sys/db/media/sec/android）；`pkg list <类>`、`pkg search`、`pkg list installed`；索引表由脚本生成 |
 | NET-4 | ⬜ DHCP + DNS | 摆脱写死 10.0.2.15；DHCP DISCOVER/OFFER、DNS A 查询，给 `http get` 用域名 |
 
@@ -385,10 +385,10 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **WIFI-1 ⬜ 无线未开工**：不假装有驱动，`wifi` 命令把四步路径和现状写在屏幕上；`make test` 现有 31 项断言
 - **PKG-2b ✅ 包生态扩到 80 个**：`tools/mkpkg.py` 改成"列表即索引"，直接生成 `kernel/src/pkgidx.rs`；`pkg list` 变分类概览（10 类），`pkg list lang` 看明细，`pkg search` 按名/描述/类搜，`pkg list installed` 只列已装
 - **PERF-3 ✅ 壁纸惰性 + 终端行级增量**：壁纸只在窗口动、键盘开合、分钟跳格时重擦（`ask_wall`），终端只补脏行（`term::take_rows`）；关掉系统/网络窗后 `perf` 报 **整桌 0 ms / 壁纸 0 / 窗口 0**，三窗口 18 ms
-- **PERF-4 ⬜ 下一刀**：三窗口仍 18 ms，因为重叠时只能整窗重画；解法是每窗一块离屏层按 z 序 blit
+- **PERF-4 ✅**：三窗口 18 ms → 2 ms（每窗一块离屏层 + 按 z 序 blit，单窗仍走 1 ms 快速路径）；下一刀是 PERF-5 只贴脏矩形
 - **NET-4 ⬜ 下一阶段**：DHCP + DNS，让 `http get` 能用域名而不是写死 IP
 - **P6-5 ✅ 内置浏览器**：`html.rs` 自研分词与块级排版（h1/h2/hr/列表/段落折行/行内链接），`web.rs` 页面状态 + 行到像素 + 滚动 + 命中；第四窗口「浏览器」、dock 第四格、侧栏"浏览"；`web` 系列命令；首页内置可离线开，`web 10.0.2.2:8000/home.html` 走真 TCP 拉取，点链接跳转、拖动滚动均已实测
 - **P6-5+ ✅ 图片解码落进浏览器**：`img.rs` 自解 BMP/PNG（RGBA 反滤波 + 复用 inflate），内置星芒徽标真画出来；表格、`https`、历史栈仍是下一刀
 - **IMG-1 ✅ 图片解码**：`kernel/src/img.rs` 自解 BMP(24/32bpp) 与 PNG(8bit RGB/RGBA，非隔行)，反滤波 Sub/Up/Average/Paeth，zlib 头剥掉复用 APK 的 `inflate`；三块大缓冲改由页帧分配器懒要，避开 `.bss` 撑爆导致的 `ADR_PREL_LO21` 超范围
 - **SEC-1 ✅ 用户与权限**：`auth.rs` 用户表（root/aster/guest + useradd 到 8 个）、inode 上的 `mode`(+2) 与 `uid`(+56)、`afs::read_file`/`write_file` 与 `vfs::open` 三道门、`whoami/users/su/chmod/chown/ls -l`；切 root 要 EXTREME
-- **SEC-2 ⬜ 下一刀**：组与 setuid、`/etc/passwd` 落盘、目录权限、ACL
+- **SEC-2 ✅**：组（gid 进 inode、`can` 认组位、`chgrp`）、目录权限（根 inode 0o755 + `list` 查读位）、`passwd` 落盘（mkfs 自动写、useradd 写回、开机加载）；剩 setuid/ACL 归 SEC-3

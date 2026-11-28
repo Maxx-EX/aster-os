@@ -38,6 +38,187 @@ static mut BACK_PA: u64 = 0;
 static mut REAL_PA: u64 = 0;
 static mut GPU_MODE: bool = false;
 
+// ---- PERF-4 离屏层 ----
+// 每个窗口一块自己的像素层，绘制时把"屏幕坐标"换算成"层内坐标"，
+// 合成时按 z 序把层 blit 回屏幕。静止的多窗口桌面就只剩几次 memcpy。
+pub const LAYER_MAX: usize = NWIN;
+static mut TGT_BASE: u64 = 0;
+static mut TGT_W: u32 = 0;
+static mut TGT_H: u32 = 0;
+static mut TGT_X: i32 = 0;
+static mut TGT_Y: i32 = 0;
+
+static mut LP_PA: [u64; LAYER_MAX] = [0; LAYER_MAX];
+static mut LP_W: [u32; LAYER_MAX] = [0; LAYER_MAX];
+static mut LP_H: [u32; LAYER_MAX] = [0; LAYER_MAX];
+static mut LP_OK: [bool; LAYER_MAX] = [false; LAYER_MAX];
+static mut LP_GEO: [(i32, i32, u32, u32); LAYER_MAX] = [(0, 0, 0, 0); LAYER_MAX];
+
+/// 把后续绘制都写进这块层：base 是层像素起点，ox/oy 是层在屏幕上的左上角
+fn set_layer(base: u64, w: u32, h: u32, ox: i32, oy: i32) {
+    unsafe {
+        TGT_BASE = base;
+        TGT_W = w;
+        TGT_H = h;
+        TGT_X = ox;
+        TGT_Y = oy;
+    }
+}
+
+fn clear_layer() {
+    unsafe {
+        TGT_BASE = 0;
+    }
+}
+
+#[inline]
+fn in_layer() -> bool {
+    unsafe { TGT_BASE != 0 }
+}
+
+/// 屏幕坐标 → 层内偏移；不在层里返回 None
+#[inline]
+fn layer_off(x: u32, y: u32) -> Option<u64> {
+    unsafe {
+        if TGT_BASE == 0 {
+            return None;
+        }
+        let sx = x as i32 - TGT_X;
+        let sy = y as i32 - TGT_Y;
+        if sx < 0 || sy < 0 || sx as u32 >= TGT_W || sy as u32 >= TGT_H {
+            return None;
+        }
+        Some((sy as u32 * TGT_W + sx as u32) as u64 * 4)
+    }
+}
+
+/// 统一的"写一个像素"：层优先，否则写屏幕
+#[inline]
+fn put(f: &Fb, x: u32, y: u32, color: u32) {
+    if let Some(off) = layer_off(x, y) {
+        unsafe {
+            core::ptr::write_volatile((TGT_BASE + off) as *mut u32, color);
+        }
+        return;
+    }
+    if in_layer() || x >= f.w || y >= f.h {
+        return;
+    }
+    unsafe {
+        core::ptr::write_volatile((f.base + (y * f.stride + x * 4) as u64) as *mut u32, native(color));
+    }
+}
+
+/// 统一读像素：层优先
+#[inline]
+fn get(f: &Fb, x: u32, y: u32) -> u32 {
+    if let Some(off) = layer_off(x, y) {
+        return unsafe { core::ptr::read_volatile((TGT_BASE + off) as *const u32) };
+    }
+    if in_layer() || x >= f.w || y >= f.h {
+        return 0;
+    }
+    unsafe { core::ptr::read_volatile((f.base + (y * f.stride + x * 4) as u64) as *const u32) }
+}
+
+/// 取（或按需分配）第 i 个窗口的层
+pub fn layer_prepare(i: usize, ww: u32, hh: u32) -> u64 {
+    unsafe {
+        if LP_PA[i] != 0 && LP_W[i] == ww && LP_H[i] == hh {
+            return LP_PA[i];
+        }
+        // 尺寸变了：把旧的还回页帧池
+        if LP_PA[i] != 0 {
+            let old = (LP_W[i] as usize * LP_H[i] as usize * 4).div_ceil(4096);
+            for k in 0..old {
+                crate::frame::free(LP_PA[i] + (k as u64) * 4096);
+            }
+            LP_PA[i] = 0;
+        }
+        let n = (ww as usize * hh as usize * 4).div_ceil(4096);
+        match crate::frame::alloc_pages(n) {
+            Some(p) => {
+                LP_PA[i] = p;
+                LP_W[i] = ww;
+                LP_H[i] = hh;
+                LP_OK[i] = false;
+                p
+            }
+            None => 0,
+        }
+    }
+}
+
+pub fn layer_ok(i: usize) -> bool {
+    unsafe { i < LAYER_MAX && LP_OK[i] }
+}
+
+pub fn layer_invalidate(i: usize) {
+    unsafe {
+        if i < LAYER_MAX {
+            LP_OK[i] = false;
+        }
+    }
+}
+
+pub fn layer_invalidate_all() {
+    unsafe {
+        for i in 0..LAYER_MAX {
+            LP_OK[i] = false;
+        }
+    }
+}
+
+fn layer_geo_changed(i: usize, w: Win) -> bool {
+    unsafe { LP_GEO[i] != (w.x, w.y, w.w, w.h) }
+}
+
+fn layer_mark(i: usize, w: Win) {
+    unsafe {
+        LP_OK[i] = true;
+        LP_GEO[i] = (w.x, w.y, w.w, w.h);
+    }
+}
+
+/// 把第 i 个窗口的层 blit 到屏幕（裁剪到屏内）
+fn blit_layer(i: usize) {
+    unsafe {
+        if LP_PA[i] == 0 || !LP_OK[i] {
+            return;
+        }
+        let w = win(i);
+        let f = fb();
+        let lw = LP_W[i];
+        let x0 = w.x.max(0);
+        let y0 = w.y.max(0);
+        let x1 = (w.x + w.w as i32).min(f.w as i32);
+        let y1 = (w.y + w.h as i32).min(f.h as i32);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let row = ((x1 - x0) as usize) * 4;
+        for y in y0..y1 {
+            let sy = (y - w.y) as u32;
+            let sx = (x0 - w.x) as u32;
+            let src = LP_PA[i] + (sy * lw + sx) as u64 * 4;
+            let dst = f.base + (y as u32 * f.stride) as u64 + (x0 as u32 * 4) as u64;
+            core::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, row);
+        }
+    }
+}
+
+/// 按 z 序把有层的窗口全部合成到屏幕
+fn compose_layers() {
+    unsafe {
+        for k in 0..NWIN {
+            let i = ZORD[k];
+            if WINS[i].open && LP_OK[i] {
+                blit_layer(i);
+            }
+        }
+    }
+}
+
 fn alloc_back(real: u64) -> u64 {
     let npages = ((FB_W * FB_H * 4) as usize).div_ceil(4096);
     match crate::frame::alloc_pages(npages) {
@@ -399,13 +580,7 @@ fn native(c: u32) -> u32 {
 
 #[inline]
 fn px(f: &Fb, x: u32, y: u32, color: u32) {
-    if x >= f.w || y >= f.h {
-        return;
-    }
-    let off = (y * f.stride + x * 4) as u64;
-    unsafe {
-        core::ptr::write_volatile((f.base + off) as *mut u32, native(color));
-    }
+    put(f, x, y, native(color));
 }
 
 pub fn read_px(x: u32, y: u32) -> u32 {
@@ -413,11 +588,7 @@ pub fn read_px(x: u32, y: u32) -> u32 {
         return 0;
     }
     let f = fb();
-    if x >= f.w || y >= f.h {
-        return 0;
-    }
-    let off = (y * f.stride + x * 4) as u64;
-    unsafe { core::ptr::read_volatile((f.base + off) as *const u32) }
+    get(f, x, y)
 }
 
 pub fn write_px(x: u32, y: u32, color: u32) {
@@ -425,11 +596,7 @@ pub fn write_px(x: u32, y: u32, color: u32) {
         return;
     }
     let f = fb();
-    if x >= f.w || y >= f.h {
-        return;
-    }
-    let off = (y * f.stride + x * 4) as u64;
-    unsafe { core::ptr::write_volatile((f.base + off) as *mut u32, native(color)) }
+    put(f, x, y, native(color));
 }
 
 /// 16x16 位图，fill 为实心、edge 为 1px 描边（鼠标箭头用）
@@ -461,13 +628,16 @@ pub fn fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) {
         return;
     }
     let f = fb();
-    for yy in y..(y + h).min(f.h) {
-        for xx in x..(x + w).min(f.w) {
-            let off = (yy * f.stride + xx * 4) as u64;
-            unsafe {
-                core::ptr::write_volatile((f.base + off) as *mut u32, color);
-            }
+    let mut yy = y;
+    let ymax = (y + h).min(f.h);
+    while yy < ymax {
+        let mut xx = x;
+        let xmax = (x + w).min(f.w);
+        while xx < xmax {
+            put(f, xx, yy, color);
+            xx += 1;
         }
+        yy += 1;
     }
 }
 
@@ -495,7 +665,25 @@ pub fn blend_px(x: u32, y: u32, color: u32, a: u32) {
         return;
     }
     let f = fb();
-    if x >= f.w || y >= f.h {
+    if let Some(off) = layer_off(x, y) {
+        // 层里的混合：读改写同一块
+        unsafe {
+            let p = (TGT_BASE + off) as *mut u32;
+            if a >= 255 {
+                core::ptr::write_volatile(p, color);
+                return;
+            }
+            let dst = core::ptr::read_volatile(p);
+            let sa = a;
+            let ia = 255 - a;
+            let r = (((color >> 16) & 0xff) * sa + ((dst >> 16) & 0xff) * ia) / 255;
+            let g = (((color >> 8) & 0xff) * sa + ((dst >> 8) & 0xff) * ia) / 255;
+            let bl = ((color & 0xff) * sa + (dst & 0xff) * ia) / 255;
+            core::ptr::write_volatile(p, (r << 16) | (g << 8) | bl);
+        }
+        return;
+    }
+    if in_layer() || x >= f.w || y >= f.h {
         return;
     }
     let off = (y * f.stride + x * 4) as u64;
@@ -1646,21 +1834,30 @@ fn take_full(i: usize) -> bool {
 pub fn draw_all_ex(shadow: bool) {
     let t0 = crate::timer::now_ms();
     unsafe {
-        for k in 0..NWIN {
-            let i = ZORD[k];
-            if !WINS[i].open {
-                continue;
-            }
-            // 阴影要重画时整窗都得重来（投影形状变了）。
-            // 终端走行级增量有个硬前提：它是屏幕上唯一的窗口 —— 否则下层窗口
-            // 的整画会盖掉终端像素，而增量只补脏行补不回来（z 序就错了）。
-            let others_open = (1..NWIN).any(|j| WINS[j].open);
-            if shadow || take_full(i) || i != 0 || others_open {
-                draw_one_ex(i, shadow);
+        let others_open = (1..NWIN).any(|j| WINS[j].open);
+        let only_term = WINS[0].open && !others_open;
+        if only_term && !shadow {
+            // 单窗（终端）快速路径：只补脏行，标题栏与面板留上一帧的
+            layer_invalidate(0);
+            if take_full(0) {
+                draw_one_ex(0, false);
             } else {
-                // 只有终端一个窗口时：只补脏行，标题栏与面板留上一帧的
                 term_patch();
             }
+        } else {
+            // 多窗口：每个窗口只在自己层里画一次，静止帧只做合成
+            for k in 0..NWIN {
+                let i = ZORD[k];
+                if !WINS[i].open {
+                    layer_invalidate(i);
+                    continue;
+                }
+                let wi = win(i);
+                if shadow || take_full(i) || !layer_ok(i) || layer_geo_changed(i, wi) {
+                    draw_one_layer(i, shadow);
+                }
+            }
+            compose_layers();
         }
         FRAME = FRAME.wrapping_add(1);
         let dt = crate::timer::now_ms().saturating_sub(t0);
@@ -1673,6 +1870,29 @@ pub fn draw_all_ex(shadow: bool) {
 
 fn draw_one(i: usize) {
     draw_one_ex(i, true);
+}
+
+/// PERF-4：把一个窗口整画进它自己的层（阴影在层外，直接画屏幕）
+fn draw_one_layer(i: usize, shadow: bool) {
+    let w = win(i);
+    let active = unsafe { FOCUS } == i;
+    let title = win_title(i);
+    if shadow {
+        rounded_rect_alpha(w.x - 26, w.y - 8, w.w + 52, w.h + 52, 34, 0x000000, if active { 18 } else { 12 });
+        rounded_rect_alpha(w.x - 8, w.y - 2, w.w + 16, w.h + 16, 20, 0x000000, if active { 22 } else { 16 });
+    }
+    let lp = layer_prepare(i, w.w, w.h);
+    if lp == 0 {
+        // 页帧不够就退回直接画
+        draw_one_ex(i, shadow);
+        return;
+    }
+    set_layer(lp, w.w, w.h, w.x, w.y);
+    rounded_rect(w.x, w.y, w.w, w.h, 14, WIN_BG);
+    draw_title(i, w, active, title);
+    draw_body(i, w);
+    clear_layer();
+    layer_mark(i, w);
 }
 
 fn draw_one_ex(i: usize, shadow: bool) {

@@ -512,6 +512,10 @@ fn cmd_mkfs() {
     let ok = crate::afs::format("aster");
     println!("  [EX] AsterFS v0 格式化：{}", if ok { "完成" } else { "失败" });
     if ok {
+        // 新盘先把用户库落一份，省得第一次 useradd 之前 passwd 不存在
+        if crate::auth::save_to_disk() {
+            println!("  用户库: passwd 已写入（{} 个用户）", crate::auth::count());
+        }
         cmd_df();
     }
 }
@@ -967,7 +971,7 @@ pub fn run() -> ! {
                     "  {}  uid={} gid={}  权限{}",
                     crate::auth::current_name(),
                     uid,
-                    uid,
+                    crate::auth::current_gid(),
                     if uid == 0 {
                         "（root，全通）"
                     } else {
@@ -978,12 +982,22 @@ pub fn run() -> ! {
                     println!("  EXTREME 已解锁：root 可 su");
                 }
             }
+            "passwd" => {
+                println!("  用户库（内存 {} 个，落盘于根目录 passwd）", crate::auth::count());
+                for i in 0..crate::auth::count() {
+                    let (name, uid) = crate::auth::user(i);
+                    println!("  {:<8} uid={} gid={}", name, uid, crate::auth::gid_of(uid));
+                }
+                if crate::auth::save_to_disk() {
+                    println!("  已同步到 passwd");
+                }
+            }
             "users" => {
                 println!("  用户表 {} 个（* 当前）", crate::auth::count());
                 for i in 0..crate::auth::count() {
                     let (name, uid) = crate::auth::user(i);
                     let me = if crate::auth::current_uid() == uid { "*" } else { " " };
-                    println!("  {} {:<8} uid={}", me, name, uid);
+                    println!("  {} {:<8} uid={} gid={}", me, name, uid, crate::auth::gid_of(uid));
                 }
             }
             "su" => println!("  用法: su <root|aster|guest|名字>（切 root 需先 ex）"),
@@ -1013,7 +1027,14 @@ pub fn run() -> ! {
             l if l.starts_with("useradd ") => {
                 let name = l[8..].trim();
                 match crate::auth::add(name) {
-                    Ok(uid) => println!("  已加用户 {} (uid {})", name, uid),
+                    Ok(uid) => {
+                        println!("  已加用户 {} (uid {})", name, uid);
+                        if crate::auth::save_to_disk() {
+                            println!("  已写入 passwd");
+                        } else {
+                            println!("  写 passwd 失败（磁盘没格式化？）");
+                        }
+                    }
                     Err(e) => println!("  {}", e),
                 }
             }
@@ -1034,23 +1055,49 @@ pub fn run() -> ! {
                     println!("  用法: chmod <八进制> <文件>");
                     continue;
                 }
-                let (old_mode, owner) = match crate::afs::meta(name) {
+                let (old_mode, owner, grp) = match crate::afs::meta(name) {
                     Some(x) => x,
                     None => {
                         println!("  磁盘上没有 {}（先 fmt/mkfs？）", name);
                         continue;
                     }
                 };
-                if !crate::auth::can(old_mode, owner, crate::auth::W_WRITE) && !unsafe { EXTREME } {
+                if !crate::auth::can(old_mode, owner, grp, crate::auth::W_WRITE) && !unsafe { EXTREME } {
                     println!("  没有权限改 {} 的权限位（owner 不是你）", name);
                     continue;
                 }
-                match crate::afs::set_meta(name, Some(mode), None) {
-                    Ok((m2, _)) => {
+                match crate::afs::set_meta(name, Some(mode), None, None) {
+                    Ok((m2, _, _)) => {
                         let mut pb = [0u8; 11];
                         crate::auth::mode_str(m2, 1, &mut pb);
                         println!("  {} → {}", name, core::str::from_utf8(&pb[..10]).unwrap_or(""));
                     }
+                    Err(e) => println!("  {}", e),
+                }
+            }
+            l if l.starts_with("chgrp ") => {
+                let rest = l[6..].trim();
+                let (who, name) = match rest.split_once(' ') {
+                    Some(x) => (x.0.trim(), x.1.trim()),
+                    None => ("", ""),
+                };
+                if who.is_empty() || name.is_empty() {
+                    println!("  用法: chgrp <gid> <文件>");
+                    continue;
+                }
+                let gid: u16 = match who.parse() {
+                    Ok(x) => x,
+                    Err(_) => {
+                        println!("  gid 要是数字（查看 users 里的 gid）");
+                        continue;
+                    }
+                };
+                if !crate::auth::is_root() && !unsafe { EXTREME } {
+                    println!("  chgrp 需要 root 或 EXTREME");
+                    continue;
+                }
+                match crate::afs::set_meta(name, None, None, Some(gid)) {
+                    Ok((_, _, g2)) => println!("  {} → gid {}", name, g2),
                     Err(e) => println!("  {}", e),
                 }
             }
@@ -1075,8 +1122,8 @@ pub fn run() -> ! {
                         continue;
                     }
                 };
-                match crate::afs::set_meta(name, None, Some(uid)) {
-                    Ok((_, u2)) => println!("  {} → owner uid {}", name, u2),
+                match crate::afs::set_meta(name, None, Some(uid), Some(crate::auth::gid_of(uid))) {
+                    Ok((_, u2, g2)) => println!("  {} → owner uid {} gid {}", name, u2, g2),
                     Err(e) => println!("  {}", e),
                 }
             }

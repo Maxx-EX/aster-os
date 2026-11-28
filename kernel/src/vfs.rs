@@ -135,8 +135,8 @@ pub fn open(path: &str, wr: bool) -> Result<i32, i64> {
     }
     if wr {
         // 写打开过一道权限门：owner 的 w 位 / 别人看 other 位 / root 全通
-        if let Some((mode, owner)) = afs::meta(name) {
-            if !crate::auth::can(mode, owner, crate::auth::W_WRITE) {
+        if let Some((mode, owner, grp)) = afs::meta(name) {
+            if !crate::auth::can(mode, owner, grp, crate::auth::W_WRITE) {
                 return Err(EACCES);
             }
         }

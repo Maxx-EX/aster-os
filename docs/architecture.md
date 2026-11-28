@@ -2661,8 +2661,71 @@ $ su root
   切 root 要先解开 EXTREME（ex 命令）
 ```
 
-`make test` 36 项断言，新增：用户身份、用户表、root 要 EXTREME。
+`make test` 38 项断言，新增：用户身份、用户表、gid 一一对应、`passwd` 用户库命令、root 要 EXTREME。
 
 ### 61.6 边界
 
-没有组、没有 setuid、没有 ACL、没有密码（`su` 靠 EXTREME 而不是口令）、`useradd` 只在内存里（掉电即失，还没写 `/etc/passwd` 到磁盘）、目录本身不做权限检查（只看文件 inode）、扩展属性与 xattr 都没有。
+没有 setuid、没有 ACL、没有密码（`su` 靠 EXTREME 而不是口令）、（组与 `/etc/passwd` 落盘已在 §62 补齐）。扩展属性与 xattr 都没有。
+
+## 62. PERF-4 离屏合成 · SEC-2 组与目录权限
+
+### 62.1 为什么之前三窗口要 18 ms
+
+旧路径是"重叠就整画"：两个窗口一叠，下面那个的任意一块都可能是脏的，只能把它整个重画一遍（rounded_rect + 标题 + 正文），相当于每次交互都在重铺桌面。壁纸惰性和终端行级增量（PERF-3）已经把单窗口降到 0–1 ms，但只要开第二个窗口，整桌又回到 18–20 ms。
+
+### 62.2 每窗口一块离屏层
+
+`fb.rs` 换成"先画到层里，再按 z 序贴回屏幕"：
+
+- `set_layer(i) / clear_layer() / in_layer()`，`put()` 与 `get()` 层优先：层内坐标越界直接丢弃，不会踩到别人的像素；
+- `px / read_px / write_px / fill_rect / blend_px` 全部改走 `put/get`，于是 `blend_px` 在层内读改写同一块内存（阴影/半透明不再穿透层）；
+- `layer_prepare(i, w, h)` 按页向页帧池要内存（尺寸变了就逐页释放再重新要），`LP_PA/LP_W/LP_H/LP_OK/LP_GEO` 记状态；
+- `blit_layer(i)` 把层裁剪到屏幕后用 `copy_nonoverlapping` 整行贴回，`compose_layers()` 按 `ZORD` 顺序逐层贴。
+
+`draw_one_layer(i)` 的顺序是：阴影先直接画在屏幕（阴影属于桌面，不属于层）、然后 `set_layer` → 圆角底 → 标题 → 正文 → `clear_layer` → `layer_mark`。
+
+`draw_all_ex` 现在是两条路：只有一个窗口且无阴影时仍走原来的快速路径（`layer_invalidate(0)` + `term_patch()`，1 ms）；否则按 z 序判断每个窗口 `shadow || take_full || !layer_ok || layer_geo_changed` 是否需要重画，最后统一 `compose_layers()`。
+
+实测：`win on 1` + `win on 2` + `perf` → **整桌 2 ms**，单窗 1 ms；页帧 1662 / 32768（四块层约 740 页）。键盘、系统窗面板、浏览器窗口在同一张截图里全部正常，没有互相擦除的残影。
+
+### 62.3 组：gid 进 inode 与用户表
+
+- `auth::User { name, uid, gid }`，`gid_of(uid)` 默认等于 uid（root=0、aster=1000、guest=1001）；
+- `can(mode, owner, gid, want)` 变成三段判断：root 全通 → owner 位 → **同 gid 走组位** → other 位；
+- AsterFS v0 的 Inode 补了 `gid`（偏移 +58，`+60..64` 清零），`meta()` 返回 `(mode, uid, gid)`，`set_meta(name, mode, uid, gid)` 四参，`read_file/write_file` 的权限检查都带上 gid；
+- 新命令 `chgrp <gid> <文件>`（要 root 或 EXTREME），`chown` 顺带把 gid 跟着新 owner 走，`whoami` / `users` / `ls -l` 都显示组。
+
+组位实证（一次跑完）：
+
+```
+$ wr b.txt aster-secret      → 12 字节
+$ chmod 640 b.txt            → b.txt → -rw-r-----
+$ chgrp 1001 b.txt           → b.txt → gid 1001
+$ su guest                   → guest (uid 1001)
+$ cat b.txt                  → aster-secret        ← 同组，组位 r 生效
+$ su aster
+$ chgrp 1000 b.txt           → b.txt → gid 1000
+$ su guest
+$ cat b.txt                  → 没有读权限（owner 不是你）  ← 组不对，other 位没 r
+```
+
+### 62.4 目录权限与 passwd 落盘
+
+- `format()` 建根目录 inode 时写 `mode=0o755`、`uid=1000`、`gid=1000`；
+- `list()` 开头按根 inode 的 mode/uid/gid 查读位，没读位就报"没有权限列这个目录"（不再只看文件 inode）；
+- 用户库落盘：`auth::serialize/parse` 走文本行 `name:uid:gid`，`mkfs` 成功后自动写一份 `passwd`（3 个用户 55 字节），`useradd` 之后自动写回，开机 `auth::load_from_disk()` 从 `passwd` 恢复（读不到就保持内置三个）；
+- 新增 `passwd` 命令：打印内存用户库（含 gid）并同步到磁盘。
+
+```
+$ mkfs                       → 用户库: passwd 已写入（3 个用户）
+$ ls -l                      → （空目录）
+$ useradd bob                → 已加用户 bob (uid 1003) / 已写入 passwd
+$ ls -l                      → -rw-r--r--  55  aster  passwd
+$ cat passwd                 → root:0:0 / aster:1000:1000 / guest:1001:1001 / bob:1003:1003
+```
+
+`passwd` 用的是普通 644 文件和普通读写路径（没有单独的"系统文件"特判），所以 `su guest` 之后 `cat passwd` 照样能读——这正是 `/etc/passwd` 在世界可读语义下的行为。
+
+### 62.5 边界
+
+setuid/setgid 位还没做（`can` 不认 0o4000/0o2000），组只有"主组"一个（没有附加组），`chgrp` 要 root/EXTREME 而不能"自己文件的组随便改"，`passwd` 也没有口令字段（`su` 仍靠 EXTREME 而不是密码）。

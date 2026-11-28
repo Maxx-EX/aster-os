@@ -259,6 +259,7 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
     fb::cache_wall(&tag[tag.len().saturating_sub(8)..]);
     shell::render_dashboard();
     crate::auth::init();
+    let _ = crate::auth::load_from_disk();
     shell::run()
 }
 

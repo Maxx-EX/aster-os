@@ -218,7 +218,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\npkg list\npkg info git\ntz\nwifi\nweb\nweb scroll down\nwhoami\nusers\nsu root\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
+	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\npkg list\npkg info git\ntz\nwifi\nweb\nweb scroll down\nwhoami\nusers\npasswd\nsu root\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -277,6 +277,10 @@ test: image
 	    echo "[TEST] PASS 用户身份（aster uid 1000）" || (echo "[TEST] FAIL whoami" && exit 1)
 	@grep -q "用户表 3 个" $(B)/test.log && \
 	    echo "[TEST] PASS 用户表（root/aster/guest）" || (echo "[TEST] FAIL users" && exit 1)
+	@grep -q "aster    uid=1000 gid=1000" $(B)/test.log && grep -q "gid=1001" $(B)/test.log && \
+	    echo "[TEST] PASS 用户组（gid 与 uid 一一对应）" || (echo "[TEST] FAIL gid" && exit 1)
+	@grep -q "用户库（内存 3 个" $(B)/test.log && \
+	    echo "[TEST] PASS 用户库命令（passwd 语法）" || (echo "[TEST] FAIL passwd 命令" && exit 1)
 	@grep -q "切 root 要先解开 EXTREME" $(B)/test.log && \
 	    echo "[TEST] PASS 权限门（root 要 EXTREME）" || (echo "[TEST] FAIL su root" && exit 1)
 

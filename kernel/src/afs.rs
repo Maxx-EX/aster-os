@@ -58,6 +58,7 @@ pub struct Inode {
     pub typ: u16,
     pub mode: u16,
     pub uid: u16,
+    pub gid: u16,
     pub size: u32,
     pub parent: u32,
     pub mtime: u32,
@@ -208,6 +209,7 @@ pub fn inode_read(ino: u32) -> Option<Inode> {
         typ,
         mode: get_u16(x, off + 2),
         uid: get_u16(x, off + 56),
+        gid: get_u16(x, off + 58),
         size: get_u32(x, off + 4),
         parent: get_u32(x, off + 8),
         mtime: get_u32(x, off + 12),
@@ -227,13 +229,14 @@ fn inode_write(f: &Inode) -> bool {
     put_u16(x, off, f.typ);
     put_u16(x, off + 2, f.mode);
     put_u16(x, off + 56, f.uid);
+    put_u16(x, off + 58, f.gid);
     put_u32(x, off + 4, f.size);
     put_u32(x, off + 8, f.parent);
     put_u32(x, off + 12, f.mtime);
     for i in 0..NDIRECT {
         put_u32(x, off + 16 + i * 4, f.blocks[i]);
     }
-    for i in (off + 58)..(off + 64) {
+    for i in (off + 60)..(off + 64) {
         x[i] = 0;
     }
     wr(blk_no, &*x)
@@ -392,16 +395,21 @@ pub fn inode_size(ino: u32) -> u32 {
     }
 }
 
-/// 读一行的 (mode, uid)
-pub fn meta(name: &str) -> Option<(u16, u16)> {
+/// 读一行的 (mode, uid, gid)
+pub fn meta(name: &str) -> Option<(u16, u16, u16)> {
     let sup = super_block()?;
     let root = inode_read(sup.root)?;
     let ino = dir_find(&root, name)?;
     let f = inode_read(ino)?;
-    Some((if f.mode == 0 { 0o644 } else { f.mode }, f.uid))
+    Some((if f.mode == 0 { 0o644 } else { f.mode }, f.uid, f.gid))
 }
 
-pub fn set_meta(name: &str, mode: Option<u16>, uid: Option<u16>) -> Result<(u16, u16), &'static str> {
+pub fn set_meta(
+    name: &str,
+    mode: Option<u16>,
+    uid: Option<u16>,
+    gid: Option<u16>,
+) -> Result<(u16, u16, u16), &'static str> {
     let sup = super_block().ok_or("磁盘未格式化（先 mkfs）")?;
     let root = inode_read(sup.root).ok_or("根 inode 损坏")?;
     let ino = dir_find(&root, name).ok_or("没有这个文件")?;
@@ -415,10 +423,13 @@ pub fn set_meta(name: &str, mode: Option<u16>, uid: Option<u16>) -> Result<(u16,
     if let Some(u) = uid {
         f.uid = u;
     }
+    if let Some(g) = gid {
+        f.gid = g;
+    }
     if !inode_write(&f) {
         return Err("写 inode 失败");
     }
-    Ok((f.mode, f.uid))
+    Ok((f.mode, f.uid, f.gid))
 }
 
 /// 调试用：把 inode 原始字段吐出来
@@ -441,6 +452,10 @@ pub fn list(cb: &mut dyn FnMut(&str, u32, u16, u32, u16, u16)) -> Result<(), &'s
     };
     if d.typ != T_DIR {
         return Err("根 inode 不是目录");
+    }
+    let dm = if d.mode == 0 { 0o755 } else { d.mode };
+    if !crate::auth::can(dm, d.uid, d.gid, crate::auth::W_READ) {
+        return Err("没有权限列这个目录（目录 inode 不是你的）");
     }
     let nents = (d.size as usize) / ENT;
     let per = BS / ENT;
@@ -492,7 +507,7 @@ pub fn read_file(name: &str, out: &mut [u8]) -> Result<usize, &'static str> {
         return Err("不是普通文件");
     }
     let m = if f.mode == 0 { 0o644 } else { f.mode };
-    if !crate::auth::can(m, f.uid, crate::auth::W_READ) {
+    if !crate::auth::can(m, f.uid, f.gid, crate::auth::W_READ) {
         return Err("没有读权限（owner 不是你）");
     }
     let mut got = 0usize;
@@ -524,7 +539,7 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<usize, &'static str> {
                 return Err("同名的不是普通文件");
             }
             let m = if old.mode == 0 { 0o644 } else { old.mode };
-            if !crate::auth::can(m, old.uid, crate::auth::W_WRITE) {
+            if !crate::auth::can(m, old.uid, old.gid, crate::auth::W_WRITE) {
                 return Err("没有写权限（这个文件不是你的）");
             }
             for i in 0..NDIRECT {
@@ -537,6 +552,7 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<usize, &'static str> {
                 typ: T_FILE,
                 mode: if old.mode == 0 { 0o644 } else { old.mode },
                 uid: if old.uid == 0 { crate::auth::current_uid() } else { old.uid },
+                gid: if old.gid == 0 { crate::auth::current_gid() } else { old.gid },
                 size: 0,
                 parent: sup.root,
                 mtime: 0,
@@ -548,6 +564,7 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<usize, &'static str> {
             typ: T_FILE,
             mode: 0o644,
             uid: crate::auth::current_uid(),
+            gid: crate::auth::current_gid(),
             size: 0,
             parent: sup.root,
             mtime: 0,
@@ -679,9 +696,12 @@ pub fn format(name: &str) -> bool {
         zero(x);
         if i == 0 {
             put_u16(x, 0, T_DIR);
+            put_u16(x, 2, 0o755);
             put_u32(x, 4, 64);
             put_u32(x, 8, 0);
             put_u32(x, 16, DATA_START);
+            put_u16(x, 56, 1000);
+            put_u16(x, 58, 1000);
         }
         if !wr(INODE_TABLE + i, &*x) {
             return false;
