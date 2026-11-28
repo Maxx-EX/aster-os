@@ -286,33 +286,17 @@ pub fn open_addr(addr: &str) -> bool {
         port = host[p + 1..].parse().unwrap_or(80);
         host = &host[..p];
     }
-    let mut ip = [0u8; 4];
-    {
-        let mut part = 0usize;
-        let mut num = 0u32;
-        let mut digits = 0usize;
-        for c in host.bytes() {
-            if c == b'.' {
-                if part < 3 {
-                    ip[part] = num.min(255) as u8;
-                    part += 1;
-                }
-                num = 0;
-                digits = 0;
-            } else if c.is_ascii_digit() {
-                num = num * 10 + (c - b'0') as u32;
-                digits += 1;
-            } else {
-                err_page("地址里不是 IP。Aster 还没有 DNS（NET-4），先用 10.0.2.2:8088 这种写法。");
+    // 点分 IP 直接用；带字母的走 DNS（NET-4）
+    let ip = match crate::net::parse_ip(host) {
+        Some(x) => x,
+        None => match crate::net::resolve(host, 900) {
+            Some(x) => x,
+            None => {
+                err_page("DNS 没解析出来。检查 -netdev user 是否挂了，或者先用 IP:port 的写法。");
                 return false;
             }
-        }
-        if part < 3 || digits == 0 {
-            err_page("IP 写法不对，要 a.b.c.d:port/path。");
-            return false;
-        }
-        ip[3] = num.min(255) as u8;
-    }
+        },
+    };
 
     if !crate::net::available() {
         err_page("没有 virtio-net。启动时加 -device virtio-net-device,netdev=n0 再试。");

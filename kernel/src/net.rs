@@ -10,6 +10,28 @@
 use crate::virtio::{self, Avail, Desc, Device, Queue, Used};
 
 pub const IP: [u8; 4] = [10, 0, 2, 15];
+
+// NET-4：DHCP 会改写这三项，常量只作为 slirp 的默认值
+static mut OUR_IP: [u8; 4] = IP;
+static mut OUR_GW: [u8; 4] = GW;
+static mut OUR_DNS: [u8; 4] = [10, 0, 2, 3];
+static mut DHCP_OK: bool = false;
+
+pub fn ip() -> [u8; 4] {
+    unsafe { OUR_IP }
+}
+
+pub fn gw() -> [u8; 4] {
+    unsafe { OUR_GW }
+}
+
+pub fn dns() -> [u8; 4] {
+    unsafe { OUR_DNS }
+}
+
+pub fn dhcp_ok() -> bool {
+    unsafe { DHCP_OK }
+}
 pub const MASK: [u8; 4] = [255, 255, 255, 0];
 pub const GW: [u8; 4] = [10, 0, 2, 2];
 pub const HTTP_PORT: u16 = 80;
@@ -223,7 +245,9 @@ fn send_frame(payload: &[u8]) -> bool {
         dev.notify(1);
         // 等设备归还（小流量下直接轮询，够了）
         for _ in 0..1_000_000u32 {
-            if TXQ.pop_used().is_some() {
+            // 描述符必须还给 free list，不然发几十个包之后 TX 环就空了
+            if let Some((id, _len)) = TXQ.pop_used() {
+                TXQ.free_chain(id as u16);
                 TX_FRAMES += 1;
                 return true;
             }
@@ -270,7 +294,7 @@ fn send_arp_request(target: [u8; 4]) -> bool {
     for i in 0..6 {
         f[22 + i] = unsafe { MAC[i] };
     }
-    f[28..32].copy_from_slice(&IP);
+    f[28..32].copy_from_slice(&ip());
     for i in 0..6 {
         f[32 + i] = 0;
     }
@@ -288,7 +312,7 @@ fn handle_arp(f: &[u8]) {
         let sender_ip = [f[28], f[29], f[30], f[31]];
         let sender_mac = [f[22], f[23], f[24], f[25], f[26], f[27]];
         unsafe {
-            if sender_ip == GW {
+            if sender_ip == gw() {
                 GW_MAC = sender_mac;
                 GW_KNOWN = true;
             }
@@ -298,7 +322,7 @@ fn handle_arp(f: &[u8]) {
         return;
     }
     let tip = &f[38..42];
-    if op != 1 || tip != IP {
+    if op != 1 || tip != &ip()[..] {
         return;
     }
     // who-has(我们的 IP) -> 回复我们的 MAC
@@ -316,7 +340,7 @@ fn handle_arp(f: &[u8]) {
     for i in 0..6 {
         r[22 + i] = unsafe { MAC[i] };
     }
-    r[28..32].copy_from_slice(&IP);
+    r[28..32].copy_from_slice(&ip());
     for i in 0..6 {
         r[32 + i] = f[22 + i]; // 回给请求方 MAC
     }
@@ -348,6 +372,7 @@ fn csum_fold(mut sum: u32) -> u16 {
 /// 构造以太网 + IPv4 + 协议头，返回 IP 包总长
 fn build_ip(
     out: &mut [u8],
+    src_ip: [u8; 4],
     dst_mac: [u8; 6],
     dst_ip: [u8; 4],
     proto: u8,
@@ -368,7 +393,7 @@ fn build_ip(
     out[22] = 64;
     out[23] = proto;
     out[24..26].copy_from_slice(&0u16.to_be_bytes());
-    out[26..30].copy_from_slice(&IP);
+    out[26..30].copy_from_slice(&src_ip);
     out[30..34].copy_from_slice(&dst_ip);
 
     let hc = csum_fold(csum_add(0, &out[14..34]));
@@ -387,7 +412,7 @@ fn handle_ip(f: &[u8]) {
     let proto = f[23];
     let src_ip = [f[26], f[27], f[28], f[29]];
     let dst_ip = [f[30], f[31], f[32], f[33]];
-    if dst_ip != IP {
+    if dst_ip != ip() && dst_ip != [255, 255, 255, 255] {
         return;
     }
     let src_mac = [f[6], f[7], f[8], f[9], f[10], f[11]];
@@ -397,6 +422,7 @@ fn handle_ip(f: &[u8]) {
     match proto {
         1 => handle_icmp(src_mac, src_ip, body),
         6 => handle_tcp(src_mac, src_ip, body),
+        17 => handle_udp(src_ip, body),
         _ => {}
     }
 }
@@ -415,7 +441,7 @@ fn handle_icmp(src_mac: [u8; 6], src_ip: [u8; 4], b: &[u8]) {
     resp[2..4].copy_from_slice(&c.to_be_bytes());
 
     let mut out = [0u8; 1514];
-    let total = build_ip(&mut out, src_mac, src_ip, 1, n);
+    let total = build_ip(&mut out, ip(), src_mac, src_ip, 1, n);
     out[34..34 + n].copy_from_slice(&resp[..n]);
     let total = 34 + n;
     send_frame(&out[..total]);
@@ -472,7 +498,7 @@ fn send_tcp(
     payload: &[u8],
 ) -> bool {
     let mut out = [0u8; 1514];
-    let total = build_ip(&mut out, dst_mac, dst_ip, 6, 20 + payload.len());
+    let total = build_ip(&mut out, ip(), dst_mac, dst_ip, 6, 20 + payload.len());
     let t = &mut out[34..];
     t[0..2].copy_from_slice(&src_port.to_be_bytes());
     t[2..4].copy_from_slice(&dst_port.to_be_bytes());
@@ -485,7 +511,7 @@ fn send_tcp(
     t[18..20].copy_from_slice(&0u16.to_be_bytes());
     t[20..20 + payload.len()].copy_from_slice(payload);
     let seg_len = 20 + payload.len();
-    let c = tcp_csum(IP, dst_ip, &out[34..34 + seg_len]);
+    let c = tcp_csum(ip(), dst_ip, &out[34..34 + seg_len]);
     out[34 + 16..34 + 18].copy_from_slice(&c.to_be_bytes());
     let _ = total;
     send_frame(&out[..34 + seg_len])
@@ -566,6 +592,20 @@ fn learn_mac(ip: [u8; 4], ms: u64) -> Option<[u8; 6]> {
     None
 }
 
+/// 不同网段要走网关：目的 MAC 取网关的，目的 IP 还是目标的（NET-4）
+fn route_mac(ip: [u8; 4], ms: u64) -> Option<[u8; 6]> {
+    let o = self_ip();
+    if ip[0] == o[0] && ip[1] == o[1] && ip[2] == o[2] {
+        learn_mac(ip, ms)
+    } else {
+        learn_mac(gw(), ms)
+    }
+}
+
+fn self_ip() -> [u8; 4] {
+    ip()
+}
+
 /// 发一个 GET，把响应整段收进 CLI_BUF。返回响应字节数，负数表示失败。
 ///
 /// -1 网络不可用　-2 ARP 拿不到 MAC　-3 连不上（超时/RST）　-4 收满缓冲
@@ -573,7 +613,7 @@ pub fn http_get(ip: [u8; 4], port: u16, path: &str, timeout_ms: u64) -> i32 {
     if !available() {
         return -1;
     }
-    let mac = match learn_mac(ip, 400) {
+    let mac = match route_mac(ip, 400) {
         Some(m) => m,
         None => return -2,
     };
@@ -885,3 +925,372 @@ h1 span{font-size:15px;color:var(--dim);letter-spacing:2px;margin-left:10px;font
 </div>
 </div></body></html>
 "#;
+
+// ---------------- UDP（NET-4 的底座） ----------------
+
+fn send_udp(
+    dst_mac: [u8; 6],
+    src_ip: [u8; 4],
+    dst_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+    data: &[u8],
+) -> bool {
+    if data.len() + 8 + 34 > 1514 {
+        return false;
+    }
+    let mut out = [0u8; 1514];
+    build_ip(&mut out, src_ip, dst_mac, dst_ip, 17, 8 + data.len());
+    let u = &mut out[34..];
+    u[0..2].copy_from_slice(&src_port.to_be_bytes());
+    u[2..4].copy_from_slice(&dst_port.to_be_bytes());
+    u[4..6].copy_from_slice(&((8 + data.len()) as u16).to_be_bytes());
+    u[6..8].copy_from_slice(&0u16.to_be_bytes()); // 校验和 0 = 不校验（IPv4 允许）
+    u[8..8 + data.len()].copy_from_slice(data);
+    send_frame(&out[..34 + 8 + data.len()])
+}
+
+fn handle_udp(src_ip: [u8; 4], b: &[u8]) {
+    if b.len() < 8 {
+        return;
+    }
+    let sport = u16::from_be_bytes([b[0], b[1]]);
+    let dport = u16::from_be_bytes([b[2], b[3]]);
+    let ulen = (u16::from_be_bytes([b[4], b[5]]) as usize).min(b.len()).max(8);
+    let payload = &b[8..ulen];
+    let _ = sport;
+    match dport {
+        DHCP_CLIENT_PORT => dhcp_on_reply(payload),
+        DNS_LOCAL_PORT => dns_on_reply(payload, src_ip),
+        _ => {}
+    }
+}
+
+// ---------------- DHCP 客户端 ----------------
+
+pub const DHCP_CLIENT_PORT: u16 = 68;
+const DHCP_SERVER_PORT: u16 = 67;
+
+static mut DHCP_XID: u32 = 0;
+static mut DHCP_MSG: [u8; 700] = [0; 700];
+static mut DHCP_LEN: usize = 0;
+static mut DHCP_SERVER: [u8; 4] = [0; 4];
+static mut DHCP_OFFERED: [u8; 4] = [0; 4];
+
+fn dhcp_send(kind: u8, req_ip: [u8; 4], server: [u8; 4]) -> bool {
+    let mut p = [0u8; 320];
+    p[0] = 1; // BOOTREQUEST
+    p[1] = 1; // ethernet
+    p[2] = 6; // hlen
+    p[3] = 0;
+    let xid = unsafe { DHCP_XID };
+    p[4..8].copy_from_slice(&xid.to_be_bytes());
+    p[10..12].copy_from_slice(&0x8000u16.to_be_bytes()); // 让服务器回广播
+    let m = mac();
+    for i in 0..6 {
+        p[28 + i] = m[i];
+    }
+    p[236..240].copy_from_slice(&[0x63, 0x82, 0x53, 0x63]);
+    let mut k = 240usize;
+    p[k] = 53;
+    p[k + 1] = 1;
+    p[k + 2] = kind;
+    k += 3;
+    if kind == 3 {
+        p[k] = 50;
+        p[k + 1] = 4;
+        p[k + 2..k + 6].copy_from_slice(&req_ip);
+        k += 6;
+        p[k] = 54;
+        p[k + 1] = 4;
+        p[k + 2..k + 6].copy_from_slice(&server);
+        k += 6;
+    }
+    p[k] = 12;
+    p[k + 1] = 4;
+    p[k + 2..k + 6].copy_from_slice(b"astr");
+    k += 6;
+    p[k] = 55;
+    p[k + 1] = 4;
+    p[k + 2..k + 6].copy_from_slice(&[1, 3, 6, 51]);
+    k += 6;
+    p[k] = 255;
+    let n = k + 1;
+    send_udp(
+        [0xff; 6],
+        [0, 0, 0, 0],
+        [255, 255, 255, 255],
+        DHCP_CLIENT_PORT,
+        DHCP_SERVER_PORT,
+        &p[..n],
+    )
+}
+
+fn dhcp_on_reply(b: &[u8]) {
+    if b.len() < 240 || b[0] != 2 {
+        return;
+    }
+    unsafe {
+        if u32::from_be_bytes([b[4], b[5], b[6], b[7]]) != DHCP_XID {
+            return;
+        }
+        let n = b.len().min(700);
+        DHCP_MSG[..n].copy_from_slice(&b[..n]);
+        DHCP_LEN = n;
+    }
+}
+
+/// 等一帧 DHCP 回复（最多 ms 毫秒），返回 (msg_type, yiaddr, server, gw, dns)
+fn dhcp_wait(ms: u64) -> Option<(u8, [u8; 4], [u8; 4], [u8; 4], [u8; 4])> {
+    let t0 = crate::timer::now_ms();
+    loop {
+        poll();
+        let got = unsafe {
+            let l = DHCP_LEN;
+            if l >= 240 {
+                DHCP_LEN = 0;
+                let b = &DHCP_MSG[..l];
+                let yi = [b[16], b[17], b[18], b[19]];
+                let mut kind = 0u8;
+                let mut gw = [0u8; 4];
+                let mut dns = [0u8; 4];
+                let mut server = [0u8; 4];
+                let mut i = 240usize;
+                while i + 1 < l {
+                    let opt = b[i];
+                    if opt == 255 {
+                        break;
+                    }
+                    if opt == 0 {
+                        i += 1;
+                        continue;
+                    }
+                    let len = b[i + 1] as usize;
+                    let v = &b[i + 2..(i + 2 + len).min(l)];
+                    match opt {
+                        53 if !v.is_empty() => kind = v[0],
+                        3 if len >= 4 => gw = [v[0], v[1], v[2], v[3]],
+                        6 if len >= 4 => dns = [v[0], v[1], v[2], v[3]],
+                        54 if len >= 4 => server = [v[0], v[1], v[2], v[3]],
+                        _ => {}
+                    }
+                    i += 2 + len;
+                }
+                Some((kind, yi, server, gw, dns))
+            } else {
+                None
+            }
+        };
+        if let Some(x) = got {
+            return Some(x);
+        }
+        if crate::timer::now_ms().saturating_sub(t0) > ms {
+            return None;
+        }
+    }
+}
+
+/// 跑一遍完整的 DISCOVER → OFFER → REQUEST → ACK
+pub fn dhcp_acquire(timeout_ms: u64) -> bool {
+    if !available() {
+        return false;
+    }
+    unsafe { DHCP_XID = 0x4153_0000 | (crate::timer::now_ms() as u32 & 0xffff) };
+    // 先让 slirp 知道我们在（它只对收到的广播做回应）
+    send_arp_request(ip());
+    dhcp_send(1, [0; 4], [0; 4]);
+    let (kind, yi, srv, _, _) = match dhcp_wait(timeout_ms) {
+        Some(x) => x,
+        None => return false,
+    };
+    if kind != 2 || yi == [0; 4] {
+        return false;
+    }
+    unsafe {
+        DHCP_OFFERED = yi;
+        DHCP_SERVER = srv;
+    }
+    dhcp_send(3, yi, srv);
+    let (kind2, yi2, _, gw2, dns2) = match dhcp_wait(timeout_ms) {
+        Some(x) => x,
+        None => return false,
+    };
+    if kind2 != 5 {
+        return false;
+    }
+    unsafe {
+        OUR_IP = if yi2 == [0; 4] { yi } else { yi2 };
+        if gw2 != [0; 4] {
+            OUR_GW = gw2;
+        }
+        if dns2 != [0; 4] {
+            OUR_DNS = dns2;
+        }
+        DHCP_OK = true;
+    }
+    // 新地址会让之前的 ARP 缓存失效
+    unsafe {
+        GW_KNOWN = false;
+        ARP_MAC = [0; 6];
+    }
+    let _ = gw();
+    true
+}
+
+// ---------------- DNS 客户端（只查 A 记录） ----------------
+
+pub const DNS_LOCAL_PORT: u16 = 53053;
+static mut DNS_ID: u16 = 0;
+static mut DNS_MSG: [u8; 700] = [0; 700];
+static mut DNS_LEN: usize = 0;
+
+fn dns_on_reply(b: &[u8], _src: [u8; 4]) {
+    if b.len() < 12 {
+        return;
+    }
+    let n = b.len().min(700);
+    unsafe {
+        DNS_MSG[..n].copy_from_slice(&b[..n]);
+        DNS_LEN = n;
+    }
+}
+
+fn skip_name(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() {
+        let l = b[i];
+        if l == 0 {
+            return i + 1;
+        }
+        if l & 0xc0 == 0xc0 {
+            return i + 2;
+        }
+        i += 1 + l as usize;
+    }
+    i
+}
+
+/// 把 a.b.c 这样的域名编码成 DNS 的 label 序列，返回新的偏移
+fn put_qname(b: &mut [u8], mut k: usize, name: &[u8]) -> usize {
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i <= name.len() {
+        if i == name.len() || name[i] == b'.' {
+            let len = i - start;
+            if len == 0 || k + 1 + len >= b.len() {
+                return k;
+            }
+            b[k] = len as u8;
+            k += 1;
+            b[k..k + len].copy_from_slice(&name[start..i]);
+            k += len;
+            start = i + 1;
+        }
+        i += 1;
+    }
+    b[k] = 0;
+    k + 1
+}
+
+pub fn parse_ip(s: &str) -> Option<[u8; 4]> {
+    let mut ip = [0u8; 4];
+    let mut part = 0usize;
+    let mut num = 0u32;
+    let mut digits = 0usize;
+    for c in s.bytes() {
+        if c == b'.' {
+            if part >= 3 {
+                return None;
+            }
+            ip[part] = num.min(255) as u8;
+            part += 1;
+            num = 0;
+            digits = 0;
+        } else if c.is_ascii_digit() {
+            num = num * 10 + (c - b'0') as u32;
+            digits += 1;
+        } else {
+            return None;
+        }
+    }
+    if part != 3 || digits == 0 {
+        return None;
+    }
+    ip[3] = num.min(255) as u8;
+    Some(ip)
+}
+
+pub fn resolve(name: &str, timeout_ms: u64) -> Option<[u8; 4]> {
+    if !available() || name.is_empty() {
+        return None;
+    }
+    // 已经是点分 IP 就直接用
+    if let Some(ip) = parse_ip(name) {
+        return Some(ip);
+    }
+    let dns_ip = dns();
+    let dns_mac = match route_mac(dns_ip, 600) {
+        Some(m) => m,
+        None => return None,
+    };
+    let id = (crate::timer::now_ms() as u16) ^ 0x5a5a;
+    unsafe { DNS_ID = id };
+    let mut q = [0u8; 300];
+    q[0..2].copy_from_slice(&id.to_be_bytes());
+    q[2..4].copy_from_slice(&0x0100u16.to_be_bytes()); // 递归查询
+    q[4..6].copy_from_slice(&1u16.to_be_bytes());
+    let k = put_qname(&mut q, 12, name.as_bytes());
+    if k + 4 > q.len() {
+        return None;
+    }
+    q[k..k + 2].copy_from_slice(&1u16.to_be_bytes()); // A
+    q[k + 2..k + 4].copy_from_slice(&1u16.to_be_bytes()); // IN
+    let n = k + 4;
+    if !send_udp(dns_mac, ip(), dns_ip, DNS_LOCAL_PORT, 53, &q[..n]) {
+        return None;
+    }
+    let t0 = crate::timer::now_ms();
+    loop {
+        poll();
+        let got = unsafe {
+            let l = DNS_LEN;
+            if l >= 12 {
+                DNS_LEN = 0;
+                let b = &DNS_MSG[..l];
+                if u16::from_be_bytes([b[0], b[1]]) == DNS_ID {
+                    let an = u16::from_be_bytes([b[6], b[7]]) as usize;
+                    let qd = u16::from_be_bytes([b[4], b[5]]) as usize;
+                    let mut i = 12usize;
+                    for _ in 0..qd {
+                        i = skip_name(b, i) + 4;
+                    }
+                    let mut found = None;
+                    for _ in 0..an.min(8) {
+                        i = skip_name(b, i);
+                        if i + 10 > b.len() {
+                            break;
+                        }
+                        let typ = u16::from_be_bytes([b[i], b[i + 1]]);
+                        let rdlen = u16::from_be_bytes([b[i + 8], b[i + 9]]) as usize;
+                        let rd = i + 10;
+                        if typ == 1 && rdlen == 4 && rd + 4 <= b.len() {
+                            found = Some([b[rd], b[rd + 1], b[rd + 2], b[rd + 3]]);
+                            break;
+                        }
+                        i = rd + rdlen;
+                    }
+                    found
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(x) = got {
+            return Some(x);
+        }
+        if crate::timer::now_ms().saturating_sub(t0) > timeout_ms {
+            return None;
+        }
+    }
+}

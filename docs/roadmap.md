@@ -226,7 +226,7 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 | PERF-4 | ✅ 窗口离屏合成 | 每窗一块离屏层，按 z 序 blit 合成；三窗口 18–20 ms → **2 ms**，单窗 1 ms |
 | PERF-5 | ✅ 只贴脏矩形 | `REPAINT` 并集 + 裁剪贴回；静止帧 **0 ms**（零拷贝），打字帧 0 ms（只贴两行）；拖动补旧矩形 |
 | PKG-2b | ✅ 包生态 80 个 | 10 类（lang/build/vcs/net/edit/sys/db/media/sec/android）；`pkg list <类>`、`pkg search`、`pkg list installed`；索引表由脚本生成 |
-| NET-4 | ⬜ DHCP + DNS | 摆脱写死 10.0.2.15；DHCP DISCOVER/OFFER、DNS A 查询，给 `http get` 用域名 |
+| NET-4 | ✅ DHCP + DNS | 手写 BOOTP/UDP：DISCOVER→OFFER→REQUEST→ACK 拿 10.0.2.15（1–2 ms）；DNS 查 A 记录（example.com 4 ms）；`web neverssl.com` 拉公网页面；跨网段按网关 MAC 转发 |
 
 **验收**：DNS 解析正确；`https://` 页面能拉下来；TLS 拒绝过期证书。
 
@@ -387,7 +387,7 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **PKG-2b ✅ 包生态扩到 80 个**：`tools/mkpkg.py` 改成"列表即索引"，直接生成 `kernel/src/pkgidx.rs`；`pkg list` 变分类概览（10 类），`pkg list lang` 看明细，`pkg search` 按名/描述/类搜，`pkg list installed` 只列已装
 - **PERF-3 ✅ 壁纸惰性 + 终端行级增量**：壁纸只在窗口动、键盘开合、分钟跳格时重擦（`ask_wall`），终端只补脏行（`term::take_rows`）；关掉系统/网络窗后 `perf` 报 **整桌 0 ms / 壁纸 0 / 窗口 0**，三窗口 18 ms
 - **PERF-4 ✅**：三窗口 18 ms → 2 ms（每窗一块离屏层 + 按 z 序 blit，单窗仍走 1 ms 快速路径）；PERF-5 已把静止帧做到 0 ms
-- **NET-4 ⬜ 下一阶段**：DHCP + DNS，让 `http get` 能用域名而不是写死 IP
+- **NET-4 ✅ DHCP + DNS**：`net.rs` 补 UDP（`send_udp`/`handle_udp`），手写 BOOTP 跑 DISCOVER→OFFER→REQUEST→ACK（1–2 ms 拿到 10.0.2.15/网关/DNS），DNS 查 A 记录（4 ms），`web neverssl.com` 拉公网页面；顺带修了 TX 描述符从不 free_chain 的泄漏
 - **P6-5 ✅ 内置浏览器**：`html.rs` 自研分词与块级排版（h1/h2/hr/列表/段落折行/行内链接），`web.rs` 页面状态 + 行到像素 + 滚动 + 命中；第四窗口「浏览器」、dock 第四格、侧栏"浏览"；`web` 系列命令；首页内置可离线开，`web 10.0.2.2:8000/home.html` 走真 TCP 拉取，点链接跳转、拖动滚动均已实测
 - **P6-5+ ✅ 图片解码落进浏览器**：`img.rs` 自解 BMP/PNG（RGBA 反滤波 + 复用 inflate），内置星芒徽标真画出来；表格、`https`、历史栈仍是下一刀
 - **IMG-1 ✅ 图片解码**：`kernel/src/img.rs` 自解 BMP(24/32bpp) 与 PNG(8bit RGB/RGBA，非隔行)，反滤波 Sub/Up/Average/Paeth，zlib 头剥掉复用 APK 的 `inflate`；三块大缓冲改由页帧分配器懒要，避开 `.bss` 撑爆导致的 `ADR_PREL_LO21` 超范围

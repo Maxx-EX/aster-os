@@ -190,9 +190,25 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
     if net::init() {
         let m = net::mac();
         println!(
-            "[NET] virtio-net 已就绪  MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  IP 10.0.2.15/24  GW 10.0.2.2  HTTP :80",
+            "[NET] virtio-net 已就绪  MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             m[0], m[1], m[2], m[3], m[4], m[5]
         );
+        // NET-4：先试 DHCP，失败就沿用 slirp 的静态约定（10.0.2.15/2）
+        if net::dhcp_acquire(800) {
+            let ip = net::ip();
+            let gw = net::gw();
+            let dns = net::dns();
+            println!(
+                "[NET] DHCP 租约  IP {}.{}.{}.{}/24  GW {}.{}.{}.{}  DNS {}.{}.{}.{}",
+                ip[0], ip[1], ip[2], ip[3], gw[0], gw[1], gw[2], gw[3], dns[0], dns[1], dns[2], dns[3]
+            );
+        } else {
+            let ip = net::ip();
+            println!(
+                "[NET] DHCP 没回应，沿用静态 IP {}.{}.{}.{}/24  GW 10.0.2.2  DNS 10.0.2.3",
+                ip[0], ip[1], ip[2], ip[3]
+            );
+        }
     } else {
         println!("[NET] 未找到 virtio-net 设备（启动时是否带了 -device virtio-net-device？）");
         // 诊断槽位表放到 `net` 命令里按需查看，启动时不要刷屏

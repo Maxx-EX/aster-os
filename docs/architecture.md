@@ -2784,3 +2784,43 @@ $ chmod 644  a.txt → -rw-r--r--
 ### 63.4 边界（如实）
 
 `s`/`t` 位现在只到"能设、能显示、能存进 inode"。Aster 目前没有 exec 语义（用户程序是 APK 解释执行，不是 fork+exec 一个 ELF），所以"setuid 让进程以文件 owner 身份跑"这件事还没有落点；等有了 exec，`can()` 里按 `mode & 0o4000` 抬当前 uid 就是一行。ACL 也没做——inode 只剩 +60..64 四个字节，真要 ACL 得改 inode 布局或加侧表。
+
+## 64. NET-4：DHCP 客户端与 DNS
+
+### 64.1 先有 UDP，才谈得上 DHCP 和 DNS
+
+前面所有网络代码都只做 TCP（HTTP 客户端/服务器）与 ICMP，UDP 一直缺席。NET-4 的第一步是补一个最小 UDP 发送：`send_udp` 复用 `build_ip`，8 字节头里校验和直接填 0（IPv4 明确允许"不校验"），接收侧 `handle_udp` 按目的端口分发——68 交给 DHCP，53053 交给 DNS 客户端。
+
+`build_ip` 同时改成显式传源地址，因为 DHCP DISCOVER 必须以 `0.0.0.0` 作为源。
+
+### 64.2 DHCP：DISCOVER → OFFER → REQUEST → ACK
+
+手写 BOOTP 包（236 字节固定头 + `0x63825363` magic + TLV 选项），xid 用开机毫秒造一个，flags 置 `0x8000` 要求服务器回广播：
+
+- DISCOVER：`53=1`、`12=astr`（主机名）、`55=[1,3,6,51]`（想要的选项）；
+- 收到 OFFER（`53=2`）后记下 yiaddr 与 server，发 REQUEST（`53=3`、`50=要的 IP`、`54=服务器`）；
+- 收到 ACK（`53=5`）后把 yiaddr / option 3（网关）/ option 6（DNS）写进运行期配置 `OUR_IP/OUR_GW/OUR_DNS`，并让 ARP 缓存失效。
+
+配置从常量变成运行期变量（`net::ip()/gw()/dns()`），`net` 命令会标"DHCP 已租到"还是"静态默认"。开机自动跑一次（超时 800 ms），失败就退回 slirp 的 10.0.2.15/2。
+
+实测 QEMU slirp：`dhcp` 一次 1–2 ms 就拿到 `IP 10.0.2.15 / GW 10.0.2.2 / DNS 10.0.2.3`。
+
+### 64.3 DNS：只查 A 记录
+
+`resolve(name, ms)`：domain 名按 label 编码（`put_qname`）、`QDCOUNT=1`、`QTYPE=A`、`QCLASS=IN`，递归标志置位，源端口 53053。回复解析只做必要的事：跳过 question、逐条 answer、`skip_name` 处理 `0xC0` 压缩指针，命中 `TYPE=1 && RDLEN=4` 就取出 IPv4。
+
+`dns example.com` → `104.20.23.154`（4 ms）。
+
+### 64.4 浏览器直接吃域名
+
+`web::open_addr` 原来只会解析点分 IP，非数字直接报"还没有 DNS"。现在先试 `net::parse_ip`，不像 IP 就走 `resolve`，失败才出错误页。`web neverssl.com` 真的拉到公网页面（36 行 / 271 位置，标题、段落、链接、滚动条都在）。
+
+跨网段还有个坑：目的 IP 不在 `10.0.2.0/24` 时，ARP 问不到对方 MAC（对端根本不在这个子网）。加了 `route_mac()`：同网段问目标自己，跨网段问网关，目的 IP 保持不变。
+
+### 64.5 顺手修的一个真 bug：TX 描述符泄漏
+
+`send_frame` 等设备归还缓冲时用的是 `TXQ.pop_used()`，但从没把描述符还给 free list。TCP 时代发包少（一页 GET 十来个包）看不出来；DHCP + DNS 一上来，TX 环几十个包就空了，`TXQ.alloc().unwrap()` 直接 panic——第一版 `web example.com` 就是这么炸的。修法是 `pop_used` 之后 `free_chain(id)`。
+
+### 64.6 边界
+
+DHCP 没有租约续期/释放（一次性拿完就用到底）、没有处理 NAK；DNS 只查 A 记录（没有 AAAA/CNAME/SRV，也不缓存）；TCP 仍不做重传，靠 slirp 本地回环的可靠性。TLS 依旧没有，`https://` 页面会落到"没有加密层"的错误页。

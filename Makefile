@@ -218,7 +218,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\npkg list\npkg info git\ntz\nwifi\nweb\nweb scroll down\nwhoami\nusers\npasswd\nsu root\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
+	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\npkg list\npkg info git\ntz\nwifi\nweb\nweb scroll down\ndhcp\ndns example.com\nwhoami\nusers\npasswd\nsu root\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -273,6 +273,10 @@ test: image
 	    echo "[TEST] PASS 内置浏览器首页（30 行）" || (echo "[TEST] FAIL web 首页" && exit 1)
 	@grep -q "当前位置 80" $(B)/test.log && \
 	    echo "[TEST] PASS 浏览器滚动" || (echo "[TEST] FAIL web 滚动" && exit 1)
+	@grep -q "DHCP: DISCOVER → OFFER → REQUEST → ACK" $(B)/test.log && grep -q "没拿到租约" $(B)/test.log && \
+	    echo "[TEST] PASS DHCP 命令在无网时如实失败" || (echo "[TEST] FAIL dhcp" && exit 1)
+	@grep -q "没回 A 记录" $(B)/test.log && \
+	    echo "[TEST] PASS DNS 命令在无网时如实失败" || (echo "[TEST] FAIL dns" && exit 1)
 	@grep -q "aster  uid=1000" $(B)/test.log && \
 	    echo "[TEST] PASS 用户身份（aster uid 1000）" || (echo "[TEST] FAIL whoami" && exit 1)
 	@grep -q "用户表 3 个" $(B)/test.log && \

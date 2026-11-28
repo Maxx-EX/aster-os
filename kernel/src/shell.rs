@@ -636,7 +636,9 @@ fn cmd_help() {
     println!("  runp      抢占验证（纯计算任务 vs 打印任务）");
     println!("  sched     任务调度统计");
     println!("  gfx       重绘图形界面（ramfb / VNC 远程可见）");
-    println!("  net       网络状态（virtio-net / IP / 收发计数）");
+    println!("  net       网络状态（virtio-net / IP / DNS / 收发计数）");
+    println!("  dhcp      DHCP 自动取地址（DISCOVER→OFFER→REQUEST→ACK）");
+    println!("  dns <名>  查 A 记录，例: dns example.com");
     println!("  wifi      无线网现状（无 802.11 硬件，WIFI-1 未开工）");
     println!("  web       内置浏览器：web / web home / web <ip:port/path> / web scroll up|down|top");
     println!("  date      当前时间（固定 Asia/Shanghai）");
@@ -1191,6 +1193,39 @@ pub fn run() -> ! {
                 println!("[GFX] 界面已重绘（{}x{}）", fb::width(), fb::height());
             }
             "net" => cmd_net(),
+            "dhcp" => {
+                println!("  DHCP: DISCOVER → OFFER → REQUEST → ACK");
+                let t0 = crate::timer::now_ms();
+                if crate::net::dhcp_acquire(2500) {
+                    let ip = crate::net::ip();
+                    let gw = crate::net::gw();
+                    let dns = crate::net::dns();
+                    println!(
+                        "  租到 {}.{}.{}.{}  网关 {}.{}.{}.{}  DNS {}.{}.{}.{}  耗时 {} ms",
+                        ip[0], ip[1], ip[2], ip[3], gw[0], gw[1], gw[2], gw[3],
+                        dns[0], dns[1], dns[2], dns[3],
+                        crate::timer::now_ms().saturating_sub(t0)
+                    );
+                } else {
+                    println!("  没拿到租约（slirp 没回？确认 -netdev user,id=n0 已挂）");
+                }
+            }
+            l if l.starts_with("dns ") => {
+                let name = l[4..].trim();
+                if name.is_empty() {
+                    println!("  用法: dns example.com");
+                    continue;
+                }
+                let t0 = crate::timer::now_ms();
+                match crate::net::resolve(name, 1200) {
+                    Some(ip) => println!(
+                        "  {} → {}.{}.{}.{}  耗时 {} ms",
+                        name, ip[0], ip[1], ip[2], ip[3],
+                        crate::timer::now_ms().saturating_sub(t0)
+                    ),
+                    None => println!("  解析失败（DNS {}.{}.{}.{} 没回 A 记录）", crate::net::dns()[0], crate::net::dns()[1], crate::net::dns()[2], crate::net::dns()[3]),
+                }
+            }
             "uptime" => println!("  已运行 {} ms", uptime_ms()),
             "date" => cmd_date(),
 
@@ -1530,7 +1565,15 @@ fn cmd_net() {
     let (rx, tx, conns) = crate::net::stats();
     println!("  设备      : virtio-net (virtio-mmio)");
     println!("  MAC       : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5]);
-    println!("  IP        : 10.0.2.15/24   网关 10.0.2.2");
+    let ip = crate::net::ip();
+    let gw = crate::net::gw();
+    let dns = crate::net::dns();
+    println!(
+        "  IP        : {}.{}.{}.{}/24   网关 {}.{}.{}.{}{}",
+        ip[0], ip[1], ip[2], ip[3], gw[0], gw[1], gw[2], gw[3],
+        if crate::net::dhcp_ok() { "（DHCP 已租到）" } else { "（静态默认，可 dhcp）" }
+    );
+    println!("  DNS       : {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
     println!("  服务      : TCP :80（宿主用 hostfwd 映射即可打开）");
     println!("  收/发帧   : {}/{}", rx, tx);
     println!("  建立连接  : {}", conns);
