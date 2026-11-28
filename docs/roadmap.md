@@ -234,6 +234,7 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 - APK-6 ✅ 数组（`new-array` / `array-length` / `aget` / `aput`，数组堆 4 × 8 槽，越界报错；fixture 循环求和 30）
 - APK-7 ✅ 静态字段与 StringBuilder（`sget`/`sput`、内核侧桥接 `append(String/I)`/`toString`、动态字符串槽；fixture 输出 `sum=30 hits=1`）
 - APK-9 ✅ 画布桥接（自研 `Lcom/aster/Canvas;`：clear/setColor/drawRect/drawText，命令表 + 桌面重绘时叠加；`canvas on|off` 可收起）
+- APK-16 ✅ 接口与虚分派（`invoke-interface` + `MethodRef.proto` + `code_by_sig` 双键匹配 + 实现类上溯 8 层）；fixture 两接口同名不同签名 → 4/9/4
 - APK-15 ✅ String 方法族（length/charAt/equals/concat/substring/indexOf/valueOf，动态字符串槽 16 × 128 字节）；`dex str` 串起 6 步验证
 - APK-14 ✅ 数组接到页帧分配器（64 槽 × 连续页元素缓冲，`MAX_ELEMS=4096`）；`dex big` 跑 2048 元素 / 2 页；顺手记下 23x 的 A 是 8 位
 - APK-13 ✅ 对象堆接到页帧分配器（4 KiB 页 / 63 槽 / 页链 + 尾指针，引用改 `0x1_0000+g`）、`App.arg()` 启动参数；顺手把 if 系列对齐规范、修 goto 单字与 `add-int/lit8` 源寄存器

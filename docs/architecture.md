@@ -2072,3 +2072,83 @@ str() 执行完（52 条指令），正常 return-void
 ### 52.6 下一步
 
 字符串从"能存"到"能用"了，但**对象模型**还停在一层：没有 `ArrayList`，没有 `HashMap`，没有接口/多态分派（`invoke-interface` 根本没实现），也没有 `String[]` 之外的引用数组语义。APK-16 打算做 `invoke-interface` + 虚表，这是跑任何真实 APK 都绕不过的一步——现在 `Child`/`Base` 靠 `code_in_class` 上溯 4 层能跑，但一个类实现两个接口、同一方法名不同签名就立刻失效。
+
+---
+
+## 53. APK-16：接口与虚分派
+
+§52 的 `invoke-virtual` 只按「方法名」找方法体。这在单继承下侥幸能跑，但一个类实现两个接口、两个接口又有同名不同签名的 `area()` 时，只比名字必然分派错。这一节把 `invoke-interface` 接上，并把方法匹配升级成 **(名字 + proto)** 双键。
+
+### 53.1 三个改动
+
+**① `MethodRef` 带 proto。** 原来只有 `class` / `name` / `shorty`，`shorty` 是 `"IIL"` 这种压扁串，不足以区分 `()` 和 `(I)`。补 `proto: u32`，直接给 `proto_idx`，比较时不解析参数类型列表，纯整数比较。
+
+**② `code_by_sig(class_idx, name, proto)`。** 按 `class_idx`（不是描述符）定位 `class_def`，遍历 `direct_methods` + `virtual_methods`，`method(midx).name == name && .proto == proto` 才算命中。`code_off == 0` 视为「声明但没有方法体」（抽象方法），继续上溯。
+
+**③ `code_iface(iface, name, proto, obj_class_idx)`。** 参数里那个 `iface` 其实不参与解析，只用来报错时说清楚是哪个接口：真正的落脚点是**对象的实际类**。从实际类开始沿 `superclass` 上溯最多 8 层，每层查 `code_by_sig`。对象引用 → 类索引靠 `obj_class_idx`：`heap_idx(v)` 拿槽地址，读 `sp+4` 的 `class_idx`（这正是 §50 页帧对象槽头的第二个字段）。
+
+`new-instance` 里存的 `class_idx` 就是 `type_idx`，所以对象槽里天然记着「我是谁」，不需要额外维护类型标签。
+
+opcode 侧只加一条：`0x72`（`invoke-interface`，35c 格式），并在通用分派处按 `(u & 0xff) == 0x72` 分支——接口走 `code_iface`，其余仍走 `code_of`。
+
+### 53.2 顺手修掉的历史错位
+
+`type_ids` 的写入顺序一直是 `S_BASE, S_BOOM, S_CHILD, S_RTE`，而常量是 `T_BASE=8, T_CHILD=9, T_RTE=10, T_BOOM=11`。也就是说 **APK-8 之后 `Child` 和 `Boom` 的描述符一直是对调的**：`child_def_pos` 写的是 `T_CHILD=9`，而 9 号实为 `"Lcom/aster/Boom;"`。
+
+之所以没暴露，是因为内核所有解析都靠「描述符查 class_def」反查，`invoke-direct` 的 `m.class` 也来自同一张错表，两边一起错、内部自洽。改成与常量一致的顺序后行为完全不变，但 DEX 终于对得上名字了。
+
+### 53.3 fixture：两个接口 + 一个实现类
+
+```
+interface Sh { int area(); int area(int k); }   // 同名不同签名
+interface Tg { int area(); }                     // 与 Sh 同名
+class Sq implements Sh, Tg {
+    int area() { return 4; }
+    int area(int k) { return k * k; }
+}
+```
+
+`Main.poly()V`：
+```java
+Sh s = new Sq();
+int a = s.area();      // 4  —— Sh.area()I
+int b = s.area(3);     // 9  —— Sh.area(I)I，靠 proto 与上面那条区分
+int c = ((Tg) s).area(); // 4 —— 换个接口、同名方法，仍落到 Sq.area()I
+```
+
+`Sh`/`Tg` 的 `class_data_off = 0`（接口只声明不实现，方法体在 `method_ids` 里但类里没有 class_data），`Sq` 写了 `interfaces_off` 指向 `[@Sh, @Tg]` 的 type_list，`superclass = 0xFFFFFFFF`（这份 fixture 没有 `Ljava/lang/Object;`）。
+
+### 53.4 五个坑（全部真踩）
+
+1. **`invoke-interface` 的 opcode 是 `0x72`，不是 `0x6e`。** 第一版 fixture 三条全写成 `0x6e`，于是全被当 `invoke-virtual` 处理，`code_of("LSh;")` 找不到 `class_data` → 上溯到 `MAX` → 报「已到根类」。查错时先打印了 `code_in_class` 的每一项，看到 `direct 45 = "poly" want "poly"` 相等却不返回，才反应过来根本没进 `0x72` 分支。
+2. **35c 的 `argc` 在 unit0 的高 4 位。** 写 `0x0072` 是 `argc=0`，`args[0]` 从未填充，`obj_class_idx(0)` 立刻报「不是有效对象引用」。正确是 `0x1072`。
+3. **实例方法的 `ins_size` 含 `this`。** 抽象方法 `area()I` 没有参数，但实现类的方法体是实例方法，`ins_size = 1`。写成 0 后 `exec` 的 `args.len() > ins_n` 校验直接拒掉（`argc=1` 却 `ins_n=0`）。
+4. **`const/16` 的 A 是 8 位。** `const/16 v2, #3` 是 `0x0213`；写成 `0x1213` 后 A 读成 `0x12=18` → `regs[18]` 越界，**panic at dex.rs:904**。
+5. **`0x1071` 手写成 `0x0171`。** 少了 `argc` 位，`Log.n` 的 `argc=0`、`args[0]` 恒 0，但 `exec` 全程不报错——三种方法都「跑完了」，只是数字全是 0。最后靠打印 `u=0x171` 才定位。
+
+前四个当场就炸，第五个是**静默错误**，也是这轮最值得记的一条：解释器里 `argc` 算错不会崩，只会读到没被写过的寄存器，表现成「功能正常但结果全零」。
+
+### 53.5 实拍
+
+```
+[DEX] 4
+[DEX] 9
+[DEX] 4
+poly() 执行完（40 条指令），正常 return-void
+```
+
+`make test` **28 项 PASS**，新增：
+```
+[TEST] PASS 接口分派：同名不同签名按 proto 精确命中实现类
+```
+
+### 53.6 限制
+
+- 不做接口合法性校验：对象类没实现那个接口也能跑通（只按 `name+proto` 找到同名方法就当命中），真 APK 里可能把 `Foo.area()` 错派到 `Bar.area()`。要严格就得读 `interfaces_off` 的 type_list 逐项核对。
+- 没有 `invoke-interface-range`（`0x75`）、没有 default method（`invoke-interface` 落到接口自身的非抽象方法体）。
+- 不支持接口继承、协变返回（`(name, proto)` 精确匹配，返回类型变了就找不到）。
+- `code_of`（virtual/direct 路径）**仍只按名字匹配**，同一个类里两个同名不同参数的虚方法会撞——现有 fixture 里 `Sq` 就有两个 `area`，只是 `invoke-virtual` 那条路径没被 fixture 触发过。这是下一节要一并收掉的。
+
+### 53.7 下一步
+
+方法解析这块基本齐了，剩下的硬骨头在**容器**：`ArrayList`/`HashMap` 需要对象数组（`new-array [Lxxx;` 存引用）、`instanceof`（`0x20`）、`check-cast`（`0x1f`）、以及 `String.hashCode`。APK-17 打算先把 `code_of` 也升级成双键匹配，再补 `instanceof`/`check-cast` + 引用数组，为 `ArrayList` 铺路。

@@ -124,6 +124,8 @@ pub struct MethodRef<'a> {
     pub class: &'a str,
     pub name: &'a str,
     pub shorty: &'a str,
+    /// proto_idx（APK-16）：同名不同签名靠这个精确分派
+    pub proto: u32,
 }
 
 pub fn method<'a>(d: &'a [u8], h: &Header, idx: u32) -> Result<MethodRef<'a>, &'static str> {
@@ -139,6 +141,7 @@ pub fn method<'a>(d: &'a [u8], h: &Header, idx: u32) -> Result<MethodRef<'a>, &'
         class: type_desc(d, h, class_idx)?,
         name: string(d, h, name_idx)?,
         shorty: string(d, h, u32le(d, proto))?,
+        proto: proto_idx,
     })
 }
 
@@ -206,6 +209,98 @@ fn code_in_class(d: &[u8], h: &Header, class_desc: &str, method_name: &str) -> R
         i += 1;
     }
     Err("没有这个类")
+}
+
+/// 按 class_idx（不是描述符）定位 class_def 项，接口分派要用
+fn class_def_pos_by_idx(d: &[u8], h: &Header, class_idx: u32) -> Result<usize, &'static str> {
+    let mut i = 0u32;
+    while i < h.classes {
+        let p = h.c_off as usize + i as usize * 32;
+        if u32le(d, p) == class_idx {
+            return Ok(p);
+        }
+        i += 1;
+    }
+    Err("没有这个类（按索引）")
+}
+
+/// 在指定类里按「方法名 + proto」精确找 direct/virtual 方法的 code_off。
+/// APK-16：一个接口可以有两个同名不同参数的方法，只比名字必然撞车。
+fn code_by_sig(d: &[u8], h: &Header, class_idx: u32, name: &str, proto: u32) -> Option<u32> {
+    let p = class_def_pos_by_idx(d, h, class_idx).ok()?;
+    let cd_off = u32le(d, p + 24);
+    if cd_off == 0 {
+        return None;
+    }
+    let mut q = cd_off as usize;
+    let (sf, n1) = uleb(d, q).ok()?;
+    q = n1;
+    let (inf, n2) = uleb(d, q).ok()?;
+    q = n2;
+    let (dm, n3) = uleb(d, q).ok()?;
+    q = n3;
+    let (vm, n4) = uleb(d, q).ok()?;
+    q = n4;
+    let mut k = 0;
+    while k < sf + inf {
+        let (_, a) = uleb(d, q).ok()?;
+        let (_, b) = uleb(d, a).ok()?;
+        q = b;
+        k += 1;
+    }
+    let mut round = 0;
+    while round < 2 {
+        let cnt = if round == 0 { dm } else { vm };
+        let mut midx = 0u32;
+        let mut k = 0;
+        while k < cnt {
+            let (diff, a) = uleb(d, q).ok()?;
+            let (_, b) = uleb(d, a).ok()?;
+            let (coff, c) = uleb(d, b).ok()?;
+            q = c;
+            midx += diff;
+            let m = method(d, h, midx).ok()?;
+            if m.name == name && m.proto == proto {
+                return Some(coff);
+            }
+            k += 1;
+        }
+        round += 1;
+    }
+    None
+}
+
+/// 从对象引用的实际类出发，沿 superclass 上溯找实现对（最多 8 层）。
+/// 接口自己只声明不实现（code_off = 0），方法体在实现类里。
+fn code_iface(
+    d: &[u8],
+    h: &Header,
+    iface: &str,
+    name: &str,
+    proto: u32,
+    obj_class_idx: u32,
+) -> Result<u32, &'static str> {
+    let mut ci = obj_class_idx;
+    let mut depth = 0;
+    loop {
+        if let Some(c) = code_by_sig(d, h, ci, name, proto) {
+            if c != 0 {
+                return Ok(c);
+            }
+        }
+        let p = class_def_pos_by_idx(d, h, ci)?;
+        let sup = u32le(d, p + 8);
+        if sup == u32::MAX {
+            break;
+        }
+        ci = sup;
+        depth += 1;
+        if depth > 8 {
+            return Err("实现类上溯超过 8 层");
+        }
+    }
+    let _ = iface;
+    Err("接口方法在实现类里找不到实现（该对象类没有实现这个接口的方法）")
 }
 
 fn class_def_pos(d: &[u8], h: &Header, class_desc: &str) -> Result<usize, &'static str> {
@@ -627,6 +722,12 @@ fn heap_idx(v: i32) -> Result<u64, &'static str> {
         return Err("对象已释放");
     }
     Ok(sp)
+}
+
+/// 对象引用 → 实际类索引（class_idx），接口分派靠它定位方法体
+fn obj_class_idx(v: i32) -> Result<u32, &'static str> {
+    let sp = heap_idx(v)?;
+    Ok(rd_u32(sp + 4))
 }
 
 /// (页数, 已用槽, 总槽容量)
@@ -1053,8 +1154,8 @@ fn exec(
                 regs[a] = regs[b].wrapping_add(sx8(w & 0xff));
                 pc += 2;
             }
-            0x6e | 0x6f | 0x70 | 0x71 => {
-                // invoke-virtual / invoke-direct / invoke-static （都是 35c）
+            0x6e | 0x6f | 0x70 | 0x71 | 0x72 => {
+                // invoke-virtual / invoke-direct / invoke-static / invoke-interface（都是 35c）
                 let argc = ((u >> 12) & 0xf) as usize;
                 if (pc as usize) + 2 >= n {
                     return Err("invoke 被截断");
@@ -1208,7 +1309,13 @@ fn exec(
                         _ => return Err("Canvas 上没有这个方法"),
                     }
                 } else {
-                    let c2 = code_of(d, h, m.class, m.name)?;
+                    // invoke-interface 拿的是接口类，方法体在对象实际类（或其父类）里
+                    let c2 = if (u & 0xff) == 0x72 {
+                        let ci = obj_class_idx(args[0])?;
+                        code_iface(d, h, m.class, m.name, m.proto, ci)?
+                    } else {
+                        code_of(d, h, m.class, m.name)?
+                    };
                     match exec(d, h, c2, &args[..argc], depth + 1, steps) {
                         Ok(v) => last = v,
                         Err(e) if e == THROW_SENTINEL => {

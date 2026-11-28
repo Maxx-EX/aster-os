@@ -66,11 +66,15 @@ STRINGS = [
     "Child",
     "Hello from Aster, this string lives in a real DEX",
     "I",
+    "II",
     "IIL",
     "IL",
     "L",
     "LI",
     "LL",
+    "LSh;",
+    "LSq;",
+    "LTg;",
     "Lcom/aster/App;",
     "Lcom/aster/Base;",
     "Lcom/aster/Boom;",
@@ -92,6 +96,7 @@ STRINGS = [
     "[I",
     "apk8 ok",
     "append",
+    "area",
     "arg",
     "array ok",
     "big",
@@ -127,6 +132,7 @@ STRINGS = [
     "onDestroy",
     "onDestroy ok",
     "onTouch",
+    "poly",
     "px",
     "py",
     "run",
@@ -176,6 +182,9 @@ S_IIL, S_IL = IDX["IIL"], IDX["IL"]
 S_LEN, S_CHARAT = IDX["length"], IDX["charAt"]
 S_EQUALS, S_CONCAT = IDX["equals"], IDX["concat"]
 S_SUBSTR, S_INDEXOF, S_VALUEOF = IDX["substring"], IDX["indexOf"], IDX["valueOf"]
+S_SH, S_TG, S_SQ = IDX["LSh;"], IDX["LTg;"], IDX["LSq;"]
+S_II, S_POLY = IDX["II"], IDX["poly"]
+S_AREA = IDX["area"]
 S_APP, S_ARG = IDX["Lcom/aster/App;"], IDX["arg"]
 S_HELLO_M, S_I_M, S_LOOPDONE = IDX["hello"], IDX["i"], IDX["loop done"]
 S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"], IDX["run"], IDX["v"]
@@ -183,6 +192,7 @@ S_N_M, S_NEXT, S_OBJOK, S_RUN_M, S_V_F = IDX["n"], IDX["next"], IDX["objects ok"
 T_STRING, T_MAIN, T_V, T_LOG, T_INT, T_COUNTER, T_ARR, T_SB = 0, 1, 2, 3, 4, 5, 6, 7
 T_BASE, T_CHILD, T_RTE, T_BOOM, T_CV = 8, 9, 10, 11, 12
 T_APP = 13
+T_SH, T_TG, T_SQ = 14, 15, 16
 # proto：0=(String)V 1=()V 2=(I)V 3=()I 4=(String)SB 5=(I)SB 6=()SB
 P_STR, P_VOID, P_INT_V, P_INT_I = 0, 1, 2, 3
 P_APP_STR, P_APP_INT, P_SB_VOID = 4, 5, 6
@@ -204,8 +214,12 @@ M_BIG = 30
 M_S_LEN, M_S_CHAR, M_S_EQ = 31, 32, 33
 M_S_CONC, M_S_SUB, M_S_IDX, M_S_VAL = 34, 35, 36, 37
 M_STR = 38
+M_SH_A0, M_SH_A1, M_TG_A0 = 39, 40, 41
+M_SQ_INIT, M_SQ_A0, M_SQ_A1 = 42, 43, 44
+M_POLY = 45
 P_III = 9
 P_SUB2, P_CONC, P_VAL = 10, 11, 12
+P_I_I = 13
 
 
 def build():
@@ -222,7 +236,8 @@ def build():
 
     type_ids_off = len(buf)
     for t in (S_STRING, S_MAIN, S_V, S_LOG, S_I_T, S_COUNTER, S_ARR, S_SB,
-              S_BASE, S_BOOM, S_CHILD, S_RTE, S_CV, S_APP):
+              S_BASE, S_CHILD, S_RTE, S_BOOM, S_CV, S_APP,
+              S_SH, S_TG, S_SQ):
         buf += struct.pack("<I", t)
 
     proto_ids_off = len(buf)
@@ -239,6 +254,7 @@ def build():
     buf += struct.pack("<III", S_IIL, T_STRING, 0)  # 10: (II)String
     buf += struct.pack("<III", S_LL, T_STRING, 0)   # 11: (String)String
     buf += struct.pack("<III", S_IL, T_STRING, 0)   # 12: (I)String
+    buf += struct.pack("<III", S_II, T_INT, 0)      # 13: (I)I
 
     field_ids_off = len(buf)
     buf += struct.pack("<HHI", T_COUNTER, T_INT, S_V_F)   # 0 Counter.v
@@ -289,6 +305,13 @@ def build():
     buf += struct.pack("<HHI", T_STRING, P_INT_I, S_INDEXOF)    # 36 String.indexOf(I)I
     buf += struct.pack("<HHI", T_STRING, P_VAL, S_VALUEOF)      # 37 String.valueOf(I)String
     buf += struct.pack("<HHI", T_MAIN, P_VOID, S_STRM2)        # 38 Main.str()V
+    buf += struct.pack("<HHI", T_SH, P_INT_I, S_AREA)          # 39 Sh.area()I
+    buf += struct.pack("<HHI", T_SH, P_I_I, S_AREA)            # 40 Sh.area(I)I
+    buf += struct.pack("<HHI", T_TG, P_INT_I, S_AREA)          # 41 Tg.area()I
+    buf += struct.pack("<HHI", T_SQ, P_VOID, S_INIT)           # 42 Sq.<init>()V
+    buf += struct.pack("<HHI", T_SQ, P_INT_I, S_AREA)          # 43 Sq.area()I
+    buf += struct.pack("<HHI", T_SQ, P_I_I, S_AREA)            # 44 Sq.area(I)I
+    buf += struct.pack("<HHI", T_MAIN, P_VOID, S_POLY)         # 45 Main.poly()V
 
     class_defs_off = len(buf)
     main_def_pos = len(buf)
@@ -304,6 +327,12 @@ def build():
     boom_def_pos = len(buf)
     buf += b"\0" * 32
     cv_def_pos = len(buf)
+    buf += b"\0" * 32
+    sh_def_pos = len(buf)
+    buf += b"\0" * 32
+    tg_def_pos = len(buf)
+    buf += b"\0" * 32
+    sq_def_pos = len(buf)
     buf += b"\0" * 32
 
     data_off = len(buf)
@@ -731,6 +760,40 @@ def build():
     buf += struct.pack("<HHHHII", 6, 0, 0, 0, 0, len(ins))
     buf += b"".join(struct.pack("<H", i) for i in ins)
 
+    # APK-16：接口 + 实现类
+    code_sq_init = len(buf)
+    buf += struct.pack("<HHHHII", 1, 1, 0, 0, 0, 1)
+    buf += struct.pack("<H", 0x000e)
+
+    code_sq_a0 = len(buf)   # Sq.area()I -> 4（实例方法：ins 含 this）
+    buf += struct.pack("<HHHHII", 1, 1, 0, 0, 0, 2)
+    buf += struct.pack("<HH", 0x4012, 0x000f)
+
+    code_sq_a1 = len(buf)   # Sq.area(I)I -> v1*v1（this + 参数）
+    buf += struct.pack("<HHHHII", 2, 2, 0, 0, 0, 3)
+    buf += struct.pack("<HHH", 0x0092, 0x0101, 0x000f)
+
+    # Main.poly()V —— invoke-interface：同一对象经两个接口、两种签名分派
+    code_poly = len(buf)
+    ins = [
+        0x0022, T_SQ,              # 0  new-instance v0, Sq
+        0x1070, M_SQ_INIT, 0x0000, # 2  invoke-direct {v0}, Sq.<init>()
+        0x1072, M_SH_A0, 0x0000,   # 5  invoke-interface {v0}, Sh.area()I
+        0x010a,                    # 8  move-result v1
+        0x1071, M_N, 0x0001,       # 9  Log.n(v1) -> 4
+        0x0213, 0x0003,            # 12 const/16 v2, #3
+        0x2072, M_SH_A1, 0x0020,   # 14 invoke-interface {v0,v2}, Sh.area(I)I
+        0x010a,                    # 17 move-result v1
+        0x1071, M_N, 0x0001,       # 18 Log.n(v1) -> 9
+        0x1072, M_TG_A0, 0x0000,   # 21 invoke-interface {v0}, Tg.area()I
+        0x010a,                    # 24 move-result v1
+        0x1071, M_N, 0x0001,       # 25 Log.n(v1) -> 4
+        0x000e,                    # 28 return-void
+    ]
+    assert len(ins) == 29, len(ins)
+    buf += struct.pack("<HHHHII", 3, 0, 0, 0, 0, len(ins))
+    buf += b"".join(struct.pack("<H", i) for i in ins)
+
     # Main 的 static_values：cvh=0, hits=1, px=140, py=80
     sv_main = len(buf)
     buf += uleb(5) + b"\x04\x00" + b"\x04\x01" + b"\x24\x8c\x00" + b"\x04\x50" + b"\x04\x00"
@@ -745,7 +808,7 @@ def build():
 
     # Main 的 class_data：4 个静态字段 + 3 个 direct（APK-11 加了 cvh/px/py 和 frame）
     cd_main = len(buf)
-    buf += uleb(5) + uleb(0) + uleb(8) + uleb(0)
+    buf += uleb(5) + uleb(0) + uleb(9) + uleb(0)
     buf += uleb(F_CVH - 0) + uleb(0x0008)        # cvh：static int
     buf += uleb(F_HITS - F_CVH) + uleb(0x0008)   # hits
     buf += uleb(F_PX - F_HITS) + uleb(0x0008)    # px
@@ -759,6 +822,16 @@ def build():
     buf += uleb(M_ONDESTROY - M_ONTOUCH) + uleb(0x0009) + uleb(code_onDestroy)
     buf += uleb(M_BIG - M_ONDESTROY) + uleb(0x0009) + uleb(code_big)
     buf += uleb(M_STR - M_BIG) + uleb(0x0009) + uleb(code_str)
+    buf += uleb(M_POLY - M_STR) + uleb(0x0009) + uleb(code_poly)
+
+    tl_sq = len(buf)
+    buf += struct.pack("<IHH", 2, T_SH, T_TG)
+
+    cd_sq = len(buf)
+    buf += uleb(0) + uleb(0) + uleb(1) + uleb(2)
+    buf += uleb(M_SQ_INIT - 0) + uleb(0x10001) + uleb(code_sq_init)
+    buf += uleb(M_SQ_A0 - 0) + uleb(0x0001) + uleb(code_sq_a0)
+    buf += uleb(M_SQ_A1 - M_SQ_A0) + uleb(0x0001) + uleb(code_sq_a1)
 
     # Base 的 class_data：1 实例字段 + 1 direct + 1 virtual
     cd_base = len(buf)
@@ -794,17 +867,23 @@ def build():
                      T_BOOM, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, cd_boom, 0)
     struct.pack_into("<IIIIIIII", buf, cv_def_pos,
                      T_CV, 0x0001, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0)
+    struct.pack_into("<IIIIIIII", buf, sh_def_pos,
+                     T_SH, 0x0601, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0)
+    struct.pack_into("<IIIIIIII", buf, tg_def_pos,
+                     T_TG, 0x0601, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0)
+    struct.pack_into("<IIIIIIII", buf, sq_def_pos,
+                     T_SQ, 0x0001, 0xFFFFFFFF, tl_sq, 0xFFFFFFFF, 0, cd_sq, 0)
 
     data_size = len(buf) - data_off
 
     items = [
         (0x0000, 1, 0),
         (0x0001, len(STRINGS), string_ids_off),
-        (0x0002, 14, type_ids_off),
-        (0x0003, 10, proto_ids_off),
+        (0x0002, 17, type_ids_off),
+        (0x0003, 14, proto_ids_off),
         (0x0004, 7, field_ids_off),
-        (0x0005, 39, method_ids_off),
-        (0x0006, 7, class_defs_off),
+        (0x0005, 46, method_ids_off),
+        (0x0006, 10, class_defs_off),
         (0x1000, 1, map_off),
         (0x1001, 2, tl_str),
         (0x2000, 5, cd_counter),
@@ -820,11 +899,11 @@ def build():
     return buf, dict(
         file_size=len(buf), map_off=map_off,
         string_ids=(len(STRINGS), string_ids_off),
-        type_ids=(14, type_ids_off),
-        proto_ids=(10, proto_ids_off),
+        type_ids=(17, type_ids_off),
+        proto_ids=(14, proto_ids_off),
         field_ids=(7, field_ids_off),
-        method_ids=(39, method_ids_off),
-        class_defs=(7, class_defs_off),
+        method_ids=(46, method_ids_off),
+        class_defs=(10, class_defs_off),
         data=(data_size, data_off),
         code_init=code_init, code_next=code_next,
         code_run=code_run, code_hello=code_hello,
@@ -833,6 +912,8 @@ def build():
         code_frame=code_frame, code_onCreate=code_onCreate,
         code_onTouch=code_onTouch, code_onDestroy=code_onDestroy,
         code_big=code_big, code_str=code_str,
+        code_poly=code_poly, code_sq_init=code_sq_init,
+        code_sq_a0=code_sq_a0, code_sq_a1=code_sq_a1,
     )
 
 
@@ -867,7 +948,8 @@ def main():
     assert buf[12:32] == hashlib.sha1(bytes(buf[32:])).digest()
     for name in ("code_init", "code_next", "code_run", "code_hello",
                  "code_base_init", "code_base_get", "code_child_init", "code_boom_init",
-                 "code_frame", "code_onCreate", "code_onTouch", "code_onDestroy", "code_big", "code_str"):
+                 "code_frame", "code_onCreate", "code_onTouch", "code_onDestroy", "code_big", "code_str", "code_poly", "code_sq_init",
+                 "code_sq_a0", "code_sq_a1"):
         off = info[name]
         regs, ins_n, outs, tries, dbg, n = struct.unpack_from("<HHHHII", buf, off)
         insns = [struct.unpack_from("<H", buf, off + 16 + 2 * i)[0] for i in range(n)]

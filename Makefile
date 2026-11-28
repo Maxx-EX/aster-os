@@ -216,7 +216,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\nxce\nxce run\nupdate check\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
+	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -232,6 +232,7 @@ test: image
 	@grep -q "canvas ok" $(B)/test.log && echo "[TEST] PASS APK 画布：Canvas clear/setColor/drawRect/drawText 落到 framebuffer" || (echo "[TEST] FAIL canvas" && exit 1)
 	@grep -q "no touch" $(B)/test.log && echo "[TEST] PASS APK 画布触摸：touchX/touchY 无事件返回 -1" || (echo "[TEST] FAIL canvas touch" && exit 1)
 	@grep -q "\[DEX\] 2096128" $(B)/test.log && echo "[TEST] PASS 数组页帧：64 元素数组写入再读回求和 = 2016（越过旧的 32 元素上限）" || (echo "[TEST] FAIL array-pages" && exit 1)
+	@grep -q "\[DEX\] 9" $(B)/test.log && echo "[TEST] PASS 接口分派：同名不同签名按 proto 精确命中实现类" || (echo "[TEST] FAIL invoke-interface" && exit 1)
 	@grep -q "\[DEX\] Aster OS" $(B)/test.log && grep -q "\[DEX\] 42" $(B)/test.log && echo "[TEST] PASS String 方法族：length/charAt/equals/concat/substring/indexOf/valueOf" || (echo "[TEST] FAIL String methods" && exit 1)
 	@grep -q "\[DEX\] 69" $(B)/test.log && echo "[TEST] PASS 对象堆跨页：onCreate 分配 70 个对象，最后一个字段读回 69" || (echo "[TEST] FAIL heap-grow" && exit 1)
 	@grep -q "onCreate ok" $(B)/test.log && grep -q "onDestroy ok" $(B)/test.log && echo "[TEST] PASS Activity 生命周期：onCreate 只跑一次 / onDestroy 在停止时调用" || (echo "[TEST] FAIL lifecycle" && exit 1)
