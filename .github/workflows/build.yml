@@ -25,6 +25,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu qemu-system-arm ipxe-qemu
 
+      - name: 生成密钥 + EX3 + 更新包
+        run: |
+          test -f boot/keys/boot.key || python3 tools/aster-sign.py keygen
+          python3 tools/aster-sign.py --build-id "aster-qemu" gen-ex3
+          python3 tools/mkaup.py assets/upd/update.aup 0x000a "Aster 0.9 kernel, staged via AsterFS" --from-ex3
+
       - name: 编内核 + 引导器
         run: make image
 
