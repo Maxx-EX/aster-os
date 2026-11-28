@@ -39,6 +39,8 @@ pub static XCE_DEMO: &[u8] = include_bytes!("../../assets/xce/demo.xce");
 pub static UPD_DEMO: &[u8] = include_bytes!("../../assets/upd/update.aup");
 mod net;
 mod pkgidx;
+mod html;
+mod web;
 mod rtc;
 mod sched;
 mod shell;

@@ -218,7 +218,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\npkg list\npkg info git\ntz\nwifi\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
+	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\npkg list\npkg info git\ntz\nwifi\nweb\nweb scroll down\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -269,6 +269,10 @@ test: image
 	    echo "[TEST] PASS 无线网现状说明（不假装有驱动）" || (echo "[TEST] FAIL wifi" && exit 1)
 	@grep -q "页帧池 778 / 32768 页已用" $(B)/test.log && \
 	    echo "[TEST] PASS 页帧分配器" || (echo "[TEST] FAIL 页帧计数不对" && exit 1)
+	@grep -q "已打开内置起始页" $(B)/test.log && grep -q "行数: 28" $(B)/test.log && \
+	    echo "[TEST] PASS 内置浏览器首页（28 行）" || (echo "[TEST] FAIL web 首页" && exit 1)
+	@grep -q "当前位置 80" $(B)/test.log && \
+	    echo "[TEST] PASS 浏览器滚动" || (echo "[TEST] FAIL web 滚动" && exit 1)
 
 	# sched_yield：两个任务各 8 行，必须严格交替
 	@(sleep 9; printf 'yield\n'; sleep 3; printf 'halt\n') | timeout 50 \

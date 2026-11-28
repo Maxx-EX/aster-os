@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Aster · 星芒 起始页</title>
+<style> body{margin:0} </style>
+</head>
+<body>
+<h1>Aster 星芒</h1>
+<p>这是一个自己写的浏览器，跑在一个自己写的内核上。<a href="http://10.0.2.2:8000/home.html">点这里走网络重新加载本页</a></p>
+<hr>
+<h2>这台机器</h2>
+<ul>
+<li>架构 ARM64，QEMU virt 或树莓派</li>
+<li>内核 Rust + C，无任何现成内核代码</li>
+<li>引导器两级：AVP 三级校验 + EX3 指纹</li>
+<li>图形：virtio-gpu 2D，双缓冲整帧上屏</li>
+</ul>
+<hr>
+<h2>这个浏览器能做什么</h2>
+<p>自己写的 HTML 分词器与块级排版：标题、段落、列表、分隔线、链接、代码。</p>
+<p>没有 JavaScript，没有 CSS 层叠，没有图片解码 —— 它只保证一件事：
+文字能排整齐、能滚动、链接能点。</p>
+<hr>
+<h2>试试这些</h2>
+<ul>
+<li>命令 web 打开本页</li>
+<li>命令 web 10.0.2.2:8088/ 拉 QEMU 宿主的页面</li>
+<li>命令 http get 10.0.2.2 8088 / 保存成文件</li>
+</ul>
+<p>要返回起始页，输入 web home 即可。</p>
+</body>
+</html>

@@ -14,6 +14,10 @@ static mut DRAG: usize = usize::MAX;
 static mut LASTM: (i32, i32) = (-1, -1);
 static mut APP_MS: u64 = 0;
 static mut OFF_X: i32 = 0;
+// 浏览器内容区拖动滚动：按下点位置 + 当时的滚动偏移
+static mut WSC: usize = usize::MAX;
+static mut WSC_Y0: i32 = 0;
+static mut WSC_S0: i32 = 0;
 static mut OFF_Y: i32 = 0;
 
 pub fn tick() {
@@ -143,6 +147,26 @@ fn handle_mouse() -> bool {
                     crate::kb::set_open(true);
                     want = true;
                 }
+                // 浏览器内容区：点在带 href 的行上就跟着跳
+                if i == 3 && y > w0.y + 42 {
+                    // 内容起点 = 窗口顶 + 标题栏 44；link_at 内部再减 38 的地址栏
+                    if let Some(href) = crate::web::link_at(
+                        x as u32,
+                        y as u32,
+                        (w0.y + 44) as u32,
+                        (w0.y + w0.h as i32) as u32,
+                    ) {
+                        crate::web::open_addr(href);
+                        want = true;
+                        continue;
+                    }
+                    // 没点在链接上 → 这一按交给内容区拖动滚动
+                    unsafe {
+                        WSC = 3;
+                        WSC_Y0 = y;
+                        WSC_S0 = crate::web::scroll_pos();
+                    }
+                }
                 // 标题栏三个圆点：红关、黄收起、绿最大化/还原
                 if let Some(b) = fb::title_button_at(i, x, y) {
                     let w = fb::win(i);
@@ -193,7 +217,7 @@ fn handle_mouse() -> bool {
                     0 => 0,
                     1 => 1,
                     2 => 2,
-                    _ => 1,
+                    _ => 3,
                 };
                 // 点自己已经聚焦的图标 = 收起来；否则打开
                 if fb::win_state(which) == 1 && fb::focus() == which {
@@ -206,6 +230,8 @@ fn handle_mouse() -> bool {
                 continue;
             }
         } else {
+            // 松手：结束浏览器内容区拖动
+            unsafe { WSC = usize::MAX };
             // 松手：拖拽期间省了阴影，这里补一次完整的
             if unsafe { DRAG } != usize::MAX {
                 let i = unsafe { DRAG };
@@ -240,6 +266,14 @@ fn handle_mouse() -> bool {
         }
     }
 
+    // 浏览器内容区拖动：手指上移 → 内容跟手上滚（1:1.6 提速）
+    if unsafe { WSC } != usize::MAX {
+        let d = unsafe { WSC_Y0 } - my;
+        if d != 0 {
+            crate::web::scroll_to(unsafe { WSC_S0 } + d * 16 / 10);
+            want = true;
+        }
+    }
     if unsafe { DRAG } != usize::MAX {
         let i = unsafe { DRAG };
         let w = fb::win(i);

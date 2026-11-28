@@ -2518,3 +2518,49 @@ if take_wall() || minute_changed { restore_wall_gaps(); }
 - 包：80 个索引项全部是 144 字节占位包体，能查、能装、能落盘；装进去的不是可执行程序。
 - 网络：有线通（HTTP 200 实测），IP 写死 10.0.2.15；无线没硬件路径；DHCP/DNS 是 NET-4。
 - 性能：单窗口已经"零成本"，三窗口 18 ms；`make test` 36 项断言。
+
+---
+
+## 59. 内置浏览器（P6-5）：把别人的 HTML 排成自己屏幕上的行
+
+浏览器窗口是第四个窗口，`ZORD` 最上层。它不做完整引擎——不做 CSS 层叠、不做表格布局、不解码图片、不跑 JS。它只保证一件事：**把真实 HTML 排成能读的字**，整齐、能滚、链接能点。
+
+### 59.1 分词器（`kernel/src/html.rs`）
+
+状态机逐字节扫 `src`，不建 DOM，直接把结果压成定长行：
+
+- 上限 `MAX_LINES=320`、`CELLS=96`、`MAXW=76`（**半角单位**：ASCII 记 1，汉字记 2，折行按此累加）
+- `Line { cells:[u16;96], len, kind, indent, href:[u8;72] }`，`kind` 决定行级样式：0 正文 / 1 h1 / 2 h2 / 3 h3 / 4 链接 / 5 代码 / 6 引用 / 7 分隔线 / 8 空行 / 9 图片占位
+- 认的标签：`p div h1 h2 h3 li ul ol br hr pre code a img title meta`；`script style` 整段跳过，注释跳过
+- `CUR_CLOSED` 决定"要不要开新行"：块级开始先 `flush()` 收行，字符进来时若行已关就 `push_line()` 开新行——**行在开的那一刻把当前 href 拷进去**，这是行级链接能被点击的关键
+- `<a>` 到达时先 `flush()` 再设 `CUR_KIND=4`，让链接独立成行，行级样式才落得上
+- 实体：`&amp; &lt; &gt; &quot; &nbsp;`；相对 href 拼 `base` 的 `scheme://host`
+
+### 59.2 行 → 像素（`kernel/src/web.rs`）
+
+`row_h(kind)`：h1 34 / h2 26 / 分隔线 18 / 空行 10 / 其余 21。`relayout()` 把高度累加成 `TOPS[]`，`TOTAL` 就是整页高，`max_scroll = TOTAL - VIEW_H`。
+
+绘制：内容区顶上是 38 px 地址栏（"地址 " + URL + 状态点 + 右对齐页面标题）；地址栏底下按 `TOPS[i] - SCROLL` 逐行画，滚出视口的行直接跳过。h1 用 `scale=2` 加强调下划线，h2 强调色加 18 px 装饰线，链接强调色加下划线，代码绿，`img` 显示 `[img]` 占位。右侧画滚动条：轨道 + 按 `scroll/max` 换算的滑块。
+
+### 59.3 取页
+
+- `open_home()` 解析编译期 `include_bytes!("../../assets/web/home.html")`，地址栏 `aster://home`，断网也能开
+- `open_addr("ip:port/path")`：没有 DNS，只认 IP + 端口 → `net::http_get` → 跳过 `\r\n\r\n` 取 body → 重新分词排版；失败（未就绪/ARP 失败/连不上/超 16 KiB）走 `err_page()`，把原因写在页面上，不空屏
+- 域名会直接报错并把原因指到 NET-4（DHCP+DNS 还没做）
+
+### 59.4 命中与滚动
+
+- `link_at(x,y,内容起点,窗口底)` 反查：`ry = y - (内容起点+38) + SCROLL` → 在 `TOPS` 里二分线性找行 → 行 href 非空返回静态串，`ui` 侧直接 `open_addr`
+- 内容区按住拖动：`WSC/WSC_Y0/WSC_S0` 记按下点与当时的 `scroll`，手指位移 ×1.6 换成滚动量（`scroll_to` 会 clamp），松手结束。点链接优先于拖动
+- 命令侧：`web` / `web home` / `web <ip:port/path>` / `web scroll up|down|top|<数字>`
+
+### 59.5 实测
+
+- `web`：内置首页 28 行，h1/h2/分隔线/圆点列表/段落折行/地址栏/状态点/滚动条全部正常
+- 点首页里的链接：地址栏从 `aster://home` 变成 `http://10.0.2.2:8000/home.html`，从宿主 `python -m http.server` 真拉一次再排版
+- `sim drag 500 420 500 260`：内容上滚 256 px，滚动条同步下移
+- `make test` 增加两条断言（首页行数、滚动位置）
+
+### 59.6 诚实边界
+
+没有 CSS 层叠、没有表格布局、没有图片解码（只画 `[img]` + alt）、没有 JS、没有表单输入、没有 TLS（所以只能 `http://`）、只认 IP+端口（域名等 NET-4）、单页无历史栈（点链接不产生"后退"）、`MAX_LINES=320` 行封顶、80 列宽按窗宽固定（不随窗口拉伸重排）。

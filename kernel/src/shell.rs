@@ -620,6 +620,7 @@ fn cmd_help() {
     println!("  gfx       重绘图形界面（ramfb / VNC 远程可见）");
     println!("  net       网络状态（virtio-net / IP / 收发计数）");
     println!("  wifi      无线网现状（无 802.11 硬件，WIFI-1 未开工）");
+    println!("  web       内置浏览器：web / web home / web <ip:port/path> / web scroll up|down|top");
     println!("  date      当前时间（固定 Asia/Shanghai）");
     println!("  tz        时区详情（UTC+8 / 无夏令时）");
     println!("  pkg       包管理：list [分类] | search <词> | info <名> | install <名> | remove <名>");
@@ -852,6 +853,34 @@ pub fn run() -> ! {
             l if l == "http" || l.starts_with("http ") => {
                 cmd_http(l.strip_prefix("http").unwrap_or("").trim())
             }
+            l if l == "web" || l.starts_with("web ") => {
+                let a = l[3..].trim();
+                crate::fb::show_win(3);
+                if a.is_empty() || a == "home" {
+                    crate::web::open_home();
+                    println!("  已打开内置起始页（窗口「浏览器」）");
+                    println!("  地址栏: {}   行数: {}", crate::web::url_str(), crate::html::count());
+                } else if let Some(rest) = a.strip_prefix("scroll ") {
+                    let d = match rest.trim() {
+                        "up" => -80,
+                        "down" => 80,
+                        "top" => {
+                            crate::web::scroll_reset();
+                            0
+                        }
+                        other => other.parse::<i32>().unwrap_or(80),
+                    };
+                    crate::web::scroll_by(d);
+                    println!("  滚动 {}  当前位置 {} / {}", d, crate::web::scroll_pos(), crate::web::max_scroll());
+                } else {
+                    println!("  拉取 {} …", a);
+                    if crate::web::open_addr(a) {
+                        println!("  成功  行数 {}", crate::html::count());
+                    } else {
+                        println!("  失败，页面里写了原因（窗口「浏览器」）");
+                    }
+                }
+            },
             "wifi" => {
                 println!("  无线      : 硬件层没有 802.11 适配器，WIFI-1 未开工");
                 println!("  QEMU virt : 没有 SDIO / PCIe 无线网卡可枚举");

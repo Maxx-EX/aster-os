@@ -958,7 +958,7 @@ const SIDE_Y0: u32 = 92;
 const SIDE_STEP: u32 = 88;
 const TILE: u32 = 46;
 
-const SIDE_LABELS: [&str; 4] = ["终端", "系统", "网络", "关于"];
+const SIDE_LABELS: [&str; 4] = ["终端", "系统", "网络", "浏览"];
 
 fn lerp(a: u32, b: u32, t: u32, span: u32) -> u32 {
     let inv = span.saturating_sub(t);
@@ -1193,9 +1193,9 @@ pub fn cache_wall(ex3_short: &str) {
     draw_text_ui(W - text_len_ui(ex3_short) - 16, 11, ex3_short, OK);
 
     // 底栏 dock：半透明圆角条，只画底板，内容留给动态层
-    rounded_rect_alpha(16, DOCK_Y as i32, 360, DOCK_H, 14, 0x0c0e12, 238);
-    rounded_rect_alpha(16, DOCK_Y as i32, 360, DOCK_H, 14, 0xffffff, 16);
-    fill_rect(26, DOCK_Y + 1, 340, 1, 0x3d424a);
+    rounded_rect_alpha(16, DOCK_Y as i32, 404, DOCK_H, 14, 0x0c0e12, 238);
+    rounded_rect_alpha(16, DOCK_Y as i32, 404, DOCK_H, 14, 0xffffff, 16);
+    fill_rect(26, DOCK_Y + 1, 384, 1, 0x3d424a);
 
     // 开始按钮
     circle(40, (DOCK_Y + 23) as i32, 11, ACCENT, 58);
@@ -1254,7 +1254,7 @@ static mut LAST_KB: u64 = 0;
 // 三个窗口：0 终端、1 系统、2 网络。ZORD[0] 在最底，ZORD[NSLOT-1] 在最上，
 // 点击任意窗口就把它抬到最上层并聚焦；重画一律按 ZORD 顺序来一遍。
 
-pub const NWIN: usize = 3;
+pub const NWIN: usize = 4;
 
 #[derive(Clone, Copy)]
 pub struct Win {
@@ -1269,11 +1269,13 @@ static mut WINS: [Win; NWIN] = [
     Win { x: 138, y: 86, w: 748, h: 546, open: true },
     Win { x: 636, y: 108, w: 350, h: 304, open: true },
     Win { x: 604, y: 428, w: 372, h: 224, open: true },
+    // 浏览器：内置，但先收在 dock，点一下"网页"格子就出来
+    Win { x: 286, y: 74, w: 676, h: 468, open: true },
 ];
 
 // 终端放最上层：手机端最常点的就是它，原来 [0,1,2] 会让系统/网络两块压住终端右上角，
 // 点"关窗"实际点到别的窗口上（这就是"关不掉、点不动"的根因）
-static mut ZORD: [usize; NWIN] = [1, 2, 0];
+static mut ZORD: [usize; NWIN] = [1, 2, 0, 3];
 static mut FOCUS: usize = 0;
 
 pub fn win(i: usize) -> Win {
@@ -1285,7 +1287,12 @@ pub fn focus() -> usize {
 }
 
 pub fn win_title(i: usize) -> &'static str {
-    ["终端", "系统", "网络"][i.min(2)]
+    match i {
+        0 => "终端",
+        1 => "系统",
+        2 => "网络",
+        _ => "浏览器",
+    }
 }
 
 pub fn set_win_pos_of(i: usize, x: i32, y: i32) {
@@ -1323,7 +1330,8 @@ static mut SAVED: [(i32, i32, u32, u32); NWIN] = [(0, 0, 0, 0); NWIN];
 static mut MAXED: [bool; NWIN] = [false; NWIN];
 /// 最小化：窗口从桌面消失，但还"活着"——dock 上占一个格子，点一下回来。
 /// 和关闭的区别就在这里：关闭 = 状态清空，要重新打开得点侧栏图标。
-static mut MINED: [bool; NWIN] = [false; NWIN];
+/// 开局就把浏览器收进 dock（其余三窗展开），dock 上点"网页"格子即可打开
+static mut MINED: [bool; NWIN] = [false, false, false, true];
 
 /// 0 = 已关闭 / 1 = 在桌面 / 2 = 最小化进 dock
 pub fn win_state(i: usize) -> u8 {
@@ -1340,14 +1348,14 @@ pub fn win_state(i: usize) -> u8 {
 
 /// dock 上的三个格子：终端 / 系统 / 网络
 const DOCK_CHIP_X: u32 = 116;
-const DOCK_CHIP_W: u32 = 72;
+const DOCK_CHIP_W: u32 = 64;
 const DOCK_CHIP_GAP: u32 = 4;
 
 pub fn dock_hit(x: i32, y: i32) -> Option<usize> {
     if y < DOCK_Y as i32 - 4 || y > (DOCK_Y + DOCK_H) as i32 + 4 {
         return None;
     }
-    for i in 0..3 {
+    for i in 0..4 {
         let x0 = DOCK_CHIP_X + i as u32 * (DOCK_CHIP_W + DOCK_CHIP_GAP);
         if x >= x0 as i32 && x <= (x0 + DOCK_CHIP_W) as i32 {
             return Some(i);
@@ -1357,7 +1365,7 @@ pub fn dock_hit(x: i32, y: i32) -> Option<usize> {
 }
 
 fn draw_dock_items() {
-    for i in 0..3 {
+    for i in 0..4 {
         let st = win_state(i);
         if st == 0 {
             continue;
@@ -1376,7 +1384,7 @@ fn draw_dock_items() {
             rounded_rect(x0 as i32, y0 as i32, DOCK_CHIP_W, h, 8, 0x2a2f37);
             frame_rect(x0, y0, DOCK_CHIP_W, h, 0x3a3f47);
         }
-        let t = ["终端", "系统", "网络"][i];
+        let t = ["终端", "系统", "网络", "网页"][i];
         let tw = text_len_ui(t);
         let fg = if st == 2 { DIM } else if focused { TEXT } else { TEXT2 };
         draw_text_ui(x0 + (DOCK_CHIP_W - tw) / 2, y0 + (h - 16) / 2, t, fg);
@@ -1729,7 +1737,12 @@ fn draw_title(i: usize, w: Win, active: bool, title: &str) {
     }
 
     let mut hx = draw_text_ui((w.x + 18) as u32, (w.y + 14) as u32, title, if active { TEXT } else { TEXT2 }) + 8;
-    let sub = ["TERMINAL", "SYSTEM", "NETWORK"][i.min(2)];
+    let sub = match i {
+        0 => "TERMINAL",
+        1 => "SYSTEM",
+        2 => "NETWORK",
+        _ => "BROWSER",
+    };
     hx = draw_text_ui(hx, (w.y + 15) as u32, sub, DIM);
     let _ = hx;
 
@@ -1748,6 +1761,12 @@ fn draw_body(i: usize, w: Win) {
         }
         1 => draw_sys_body(w),
         2 => draw_net_body(w),
+        3 => crate::web::draw(
+            (w.x + 12) as u32,
+            (w.y + TITLE_H as i32) as u32,
+            w.w - 24,
+            w.h - TITLE_H - 10,
+        ),
         _ => {}
     }
 }
