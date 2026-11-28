@@ -946,7 +946,7 @@ const TOPBAR: u32 = 0x181a1e;
 const WIN_BG: u32 = 0x212328;
 const WIN_BAR: u32 = 0x2f343c;
 const WIN_LINE: u32 = 0x3a3f47;
-const TERM_BG: u32 = 0x141619;
+pub const TERM_BG: u32 = 0x141619;
 
 const WIN_W: u32 = 748;
 const WIN_H: u32 = 546;
@@ -1297,6 +1297,7 @@ pub fn set_win_pos_of(i: usize, x: i32, y: i32) {
 
 /// 抬到最上层并聚焦；关着的窗口顺手打开
 pub fn raise(i: usize) {
+    win_touch_all();
     ask_shadow();
     unsafe {
         if i >= NWIN {
@@ -1411,6 +1412,7 @@ pub fn title_button_at(i: usize, x: i32, y: i32) -> Option<Btn> {
 
 /// 关掉一扇窗：焦点落到还在的最上层窗口
 pub fn close_win(i: usize) {
+    win_touch_all();
     ask_shadow();
     unsafe {
         WINS[i].open = false;
@@ -1432,6 +1434,7 @@ pub fn close_win(i: usize) {
 
 /// 最小化等同收起：窗口留在 dock，点侧栏或 dock 再抬起来
 pub fn minimize_win(i: usize) {
+    win_touch_all();
     ask_shadow();
     unsafe {
         WINS[i].open = false;
@@ -1455,6 +1458,7 @@ pub fn minimize_win(i: usize) {
 
 /// 最大化/还原：记住原几何，铺到桌面可用区（让出顶栏与 dock）
 pub fn toggle_max(i: usize) {
+    win_touch_all();
     ask_shadow();
     unsafe {
         let w = WINS[i];
@@ -1508,6 +1512,7 @@ pub fn move_window(i: usize, nx: i32, ny: i32) {
 /// `shadow=false` 用于拖拽中的每一帧：阴影是 4 层大半径圆角混合，
 /// 一帧要盖掉几万个像素，拖动时省掉它手感立刻跟手。松手后再补一次完整的。
 pub fn move_window_ex(i: usize, nx: i32, ny: i32, shadow: bool) {
+    win_touch_all();
     ask_shadow();
     let w = win(i);
     if nx == w.x && ny == w.y {
@@ -1537,6 +1542,7 @@ pub fn dump_wins() -> [(&'static str, i32, i32, u32, u32, bool); 3] {
 
 /// 侧栏点击语义：该窗口没开就打开，已开就只抬到最上层（不切换关闭）
 pub fn show_win(i: usize) {
+    win_touch_all();
     ask_shadow();
     unsafe {
         WINS[i].open = true;
@@ -1580,13 +1586,72 @@ pub fn draw_all() {
     draw_all_ex(true);
 }
 
+/// 每个窗口是否需要"整窗重画"。只有几何、焦点、标题、z 序变了才置位；
+/// 否则第 0 窗口（终端）可以走行级增量，别把 748×546 每帧重涂一遍。
+static mut WIN_FULL: [bool; NWIN] = [true; NWIN];
+
+/// 壁纸层是否要重擦。窗口一动、键盘一开合、分钟跳一格才需要；
+/// 静止帧上壁纸像素本来就是对的，每帧搬 3 MiB 纯浪费（PERF-3）。
+static mut WALL_DIRTY: bool = true;
+static mut LAST_MIN: u64 = u64::MAX;
+
+pub fn ask_wall() {
+    unsafe {
+        WALL_DIRTY = true;
+    }
+}
+
+fn take_wall() -> bool {
+    unsafe {
+        let v = WALL_DIRTY;
+        WALL_DIRTY = false;
+        v
+    }
+}
+
+pub fn win_touch(i: usize) {
+    unsafe {
+        if i < NWIN {
+            WIN_FULL[i] = true;
+        }
+    }
+}
+
+pub fn win_touch_all() {
+    unsafe {
+        for i in 0..NWIN {
+            WIN_FULL[i] = true;
+        }
+    }
+    ask_shadow();
+    ask_wall();
+}
+
+fn take_full(i: usize) -> bool {
+    unsafe {
+        let v = WIN_FULL[i];
+        WIN_FULL[i] = false;
+        v
+    }
+}
+
 pub fn draw_all_ex(shadow: bool) {
     let t0 = crate::timer::now_ms();
     unsafe {
         for k in 0..NWIN {
             let i = ZORD[k];
-            if WINS[i].open {
+            if !WINS[i].open {
+                continue;
+            }
+            // 阴影要重画时整窗都得重来（投影形状变了）。
+            // 终端走行级增量有个硬前提：它是屏幕上唯一的窗口 —— 否则下层窗口
+            // 的整画会盖掉终端像素，而增量只补脏行补不回来（z 序就错了）。
+            let others_open = (1..NWIN).any(|j| WINS[j].open);
+            if shadow || take_full(i) || i != 0 || others_open {
                 draw_one_ex(i, shadow);
+            } else {
+                // 只有终端一个窗口时：只补脏行，标题栏与面板留上一帧的
+                term_patch();
             }
         }
         FRAME = FRAME.wrapping_add(1);
@@ -1820,12 +1885,107 @@ fn draw_num_ui(x: u32, y: u32, v: u64) -> u32 {
     draw_text_ui(x, y, t, TEXT2)
 }
 
+/// PERF-3：终端窗口增量刷新。只擦/只画变化的那几行，标题栏和圆角面板不重画。
+fn term_patch() {
+    let w = win(0);
+    if w.w == 0 || w.h == 0 {
+        return;
+    }
+    let x = (w.x + PAD_X as i32) as u32;
+    let y = (w.y + TITLE_H as i32 + 12) as u32;
+    match crate::term::take_rows() {
+        Some((r0, r1)) => {
+            crate::term::render_range(x, y, r0, r1, true);
+        }
+        None => {}
+    }
+    // 状态行的页帧/任务数会变，顺手补一下（一行而已，很便宜）
+    draw_term_status(w);
+    crate::cursor::invalidate();
+}
+
 fn term_guard(x: u32, y: u32, w: u32) {
     let ph = crate::term::ROWS as u32 * crate::term::LH + 16;
     rounded_rect(x as i32 - 6, y as i32 - 6, w + 8, ph + 8, 12, 0x191b1f);
     rounded_rect(x as i32 - 4, y as i32 - 4, w, ph, 10, TERM_BG);
     fill_rect(x - 2, y - 4, w - 6, 1, 0x24272c);
     crate::term::render(x, y);
+}
+
+/// 壁纸恢复只擦"没有窗口压着"的区段。
+///
+/// 原来每帧 `restore_wall(0,0,W,H)` 整屏搬 3 MiB，量出来 3–4 ms，其中大半
+/// 花在擦马上要被窗口盖住的像素上。顶栏和 dock 底板画在壁纸层里，必须照常
+/// 恢复；只有打开窗口的矩形可以跳过 —— 那里下一拍就会被窗口自己重画。
+/// 逐行求窗口并集，再搬空隙，段内仍然两像素一搬。
+fn restore_wall_gaps() {
+    if !available() {
+        return;
+    }
+    let fw = fb().w;
+    let fh = fb().h;
+    // 先把打开窗口的矩形抄一份，避免每行都进 unsafe 读全局
+    let mut rect: [(i32, i32, i32, i32); 4] = [(0, 0, 0, 0); 4];
+    let mut rn = 0usize;
+    unsafe {
+        for i in 0..NWIN {
+            if WINS[i].open && WINS[i].w > 0 && WINS[i].h > 0 {
+                rect[rn] = (
+                    WINS[i].x,
+                    WINS[i].y,
+                    WINS[i].x + WINS[i].w as i32,
+                    WINS[i].y + WINS[i].h as i32,
+                );
+                rn += 1;
+            }
+        }
+    }
+    if rn == 0 {
+        restore_wall(0, 0, fw, fh);
+        return;
+    }
+
+    for y in 0..fh {
+        let mut cov: [(u32, u32); 4] = [(0, 0); 4];
+        let mut cn = 0usize;
+        for k in 0..rn {
+            let (x0, y0, x1, y1) = rect[k];
+            if (y as i32) < y0 || (y as i32) >= y1 {
+                continue;
+            }
+            let a = x0.max(0).min(fw as i32) as u32;
+            let b = x1.max(0).min(fw as i32) as u32;
+            if b > a {
+                cov[cn] = (a, b);
+                cn += 1;
+            }
+        }
+        if cn == 0 {
+            restore_wall(0, y, fw, 1);
+            continue;
+        }
+        // 插入排序 + 合并（最多四段）
+        for i in 1..cn {
+            let mut j = i;
+            while j > 0 && cov[j].0 < cov[j - 1].0 {
+                cov.swap(j, j - 1);
+                j -= 1;
+            }
+        }
+        let mut x = 0u32;
+        for k in 0..cn {
+            let (a, b) = cov[k];
+            if a > x {
+                restore_wall(x, y, a - x, 1);
+            }
+            if b > x {
+                x = b;
+            }
+        }
+        if x < fw {
+            restore_wall(x, y, fw - x, 1);
+        }
+    }
 }
 
 pub fn draw_desktop(
@@ -1842,7 +2002,20 @@ pub fn draw_desktop(
     let _ = ex3_short;
 
     let t_rest = crate::timer::now_ms();
-    restore_wall(0, 0, W, H);
+    // 分钟跳一格才重擦壁纸（顶栏时钟在壁纸层里）+ 窗口动过 + 键盘开合
+    let minute = match crate::rtc::hm() {
+        Some((h, m)) => (h as u64) * 60 + m as u64,
+        None => u64::MAX,
+    };
+    let minute_changed = minute != unsafe { LAST_MIN };
+    if minute_changed {
+        unsafe {
+            LAST_MIN = minute;
+        }
+    }
+    if take_wall() || minute_changed {
+        restore_wall_gaps();
+    }
     let t_side = crate::timer::now_ms();
     draw_sidebar();
     let t_after_side = crate::timer::now_ms();

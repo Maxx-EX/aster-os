@@ -53,6 +53,10 @@ pub fn tick() {
     let now = timer::now_ms();
     let dirty = crate::term::dirty();
 
+    if want {
+        // 鼠标一动、点了键、开了窗：壁纸层可能被盖过，重擦一次才不留残影
+        fb::ask_wall();
+    }
     if (want || dirty) && now.saturating_sub(unsafe { LAST }) >= MIN_INTERVAL_MS {
         unsafe { LAST = now };
         redraw();

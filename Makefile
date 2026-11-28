@@ -261,8 +261,8 @@ test: image
 	    grep -q "FAR     = 0x0000000044400" $(B)/test-wx.log && \
 	    echo "[TEST] PASS W^X（EL0 写代码页被拦）" || (echo "[TEST] FAIL W^X 未生效" && exit 1)
 	# 页帧分配器：两个任务各 5 页 + 内核页表 10 页 + 双缓冲 768 页（3 MiB 后台帧缓冲）
-	@grep -q "Aster 包索引" $(B)/test.log && grep -q "3.12.4" $(B)/test.log && \
-	    echo "[TEST] PASS 包管理器索引（python3/gcc/git/gh）" || (echo "[TEST] FAIL 包索引" && exit 1)
+	@grep -q "80 个 / 10 类" $(B)/test.log && grep -q "2.44.0" $(B)/test.log && \
+	    echo "[TEST] PASS 包管理器索引（80 包 / 10 类 / git 2.44.0）" || (echo "[TEST] FAIL 包索引" && exit 1)
 	@grep -q "Asia/Shanghai (CST)" $(B)/test.log && grep -q "UTC 偏移  : +8" $(B)/test.log && \
 	    echo "[TEST] PASS 时区固定上海（UTC+8，无夏令时）" || (echo "[TEST] FAIL 时区" && exit 1)
 	@grep -q "WIFI-1 未开工" $(B)/test.log && \

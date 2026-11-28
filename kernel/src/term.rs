@@ -19,6 +19,65 @@ static mut COL: usize = 0;
 static mut DIRTY: bool = true;
 static mut LAST_DRAW: u64 = 0;
 
+/// 脏行范围（含端点），配合 PERF-3 的行级增量重绘。
+/// 空区间用 D0 = ROWS（大于任何行）表示；ALL 为真时整屏都算脏（滚动、清屏、几何变化）。
+static mut D0: usize = 0;
+static mut D1: usize = ROWS - 1;
+static mut ALL: bool = true;
+
+fn mark_row(r: usize) {
+    unsafe {
+        if r < D0 {
+            D0 = r;
+        }
+        if r > D1 {
+            D1 = r;
+        }
+    }
+}
+
+/// 光标那两格也要跟着脏（光标是反相块，位置一变旧位置必须擦掉）
+fn mark_cursor() {
+    unsafe {
+        mark_row(ROW);
+    }
+}
+
+pub fn touch_cursor() {
+    mark_cursor();
+    unsafe {
+        DIRTY = true;
+    }
+}
+
+/// 取脏行区间并把区间清空
+pub fn take_rows() -> Option<(usize, usize)> {
+    unsafe {
+        if ALL {
+            ALL = false;
+            D0 = ROWS;
+            D1 = 0;
+            return Some((0, ROWS - 1));
+        }
+        if D0 <= D1 {
+            let r = (D0, D1);
+            D0 = ROWS;
+            D1 = 0;
+            Some(r)
+        } else {
+            None
+        }
+    }
+}
+
+/// 请求一次整屏重绘（滚动、窗口位移、字号变化）
+pub fn mark_full() {
+    unsafe {
+        ALL = true;
+        DIRTY = true;
+    }
+}
+
 pub fn clear() {
     unsafe {
         for r in 0..ROWS {
@@ -29,14 +88,17 @@ pub fn clear() {
         ROW = 0;
         COL = 0;
         DIRTY = true;
+        ALL = true;
     }
 }
 
 fn newline() {
     unsafe {
+        let from = ROW;
         ROW += 1;
         COL = 0;
         if ROW >= ROWS {
+            // 整屏上滚一格：所有行都变了，只能整屏重画
             for r in 1..ROWS {
                 CELLS[r - 1] = CELLS[r];
             }
@@ -44,6 +106,10 @@ fn newline() {
                 CELLS[ROWS - 1][c] = 0;
             }
             ROW = ROWS - 1;
+            ALL = true;
+        } else {
+            mark_row(from);
+            mark_row(ROW);
         }
         DIRTY = true;
     }
@@ -56,6 +122,8 @@ fn put(cell: u16) {
         }
         CELLS[ROW][COL] = cell;
         COL += 1;
+        let r = ROW;
+        mark_row(r);
         DIRTY = true;
     }
 }
@@ -179,8 +247,18 @@ fn row_color(r: usize) -> u32 {
 
 /// 渲染到 framebuffer 的 (x, y) 起点，行高 LH
 pub fn render(x: u32, y: u32) {
+    render_range(x, y, 0, ROWS - 1, true);
+}
+
+/// 只画 [r0, r1] 这几行（PERF-3 的增量路径）。`paint_bg` 时先擦该行底色。
+pub fn render_range(x: u32, y: u32, r0: usize, r1: usize, paint_bg: bool) {
+    let r0 = r0.min(ROWS - 1);
+    let r1 = r1.min(ROWS - 1);
+    if paint_bg {
+        crate::fb::fill_rect(x, y + (r0 as u32) * LH, COLS as u32 * 8, ((r1 - r0 + 1) as u32) * LH, crate::fb::TERM_BG);
+    }
     unsafe {
-        for r in 0..ROWS {
+        for r in r0..=r1 {
             let base = row_color(r);
             for c in 0..COLS {
                 let v = CELLS[r][c];
@@ -205,7 +283,7 @@ pub fn render(x: u32, y: u32) {
 
     // 光标：画在下一个输入格上，500 ms 一个相位反相 —— 让人一眼看出"这里在等输入"
     let (r, c) = unsafe { (ROW, COL) };
-    if r < ROWS && c < COLS && (crate::timer::now_ms() / 500) % 2 == 0 {
+    if r >= r0 && r <= r1 && c < COLS && (crate::timer::now_ms() / 500) % 2 == 0 {
         let cx = x + (c as u32) * 8;
         let cy = y + (r as u32) * LH + 2;
         crate::fb::fill_rect(cx, cy, 2, 14, crate::fb::TEXT);

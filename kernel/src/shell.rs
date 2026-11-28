@@ -622,7 +622,8 @@ fn cmd_help() {
     println!("  wifi      无线网现状（无 802.11 硬件，WIFI-1 未开工）");
     println!("  date      当前时间（固定 Asia/Shanghai）");
     println!("  tz        时区详情（UTC+8 / 无夏令时）");
-    println!("  pkg       包管理：list | info <名> | install <名> | remove <名>");
+    println!("  pkg       包管理：list [分类] | search <词> | info <名> | install <名> | remove <名>");
+    println!("  http      HTTP 客户端：http get <ip> <port> <path> [保存名]");
     println!("  perf      绘制耗时（整桌 / 壁纸 / 侧栏 / 窗口 / 帧）");
     println!("  uptime    运行时长");
     println!("  mem       内存布局");
@@ -848,6 +849,9 @@ pub fn run() -> ! {
             "app" | "app on" | "app off" | "app start" | "app stop" | "app status" | "app step" => cmd_app(line),
             l if l.starts_with("app start ") => cmd_app(line),
             l if l == "pkg" || l.starts_with("pkg ") => cmd_pkg(l.strip_prefix("pkg").unwrap_or("").trim()),
+            l if l == "http" || l.starts_with("http ") => {
+                cmd_http(l.strip_prefix("http").unwrap_or("").trim())
+            }
             "wifi" => {
                 println!("  无线      : 硬件层没有 802.11 适配器，WIFI-1 未开工");
                 println!("  QEMU virt : 没有 SDIO / PCIe 无线网卡可枚举");
@@ -1023,28 +1027,113 @@ pub fn render_dashboard() {
     crate::kb::draw_if_open();
 }
 
-/// 包索引：真实仓库要去网上拉（PKG-2），这里先把格式、安装、卸载、查看跑通
-struct PkgEnt {
-    name: &'static str,
-    ver: &'static str,
-    size: u32,
-    desc: &'static str,
-    path: &'static str,
-    blob: &'static [u8],
-}
-
-static PKGS: [PkgEnt; 4] = [
-    PkgEnt { name: "python3", ver: "3.12.4", size: 144, desc: "Python 解释器（占位包体）", path: "/pkg-python3.ase", blob: include_bytes!("../../assets/pkg/python3.ase") },
-    PkgEnt { name: "gcc", ver: "13.2.0", size: 144, desc: "C/C++ 编译器（占位包体）", path: "/pkg-gcc.ase", blob: include_bytes!("../../assets/pkg/gcc.ase") },
-    PkgEnt { name: "git", ver: "2.44.0", size: 144, desc: "版本控制（占位包体）", path: "/pkg-git.ase", blob: include_bytes!("../../assets/pkg/git.ase") },
-    PkgEnt { name: "gh", ver: "2.50.0", size: 144, desc: "GitHub CLI（占位包体）", path: "/pkg-gh.ase", blob: include_bytes!("../../assets/pkg/gh.ase") },
-];
+/// 包索引表由 tools/mkpkg.py 生成（kernel/src/pkgidx.rs），加包只改脚本再重跑。
+/// 这里只管状态与命令：本进程装过哪些（PKG_ON），以及 list/info/install。
+use crate::pkgidx::{CATS, NPKG, PKGS};
 
 /// 本次运行里的安装状态：true 表示已落到 AsterFS 的 /pkg-<name>.ase
-static mut PKG_ON: [bool; 4] = [false; 4];
+static mut PKG_ON: [bool; NPKG] = [false; NPKG];
 
 fn pkg_find(name: &str) -> Option<usize> {
     PKGS.iter().position(|p| p.name == name)
+}
+
+/// 分类代码 → 中文标签；认不出来的原样返回（不返回 &str，免得引发生命周期问题）
+fn cat_label(c: &str) -> &'static str {
+    for (k, v) in CATS.iter() {
+        if *k == c {
+            return v;
+        }
+    }
+    "未知分类"
+}
+
+
+/// http get <ip> <port> <path> [保存名]
+///
+/// 内核自己的 HTTP 客户端：ARP → SYN → GET → 收完 → 写 AsterFS。
+/// 不做重传、不管乱序；先证明"能主动从网上下东西"这件事行得通。
+fn cmd_http(a: &str) {
+    let mut it = a.split_whitespace();
+    let sub = it.next().unwrap_or("");
+    if sub != "get" {
+        println!("  用法: http get <ip> <port> <path> [保存名]   例: http get 10.0.2.2 8001 /hello.txt");
+        return;
+    }
+    let ip_s = it.next().unwrap_or("");
+    let port: u16 = it.next().unwrap_or("80").parse().unwrap_or(80);
+    let path = it.next().unwrap_or("/");
+    let save = it.next().unwrap_or("/net-dl.bin");
+
+    let mut ip = [0u8; 4];
+    let mut part = 0usize;
+    let mut num = 0u32;
+    let mut digits = 0;
+    for c in ip_s.bytes() {
+        if c == b'.' {
+            if part < 3 {
+                ip[part] = num.min(255) as u8;
+                part += 1;
+            }
+            num = 0;
+            digits = 0;
+        } else if c.is_ascii_digit() {
+            num = num * 10 + (c - b'0') as u32;
+            digits += 1;
+        }
+    }
+    if part < 3 || digits == 0 {
+        println!("  IP 写法不对：要 a.b.c.d");
+        return;
+    }
+    ip[3] = num.min(255) as u8;
+
+    if !crate::net::available() {
+        println!("  没有 virtio-net（启动时带 -device virtio-net-device,netdev=n0）");
+        return;
+    }
+    println!("  GET {}:{}{} …（等 3 秒）", ip_s, port, path);
+    let n = crate::net::http_get(ip, port, path, 3000);
+    if n < 0 {
+        let why = match n {
+            -1 => "网络没就绪",
+            -2 => "ARP 拿不到对方 MAC（对端不在同一网段？）",
+            -3 => "连不上或没收到数据",
+            -4 => "响应超过 16 KiB 缓冲",
+            _ => "未知错误",
+        };
+        println!("  失败（{}）：{}", n, why);
+        return;
+    }
+    let body = crate::net::cli_data();
+    // 只看状态行，够判断成不成
+    let mut line = [0u8; 64];
+    let mut k = 0usize;
+    for &b in body.iter().take(64) {
+        if b == b'\r' || b == b'\n' {
+            break;
+        }
+        line[k] = b;
+        k += 1;
+    }
+    println!("  收到 {} 字节   状态行: {}", n, core::str::from_utf8(&line[..k]).unwrap_or("?"));
+
+    if !crate::blk::available() {
+        println!("  没有 virtio-blk，不落盘（挂盘后会自动保存到 {}）", save);
+        return;
+    }
+    match crate::vfs::open(save, true) {
+        Ok(fd) => {
+            let w = crate::vfs::write(fd, body);
+            crate::vfs::close(fd);
+            if w < 0 {
+                println!("  写 {} 失败（{}）", save, w);
+            } else {
+                println!("  已保存 {}（{} 字节，{} 块）  查看: cat {}", save, w, (w as u32).div_ceil(4096), save);
+            }
+        }
+        Err(e) => println!("  打开 {} 失败（{}）", save, e),
+    }
 }
 
 fn cmd_pkg(a: &str) {
@@ -1052,18 +1141,100 @@ fn cmd_pkg(a: &str) {
     let sub = it.next().unwrap_or("list");
     match sub {
         "list" | "" => {
-            println!("  Aster 包索引（{} 个）", PKGS.len());
-            for (i, p) in PKGS.iter().enumerate() {
-                let st = unsafe { if PKG_ON[i] { "[已装]" } else { "[可装]" } };
-                println!("  {} {:<9} {:<7} {:>4} B  {}", st, p.name, p.ver, p.size, p.desc);
+            // pkg list            → 分类概览
+            // pkg list <分类>      → 该分类明细
+            // pkg list installed  → 只列已装
+            let cat = it.next().unwrap_or("");
+            if cat.is_empty() {
+                let mut installed = 0usize;
+                for v in unsafe { PKG_ON }.iter() {
+                    if *v {
+                        installed += 1;
+                    }
+                }
+                println!("  Aster 包索引  {} 个 / {} 类，已装 {}", NPKG, CATS.len(), installed);
+                for (c, label) in CATS.iter() {
+                    let mut n = 0usize;
+                    let mut on = 0usize;
+                    let mut sample = "";
+                    for (i, p) in PKGS.iter().enumerate() {
+                        if p.cat != *c {
+                            continue;
+                        }
+                        if n == 0 {
+                            sample = p.name;
+                        }
+                        n += 1;
+                        if unsafe { PKG_ON[i] } {
+                            on += 1;
+                        }
+                    }
+                    println!("  {:<8} {:<12} {:>2} 个   已装 {}{}", c, label, n, on, if n > 0 { "" } else { "" });
+                    let _ = sample;
+                }
+                println!("  用法: pkg list <分类> 看明细 · pkg search <词> · pkg install <名>");
+                println!("  分类: lang build vcs net edit sys db media sec android");
+                return;
             }
-            println!("  用法: pkg install <名字> / pkg remove <名字> / pkg info <名字>");
+            let mut idx = [0usize; NPKG];
+            let mut n = 0usize;
+            for (i, p) in PKGS.iter().enumerate() {
+                let hit = if cat == "installed" {
+                    unsafe { PKG_ON[i] }
+                } else {
+                    p.cat == cat
+                };
+                if hit {
+                    idx[n] = i;
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                println!("  {} 里没有包（或还没装东西）", cat);
+                return;
+            }
+            println!(
+                "  Aster 包索引  {} 共 {} 个",
+                if cat == "installed" { "已装" } else { cat_label(cat) },
+                n
+            );
+            let mut k = 0usize;
+            while k < n {
+                let p = &PKGS[idx[k]];
+                let m = unsafe { if PKG_ON[idx[k]] { "*" } else { " " } };
+                if k + 1 < n {
+                    let q = &PKGS[idx[k + 1]];
+                    let m2 = unsafe { if PKG_ON[idx[k + 1]] { "*" } else { " " } };
+                    println!("  {}{:<11}{:<8}{}{:<11}{:<8}", m, p.name, p.ver, m2, q.name, q.ver);
+                } else {
+                    println!("  {}{:<11}{:<8}", m, p.name, p.ver);
+                }
+                k += 2;
+            }
+            println!("  * = 已装    pkg info <名> 看详情 · pkg install <名> 装");
+        }
+        "search" => {
+            let kw = it.next().unwrap_or("");
+            if kw.is_empty() {
+                println!("  用法: pkg search <关键词>");
+                return;
+            }
+            let mut n = 0;
+            for (i, p) in PKGS.iter().enumerate() {
+                if p.name.contains(kw) || p.desc.contains(kw) || p.cat == kw {
+                    let st = unsafe { if PKG_ON[i] { "[已装]" } else { "[可装]" } };
+                    println!("  {} {:<10} {:<8} {}", st, p.name, p.ver, p.desc);
+                    n += 1;
+                }
+            }
+            println!("  命中 {} 个", n);
         }
         "info" => match it.next().map(pkg_find) {
             Some(Some(i)) => {
                 let p = &PKGS[i];
                 println!("  名称      : {}", p.name);
                 println!("  版本      : {}   （占位版本号）", p.ver);
+                println!("  分类      : {}", p.cat);
                 println!("  包体      : {} 字节，CRC32 写在头 8..12", p.blob.len() - 40);
                 println!("  说明      : {}", p.desc);
                 println!("  落盘路径  : {}", p.path);
@@ -1115,7 +1286,7 @@ fn cmd_pkg(a: &str) {
                 None => println!("  索引里没有 {}", name),
             }
         }
-        other => println!("  未知子命令 {}（list / info / install / remove）", other),
+        other => println!("  未知子命令 {}（list / search / info / install / remove）", other),
     }
 }
 

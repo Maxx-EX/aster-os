@@ -60,6 +60,7 @@ pub fn open() -> bool {
 }
 
 pub fn set_open(v: bool) {
+    crate::fb::ask_wall();
     unsafe { OPEN = v };
 }
 

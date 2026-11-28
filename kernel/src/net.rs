@@ -292,6 +292,8 @@ fn handle_arp(f: &[u8]) {
                 GW_MAC = sender_mac;
                 GW_KNOWN = true;
             }
+            ARP_IP = sender_ip;
+            ARP_MAC = sender_mac;
         }
         return;
     }
@@ -489,6 +491,222 @@ fn send_tcp(
     send_frame(&out[..34 + seg_len])
 }
 
+// ---------------- HTTP 客户端（NET-4） ----------------
+//
+// 服务器方向的连接状态放在 CONN，客户端另起一套 CLI，两者互不干扰。
+// 只做"发一个 GET、把响应整段收下来"这一件事：不做重传、不处理乱序
+// （QEMU slirp 是本地回环，丢包乱序基本不会出现；真跑公网要补）。
+
+pub const CLI_PORT: u16 = 49152;
+
+struct Cli {
+    on: bool,
+    phase: u8, // 0 空闲 1 SYN 已发 2 已建立 3 收完
+    dst_ip: [u8; 4],
+    dst_mac: [u8; 6],
+    dst_port: u16,
+    seq: u32,   // 我方下一个要发的序号
+    ack: u32,   // 期望对方下一个序号
+    err: i32,   // 0 正常，负数是错误码
+}
+
+static mut CLI: Cli = Cli {
+    on: false,
+    phase: 0,
+    dst_ip: [0; 4],
+    dst_mac: [0; 6],
+    dst_port: 0,
+    seq: 0,
+    ack: 0,
+    err: 0,
+};
+
+/// 收到的东西先攒在这里，再由调用方决定写盘还是打印
+pub const CLI_BUF_MAX: usize = 16384;
+static mut CLI_BUF: [u8; CLI_BUF_MAX] = [0; CLI_BUF_MAX];
+static mut CLI_LEN: usize = 0;
+
+/// 最近一次 ARP 学到的 (ip, mac)，用于连非网关地址
+static mut ARP_IP: [u8; 4] = [0; 4];
+static mut ARP_MAC: [u8; 6] = [0; 6];
+
+pub fn cli_len() -> usize {
+    unsafe { CLI_LEN }
+}
+
+pub fn cli_data() -> &'static [u8] {
+    unsafe { &CLI_BUF[..CLI_LEN] }
+}
+
+/// 学习任意 IP 的 MAC：先查缓存的网关，再广播 ARP，最多等 ms 毫秒
+fn learn_mac(ip: [u8; 4], ms: u64) -> Option<[u8; 6]> {
+    unsafe {
+        if GW_KNOWN && ip == GW {
+            return Some(GW_MAC);
+        }
+        if ARP_IP == ip && ARP_MAC != [0; 6] {
+            return Some(ARP_MAC);
+        }
+    }
+    if !send_arp_request(ip) {
+        return None;
+    }
+    let t0 = crate::timer::now_ms();
+    while crate::timer::now_ms() - t0 < ms {
+        poll();
+        unsafe {
+            if ip == GW && GW_KNOWN {
+                return Some(GW_MAC);
+            }
+            if ARP_IP == ip && ARP_MAC != [0; 6] {
+                return Some(ARP_MAC);
+            }
+        }
+    }
+    None
+}
+
+/// 发一个 GET，把响应整段收进 CLI_BUF。返回响应字节数，负数表示失败。
+///
+/// -1 网络不可用　-2 ARP 拿不到 MAC　-3 连不上（超时/RST）　-4 收满缓冲
+pub fn http_get(ip: [u8; 4], port: u16, path: &str, timeout_ms: u64) -> i32 {
+    if !available() {
+        return -1;
+    }
+    let mac = match learn_mac(ip, 400) {
+        Some(m) => m,
+        None => return -2,
+    };
+    unsafe {
+        CLI = Cli {
+            on: true,
+            phase: 1,
+            dst_ip: ip,
+            dst_mac: mac,
+            dst_port: port,
+            seq: 0x2222_0000u32.wrapping_add(crate::timer::freq_hz() as u32 & 0xffff),
+            ack: 0,
+            err: 0,
+        };
+        CLI_LEN = 0;
+        let isn = CLI.seq;
+        let dst_port = CLI.dst_port;
+        send_tcp(mac, ip, CLI_PORT, dst_port, isn, 0, TCP_SYN, &[]);
+        CLI.seq = isn.wrapping_add(1);
+    }
+
+    let t0 = crate::timer::now_ms();
+    let mut sent_req = false;
+    loop {
+        poll();
+        unsafe {
+            if CLI.phase == 0 {
+                break; // 被 RST 或被 FIN 收尾
+            }
+            // 建连之后立刻发请求（只发一次）
+            if CLI.phase == 2 && !sent_req {
+                let mut req = [0u8; 256];
+                let mut n = 0usize;
+                let m = b"GET ";
+                req[..m.len()].copy_from_slice(m);
+                n += m.len();
+                for b in path.as_bytes() {
+                    if n < 200 {
+                        req[n] = *b;
+                        n += 1;
+                    }
+                }
+                let tail = b" HTTP/1.0\r\nHost: aster\r\nUser-Agent: aster/0.9\r\nConnection: close\r\n\r\n";
+                for b in tail {
+                    if n < 250 {
+                        req[n] = *b;
+                        n += 1;
+                    }
+                }
+                let s = CLI.seq;
+                let a = CLI.ack;
+                send_tcp(CLI.dst_mac, CLI.dst_ip, CLI_PORT, CLI.dst_port, s, a, TCP_ACK, &req[..n]);
+                CLI.seq = s.wrapping_add(n as u32);
+                sent_req = true;
+            }
+            if CLI.phase == 3 {
+                break;
+            }
+        }
+        if crate::timer::now_ms() - t0 > timeout_ms {
+            unsafe {
+                CLI.err = -3;
+                CLI.phase = 0;
+            }
+            break;
+        }
+        // 给设备一点喘气时间，别把 poll 打成忙等
+        for _ in 0..2000 {
+            core::hint::spin_loop();
+        }
+    }
+    unsafe {
+        let e = CLI.err;
+        CLI.on = false;
+        if e != 0 {
+            return e;
+        }
+        if CLI_LEN == 0 {
+            return -3;
+        }
+        CLI_LEN as i32
+    }
+}
+
+/// 客户端方向的 TCP 处理：由 handle_tcp 在开头分派进来
+fn handle_tcp_client(src_mac: [u8; 6], src_ip: [u8; 4], src_port: u16, seq: u32, flags: u8, payload: &[u8]) {
+    unsafe {
+        if src_ip != CLI.dst_ip || src_port != CLI.dst_port {
+            return;
+        }
+        if flags & TCP_RST != 0 {
+            CLI.err = -3;
+            CLI.phase = 0;
+            return;
+        }
+        if flags & TCP_SYN != 0 && flags & TCP_ACK != 0 && CLI.phase == 1 {
+            CLI.ack = seq.wrapping_add(1);
+            CLI.phase = 2;
+            let s = CLI.seq;
+            let a = CLI.ack;
+            send_tcp(src_mac, src_ip, CLI_PORT, CLI.dst_port, s, a, TCP_ACK, &[]);
+            return;
+        }
+        if CLI.phase < 2 {
+            return;
+        }
+        // 只收顺序到达的段：seq 必须等于期望值
+        if !payload.is_empty() {
+            if seq == CLI.ack {
+                let room = CLI_BUF_MAX - CLI_LEN;
+                let take = payload.len().min(room);
+                CLI_BUF[CLI_LEN..CLI_LEN + take].copy_from_slice(&payload[..take]);
+                CLI_LEN += take;
+                CLI.ack = CLI.ack.wrapping_add(payload.len() as u32);
+                if take < payload.len() {
+                    CLI.err = -4;
+                }
+            }
+            let s = CLI.seq;
+            let a = CLI.ack;
+            send_tcp(src_mac, src_ip, CLI_PORT, CLI.dst_port, s, a, TCP_ACK, &[]);
+        }
+        if flags & TCP_FIN != 0 {
+            let a = CLI.ack.wrapping_add(1);
+            CLI.ack = a;
+            let s = CLI.seq;
+            send_tcp(src_mac, src_ip, CLI_PORT, CLI.dst_port, s, a, TCP_ACK | TCP_FIN, &[]);
+            CLI.seq = s.wrapping_add(1);
+            CLI.phase = 3;
+        }
+    }
+}
+
 fn handle_tcp(src_mac: [u8; 6], src_ip: [u8; 4], b: &[u8]) {
     if b.len() < 20 {
         return;
@@ -503,6 +721,12 @@ fn handle_tcp(src_mac: [u8; 6], src_ip: [u8; 4], b: &[u8]) {
         return;
     }
     let payload = &b[doff..];
+
+    // 客户端方向的段先交给 CLI（dst_port 是本方临时端口）
+    if dst_port == CLI_PORT && unsafe { CLI.on } {
+        handle_tcp_client(src_mac, src_ip, src_port, seq, flags, payload);
+        return;
+    }
 
     if flags & TCP_RST != 0 {
         unsafe {

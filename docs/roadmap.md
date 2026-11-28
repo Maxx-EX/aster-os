@@ -216,12 +216,16 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 | P6-3 | **TLS** | 引入可审计实现（BearSSL / mbedTLS 精简）或自研，证书链校验 |
 | P6-4 | HTTP 客户端 | GET/POST、分块、重定向、最小 Cookie |
 | P6-5 | 浏览器 | HTML 子集解析 + 布局 + 文本/图片渲染，无 JS；够看文档与本站页面 |
-| P6-6 | 包管理雏形 | `aster-pkg`：网络拉 `.apkg`，校验签名后落盘安装（PKG-1 骨架已落地，见下） |
+| P6-6 | 包管理雏形 | `aster-pkg`：网络拉 `.apkg`，校验签名后落盘安装（PKG-1/2 已落地：80 包索引、分类、搜索、安装落盘） |
 | NET-2 | ✅ 有线真的通了 | `-device virtio-net-device` 挂进 QEMU virt，MAC/IP/网关自配，自研 TCP 收包 → HTTP 服务器 `:80`；宿主 `curl 127.0.0.1:8088` 回 **HTTP 200** 与内核自写 HTML |
 | NET-3 | ⬜ 无线（WIFI-1） | QEMU virt 无 802.11 设备；树莓派 BCM43438 在 SDIO 上，需 SDHCI → SDIO 枚举 → 固件上传 → WPA2 四步，暂无代码，`wifi` 命令如实说明 |
 | TZ-1 | ✅ 时区固定上海 | `rtc.rs` 编译期常量 `Asia/Shanghai +8`、无夏令时；`date` 带时区名，`tz` 命令自查 |
 | PKG-1b | ✅ 包管理器骨架 | `ASEPKG1` 索引（python3/gcc/git/gh）+ `pkg list/info/install/remove`；`install` 走 VFS 落 AsterFS，真包下载待 P6-4 |
 | PERF-2 | ✅ 阴影按需 | 投影四层 alpha 是最大开销；只在窗口位移/开关后 150 ms 内画，静态帧 38 ms → 16 ms |
+| PERF-3 | ✅ 壁纸惰性 + 终端行级 | 壁纸只在窗口动/键盘开合/分钟跳格时重擦；终端只补脏行。单窗口整桌 0 ms，三窗口 ~18 ms |
+| PERF-4 | ⬜ 窗口离屏合成 | 每窗一块离屏层，按 z 序 blit 合成；目标三窗口 4–5 ms，且彻底摆脱"多层重叠只能整画"的限制 |
+| PKG-2b | ✅ 包生态 80 个 | 10 类（lang/build/vcs/net/edit/sys/db/media/sec/android）；`pkg list <类>`、`pkg search`、`pkg list installed`；索引表由脚本生成 |
+| NET-4 | ⬜ DHCP + DNS | 摆脱写死 10.0.2.15；DHCP DISCOVER/OFFER、DNS A 查询，给 `http get` 用域名 |
 
 **验收**：DNS 解析正确；`https://` 页面能拉下来；TLS 拒绝过期证书。
 
@@ -379,3 +383,7 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **TZ-1 ✅ 时区固定上海**：`Asia/Shanghai (CST)`、`+8`、无夏令时写进 `rtc.rs` 常量，`date`/`tz` 双入口可查
 - **PKG-1b ✅ 包管理器骨架**：`ASEPKG1\0` 包格式 + 4 个索引项 + `list/info/install/remove`；`pkg install` 经 VFS 落到 AsterFS，真包还得等 HTTP 客户端
 - **WIFI-1 ⬜ 无线未开工**：不假装有驱动，`wifi` 命令把四步路径和现状写在屏幕上；`make test` 现有 31 项断言
+- **PKG-2b ✅ 包生态扩到 80 个**：`tools/mkpkg.py` 改成"列表即索引"，直接生成 `kernel/src/pkgidx.rs`；`pkg list` 变分类概览（10 类），`pkg list lang` 看明细，`pkg search` 按名/描述/类搜，`pkg list installed` 只列已装
+- **PERF-3 ✅ 壁纸惰性 + 终端行级增量**：壁纸只在窗口动、键盘开合、分钟跳格时重擦（`ask_wall`），终端只补脏行（`term::take_rows`）；关掉系统/网络窗后 `perf` 报 **整桌 0 ms / 壁纸 0 / 窗口 0**，三窗口 18 ms
+- **PERF-4 ⬜ 下一刀**：三窗口仍 18 ms，因为重叠时只能整窗重画；解法是每窗一块离屏层按 z 序 blit
+- **NET-4 ⬜ 下一阶段**：DHCP + DNS，让 `http get` 能用域名而不是写死 IP

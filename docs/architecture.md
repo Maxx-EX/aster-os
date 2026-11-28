@@ -2435,3 +2435,86 @@ $ wifi
 4. **WPA2**：四次握手（EAPOL）+ CCMP，密钥派生用自研 SHA-256
 
 这四步做完才有一行 `wifi connect SSID PASS`。现在写的是第 0 步：让人知道差多远。
+
+## §58 包生态与第二刀性能（PKG-2b / PERF-3）
+
+### 58.1 包索引从"手写 4 个"变成"脚本生成 80 个"
+
+上一版 `shell.rs` 里是手写的 `static PKGS: [PkgEnt; 4]`，加一个包要改 Rust 代码、加 `include_bytes!`、改数组长度、改 `PKG_ON` 维度 —— 四处联动，容易漏。现在改成生成式：
+
+- `tools/mkpkg.py` 里一张 `PKGS` 列表（名字/版本/分类/描述），跑一次同时干两件事：写出 `assets/pkg/<name>.ase`，写出 `kernel/src/pkgidx.rs`。
+- 生成的 Rust 文件里有 `PkgEnt` 结构、`NPKG` 常量、`PKGS` 静态表（每项自带 `include_bytes!`）、以及 `CATS`（分类代码 → 中文标签）。
+- `shell.rs` 只 `use crate::pkgidx::{CATS, NPKG, PKGS}`，`PKG_ON` 维度跟着 `NPKG` 走。
+
+加包从此是"改一个 Python 列表 → 重跑 → 重编"，不再碰 Rust。
+
+当前 80 个，10 类：
+
+| 分类 | 数量 | 代表 |
+|---|---|---|
+| lang 语言与运行时 | 20 | python3/pip/numpy/pandas/flask/gcc/g++/clang/llvm/rustc/cargo/go/node/npm/java/kotlin/php/perl/ruby/lua |
+| build 构建工具链 | 9 | make/cmake/ninja/meson/pkgconf/autoconf/bison/flex/gradle |
+| vcs 版本控制 | 4 | git/gh/svn/hg |
+| net 网络 | 10 | curl/wget/openssh/rsync/dig/nc/nmap/aria2/nginx/mosquitto |
+| edit 编辑与终端 | 6 | vim/nano/emacs/tmux/screen/less |
+| sys 系统工具 | 15 | htop/tree/jq/unzip/zip/tar/gzip/xz/strace/lsof/gdb/coreutils/bash/zsh/busybox |
+| db 数据库 | 2 | sqlite3/redis-cli |
+| media 多媒体 | 3 | ffmpeg/imagemagick/sox |
+| sec 安全 | 3 | openssl/gnupg/age |
+| android 安卓工具链 | 8 | adb/fastboot/aapt2/d8/apksigner/zipalign/sdkmanager/ndk |
+
+80 个平铺一屏放不下，所以 `pkg list` 改成分类概览：
+
+```
+$ pkg list
+  Aster 包索引  80 个 / 10 类，已装 0
+  lang     语言与运行时    20 个   已装 0
+  build    构建工具链       9 个   已装 0
+  ...
+  用法: pkg list <分类> 看明细 · pkg search <词> · pkg install <名>
+```
+
+想看细节就 `pkg list lang`（两列并排）、`pkg list installed`（只列已装）、`pkg search python`（按名/描述/类命中）。
+
+新增的字（"多媒体"里的"媒"）又不在字库表里，屏幕上显示成"多 体"。这是老问题：字库靠"扫源码里的汉字"，生成 `pkgidx.rs` 发生在 `genfont.py` 之后就会漏。顺序固定成 **先跑 mkpkg.py，再跑 genfont.py**，现在汉字 933 个。
+
+### 58.2 第二刀性能：把"每帧都要做的事"变成"变了才做"
+
+上一刀（PERF-2）砍的是阴影：只在窗口动过之后 150 ms 画。这一刀砍两处：
+
+**一、壁纸惰性恢复。** `draw_desktop` 里原来无条件 `restore_wall_gaps()` 整屏搬 3 MiB。其实静止帧上壁纸像素本来就是对的 —— 唯一会变的是顶栏时钟。于是：
+
+```rust
+if take_wall() || minute_changed { restore_wall_gaps(); }
+```
+
+`ask_wall()` 由这几个时机触发：`win_touch_all()`（窗口开关/移动/最大化/焦点变化）、`kb::set_open()`（软键盘开合）、`ui::tick` 里 `want`（鼠标点击/拖动/悬停）。时钟走 `rtc::hm()` 的分钟数，跳格才重擦。
+
+**二、终端行级增量。** `term.rs` 加 `D0/D1/ALL` 记录脏行范围：`put` 标当前行、`newline` 标新旧两行、滚动 `ALL=true`。`fb::term_patch()` 只擦、只画这几行，标题栏和圆角面板留上一帧的。
+
+这里有一个**必须记住的约束**：增量渲染要求终端是屏幕上唯一窗口。因为窗口按下标一层层整画，下层窗口的整画会盖掉终端像素，而补脏行补不回整块矩形 —— 多窗口时 z 序会错（实测确实错了：系统窗压到了终端上面）。所以代码里加了 `others_open` 判断，**只要还有别的窗口打开就走整窗重画**。
+
+实测：
+
+| 场景 | 整桌 | 壁纸 | 窗口 |
+|---|---|---|---|
+| 三窗口 | 18–20 ms | 0 | 18–20 |
+| 只留终端（`win off 1` `win off 2`） | **0 ms** | 0 | **0** |
+
+"整桌 0 ms"不是没画，是这一帧只补了 perf 命令刚打出来的两行。
+
+### 58.3 三窗口为什么还停在 18 ms
+
+因为三个窗口互相重叠，整画顺序决定像素归属，任何"局部重画"都会打破它。真正的解法是**离屏合成**：
+
+1. 每个窗口一块自己的层（`Wb × Hh × 4`，最大的最大化终端 896×628 ≈ 2.2 MiB，三块约 5 MiB，页帧池够）。
+2. 窗口内容只在自己的层上画脏区，层内像素永远自洽。
+3. 每帧按 ZORD 顺序把各层 blit 到后台缓冲：3 个矩形约 2.3 MB memcpy，~2–3 ms，加上脏区绘制，目标 4–5 ms。
+
+这条路要求绘制函数支持"当前目标切换"（`fb()` 返回可替换的 `Fb { base, stride, w, h }` + 原点偏移），改动集中在 `fb.rs` 一处，但要逐个验证圆角、阴影、文字在层坐标下的裁剪。列为 **PERF-4**，下一轮做。
+
+### 58.4 当前这份快照的边界
+
+- 包：80 个索引项全部是 144 字节占位包体，能查、能装、能落盘；装进去的不是可执行程序。
+- 网络：有线通（HTTP 200 实测），IP 写死 10.0.2.15；无线没硬件路径；DHCP/DNS 是 NET-4。
+- 性能：单窗口已经"零成本"，三窗口 18 ms；`make test` 36 项断言。

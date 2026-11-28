@@ -16,7 +16,10 @@ ASCII_W, ASCII_H = 8, 16
 UI_W, UI_H = 10, 16
 CJK_PX = 16
 
+# DejaVu Sans Mono 的 p/g/y 在 8x16 里降部清楚；JetBrains Mono 的
+# 双层 g 会被糊成一个 9，所以默认换掉，仍留作回退。
 TERM_FONT = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
     "/home/user/fonts/JetBrainsMono-Regular.ttf",
     "/usr/share/fonts/truetype/jetbrains/JetBrainsMono-Regular.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -78,7 +81,9 @@ def render(ch, font, w, h, baseline):
     bbox = d.textbbox((0, 0), ch, font=font)
     tw = bbox[2] - bbox[0]
     x = (w - tw) // 2 - bbox[0]
-    y = baseline - bbox[3]
+    # 统一按基线对齐：以前用 bbox[3]（墨迹底）会按每个字的降部各自上移，
+    # 结果 p/g/y 的降部被裁掉，p 看起来像 P、g 像 9。
+    y = baseline - font.getmetrics()[0]
     d.text((x, y), ch, fill=255, font=font)
     return quantize(img, w, h)
 
@@ -143,9 +148,8 @@ def main():
     term_path = pick(TERM_FONT)
     # 13px 时 JetBrains Mono 的双层 g 在 8x16 里糊成一个 9；降到 12px 让
     # g/p/q/y 的下伸环有足够像素，字形才认得出。
-    term_font = ImageFont.truetype(term_path, 12)
-    ascent = term_font.getmetrics()[0]
-    baseline = min(ASCII_H - 4, max(ascent, 10))
+    term_font = ImageFont.truetype(term_path, 11)
+    baseline = ASCII_H - 3
 
     ui_path = pick(UI_FONT)
     ui_font = ImageFont.truetype(ui_path, 13)
@@ -208,7 +212,7 @@ def main():
     ic.append("];")
     (ROOT / "kernel/src/icons.rs").write_text("\n".join(ic) + "\n", encoding="utf-8")
 
-    print(f"font.rs   ASCII 95（{term_path.split('/')[-1]} 12px） + 汉字 {len(cjk)}（Noto SC Medium）")
+    print(f"font.rs   ASCII 95（{term_path.split('/')[-1]} 11px） + 汉字 {len(cjk)}（Noto SC Medium）")
     print("font_ui.rs ASCII 95（Inter 13px / 10x16）")
     print(f"icons.rs  {len(ICONS)} 个 32x32 线性图标")
 
