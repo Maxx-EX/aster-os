@@ -530,8 +530,9 @@ pub fn read_file(name: &str, out: &mut [u8]) -> Result<usize, &'static str> {
 pub fn write_file(name: &str, data: &[u8]) -> Result<usize, &'static str> {
     let sup = super_block().ok_or("磁盘未格式化（先 mkfs）")?;
     let root = inode_read(sup.root).ok_or("根目录 inode 损坏")?;
-    if data.len() > BS {
-        return Err("v0 单文件上限 4096 字节");
+    // v0 的 inode 有 10 个直接块号，所以单文件上限 10 × 4 KiB
+    if data.len() > BS * NDIRECT {
+        return Err("v0 单文件上限 40960 字节（10 个直接块）");
     }
     let mut f = match dir_find(&root, name) {
         Some(ino) => {
@@ -573,14 +574,19 @@ pub fn write_file(name: &str, data: &[u8]) -> Result<usize, &'static str> {
         },
     };
     if !data.is_empty() {
-        let b = block_alloc().ok_or("没有空闲块")?;
-        let x = buf();
-        zero(x);
-        x[..data.len()].copy_from_slice(data);
-        if !wr(b, &*x) {
-            return Err("写数据块失败");
+        let nblk = data.len().div_ceil(BS);
+        for bi in 0..nblk {
+            let b = block_alloc().ok_or("没有空闲块")?;
+            let x = buf();
+            zero(x);
+            let s = bi * BS;
+            let e = (s + BS).min(data.len());
+            x[..e - s].copy_from_slice(&data[s..e]);
+            if !wr(b, &*x) {
+                return Err("写数据块失败");
+            }
+            f.blocks[bi] = b;
         }
-        f.blocks[0] = b;
     }
     f.size = data.len() as u32;
     if !inode_write(&f) {

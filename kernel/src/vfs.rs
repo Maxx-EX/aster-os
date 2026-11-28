@@ -12,6 +12,8 @@
 use crate::afs::{self, BS};
 
 pub const MAX_FD: usize = 16;
+/// 一次打开能缓存的最大文件（原来是 4 KiB = 一块，网络下载的东西稍大就 ENOSPC）
+pub const VFS_CAP: usize = 16 * 1024;
 pub const FIRST_USER_FD: usize = 3;
 
 pub const ENOENT: i64 = -2;
@@ -32,7 +34,7 @@ struct Fd {
     wr: bool,
     nlen: u8,
     name: [u8; 24],
-    buf: [u8; BS],
+    buf: [u8; VFS_CAP],
 }
 
 const EMPTY: Fd = Fd {
@@ -43,7 +45,7 @@ const EMPTY: Fd = Fd {
     wr: false,
     nlen: 0,
     name: [0; 24],
-    buf: [0; BS],
+    buf: [0; VFS_CAP],
 };
 
 static mut FDS: [Fd; MAX_FD] = [EMPTY; MAX_FD];
@@ -89,7 +91,7 @@ fn resolve(name: &str) -> Option<afs::Inode> {
     }
 }
 
-fn slot_for(name: &str, ino: u32, len: u32, wr: bool, buf: &[u8; BS]) -> Result<i32, i64> {
+fn slot_for(name: &str, ino: u32, len: u32, wr: bool, buf: &[u8; VFS_CAP]) -> Result<i32, i64> {
     let bytes = name.as_bytes();
     if bytes.len() > 24 {
         return Err(ENAMETOOLONG);
@@ -141,7 +143,7 @@ pub fn open(path: &str, wr: bool) -> Result<i32, i64> {
             }
         }
     }
-    let mut buf = [0u8; BS];
+    let mut buf = [0u8; VFS_CAP];
     let n = afs::read_file(name, &mut buf).map_err(|_| EINVAL)?;
     let len = (f.size as usize).min(n) as u32;
     slot_for(name, f.ino, len, wr, &buf)
@@ -178,7 +180,7 @@ pub fn write(fd: i32, data: &[u8]) -> i64 {
         return EROFS;
     }
     let off = f.off as usize;
-    if off + data.len() > BS {
+    if off + data.len() > VFS_CAP {
         return ENOSPC;
     }
     f.buf[off..off + data.len()].copy_from_slice(data);

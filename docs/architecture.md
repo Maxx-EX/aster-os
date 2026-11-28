@@ -2824,3 +2824,68 @@ $ chmod 644  a.txt → -rw-r--r--
 ### 64.6 边界
 
 DHCP 没有租约续期/释放（一次性拿完就用到底）、没有处理 NAK；DNS 只查 A 记录（没有 AAAA/CNAME/SRV，也不缓存）；TCP 仍不做重传，靠 slirp 本地回环的可靠性。TLS 依旧没有，`https://` 页面会落到"没有加密层"的错误页。
+
+## 65. WIFI-1 骨架 · AsterFS 多块 · 真下载
+
+### 65.1 先用官方格式表把 23x 钉死
+
+之前 roadmap 上挂了一条"23x 的 unit1 字节序与规范相反，跑真 APK 前要校正"。这轮先把这件事验证清楚，而不是直接改代码。
+
+AOSP《Dalvik executable instruction formats》给出的位布局是：
+
+```
+23x   AA|op   CC|BB          op vAA, vBB, vCC
+```
+
+每个 16 位字按"高位到低位"读，所以第二个 code unit 的高 8 位是 vC、低 8 位是 vB。内核 `dex.rs` 里读的是：
+
+```rust
+let w = unit(pc + 1);
+let b = (w & 0xff) as usize;   // 低字节
+let c = ((w >> 8) & 0xff) as usize; // 高字节
+```
+
+——与规范一致。再拿手搓 fixture 的字节核对：`aget v4, v1, v2` 编码成 `0x0444, 0x0201`，第二个字 `0x0201` 的低字节 `0x01` 正是 vB=1（数组寄存器）、高字节 `0x02` 是 vC=2（下标寄存器）。`make test` 里 `[DEX] 30`（数组 `a[i]=i*3` 求和 30）能过，本身就是"如果 B/C 读反会立刻报『不是数组』"的反证。
+
+结论：**这不是 bug**，之前的疑点作废；真正跑真 APK 时要小心的是别的编码（`invoke-custom`、`fill-array-data`、try/catch 表、`const-wide`），23x 不用动。
+
+### 65.2 WIFI-1：能立的骨架先立起来
+
+QEMU virt 没有任何 802.11 设备，树莓派的 BCM43438 又在 SDIO 上，而 SDIO 挂在 EMMC(SDHCI) 上。因此这一轮做的是**真实代码的骨架**，不是文案：
+
+- `board.rs` 加 `emmc: Option<u64>`：Pi3 `0x3F30_0000`、Pi4 `0xFE34_0000`、QEMU `None`；
+- `sdhci.rs`：SDHCI 寄存器偏移表、`probe()`（读 CAPABILITIES，读到 `0`/`0xffffffff` 就当没控制器）、`reset()`（软复位并等复位位落下）、`set_clock()`（内部分频 + 稳定位轮询 + SD clock enable）、`cmd(idx,arg,resp)`（写 CMD 寄存器、轮询 Normal Interrupt 的 Command Complete、读 RESP0）、`sdio_probe()`（CMD5 `IO_SEND_OP_COND`）；
+- `wifi.rs`：`Backend { None, SdioBrcm }`、`probe()` 把"SDHCI 在不在 → SDIO 卡答不答 CMD5"串成状态、`scan()` 返回 0（没有驱动不编造热点）、`phase()` 四步进度（SDIO 枚举 → 固件 → WPA2 → 联网）。
+
+`wifi` / `wifi scan` 在 QEMU 上如实输出：
+
+```
+  后端      : 无（没有可用的 802.11 适配器）
+  SDHCI     : 没有 SDHCI 控制器（QEMU virt 上没有 EMMC）
+  SDIO 卡   : 无应答（没有卡/没有控制器）
+  扫描      : 0 个 AP（没有驱动，不编造热点）
+```
+
+真机上这条链能不能走通，要等 SDHCI 时序在 Pi 上验过——现在能保证的是接口、命令表、错误路径都是真的。
+
+### 65.3 AsterFS 多块：从 4 KiB 到 40 KiB
+
+`write_file` 原来只写 `blocks[0]`，超过 4096 字节直接拒绝（错误信息还写着 "v0 单文件上限 4096"）。inode 里明明有 `NDIRECT=10` 个块号，读路径（`read_file`）早就是按 10 块循环的——写路径偷了懒。
+
+改成按块循环写，上限 `BS * NDIRECT = 40 KiB`；`read_file` 原本就对。顺手把 `vfs` 的打开缓冲从 4 KiB 提到 16 KiB（`VFS_CAP`），否则"下载下来的是 4.5 KB 文件"这种最常见的情况还是 ENOSPC。
+
+### 65.4 真下载：URL → 磁盘
+
+新命令：
+
+```
+fetch <host[:port]/path> <磁盘上的名字>
+```
+
+`net::fetch_url` 负责解析 `host[:port][/path]`、必要时走 DNS、`http_get`、再切掉响应头（`\r\n\r\n`）拿到 body；shell 侧用 `vfs` 写盘。实测把内置星芒图（4499 字节）从宿主 `10.0.2.2:8000/logo.png` 拉进 AsterFS：**45 ms，两轮磁盘块分配**。
+
+`pkg install <名> <url>` 也接了同一条路：给了 URL 就真的把包体从网络取下来写盘（144 字节的 `git.ase` 远程装进 `/pkg-git.ase`，`pkg list installed` 立刻认），不给 URL 仍走内嵌索引。
+
+### 65.5 边界
+
+SDHCI 只有骨架，没在真机上跑过时序（时钟分频、CMD 超时、DMA 都没验）；SDIO 之后的 CIS 读取、固件上传、WPA2 四步一行没写；`scan()` 恒为 0。AsterFS 仍是 10 个直接块、没有间接块，40 KiB 以上要等 v1。`fetch` 走的是 16 KiB 的 CLI 缓冲，超过 16 KiB 的响应会 `-4`。

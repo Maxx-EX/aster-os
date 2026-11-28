@@ -218,7 +218,7 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 | P6-5 | ✅ 浏览器（内置） | 自研分词 + 块级排版 + 行内链接；`web` 命令、第四窗口/dock/侧栏、拖动滚动、真网络取页；不做 CSS/JS/图片 |
 | P6-6 | 包管理雏形 | `aster-pkg`：网络拉 `.apkg`，校验签名后落盘安装（PKG-1/2 已落地：80 包索引、分类、搜索、安装落盘） |
 | NET-2 | ✅ 有线真的通了 | `-device virtio-net-device` 挂进 QEMU virt，MAC/IP/网关自配，自研 TCP 收包 → HTTP 服务器 `:80`；宿主 `curl 127.0.0.1:8088` 回 **HTTP 200** 与内核自写 HTML |
-| NET-3 | ⬜ 无线（WIFI-1） | QEMU virt 无 802.11 设备；树莓派 BCM43438 在 SDIO 上，需 SDHCI → SDIO 枚举 → 固件上传 → WPA2 四步，暂无代码，`wifi` 命令如实说明 |
+| NET-3 | 🚧 无线（WIFI-1） | 框架已立：`board.emmc`、`sdhci.rs`（CAPABILITIES 探测/软复位/时钟/CMD/CMD5）、`wifi.rs`（后端+SIDO 探测+扫描接口+四步进度）；QEMU 上如实报"无控制器"，真机时序待验 |
 | TZ-1 | ✅ 时区固定上海 | `rtc.rs` 编译期常量 `Asia/Shanghai +8`、无夏令时；`date` 带时区名，`tz` 命令自查 |
 | PKG-1b | ✅ 包管理器骨架 | `ASEPKG1` 索引（python3/gcc/git/gh）+ `pkg list/info/install/remove`；`install` 走 VFS 落 AsterFS，真包下载待 P6-4 |
 | PERF-2 | ✅ 阴影按需 | 投影四层 alpha 是最大开销；只在窗口位移/开关后 150 ms 内画，静态帧 38 ms → 16 ms |
@@ -387,6 +387,10 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **PKG-2b ✅ 包生态扩到 80 个**：`tools/mkpkg.py` 改成"列表即索引"，直接生成 `kernel/src/pkgidx.rs`；`pkg list` 变分类概览（10 类），`pkg list lang` 看明细，`pkg search` 按名/描述/类搜，`pkg list installed` 只列已装
 - **PERF-3 ✅ 壁纸惰性 + 终端行级增量**：壁纸只在窗口动、键盘开合、分钟跳格时重擦（`ask_wall`），终端只补脏行（`term::take_rows`）；关掉系统/网络窗后 `perf` 报 **整桌 0 ms / 壁纸 0 / 窗口 0**，三窗口 18 ms
 - **PERF-4 ✅**：三窗口 18 ms → 2 ms（每窗一块离屏层 + 按 z 序 blit，单窗仍走 1 ms 快速路径）；PERF-5 已把静止帧做到 0 ms
+- **PKG-3 ✅ 真实包体**：`pkg install <名> <url>` 走 `net::fetch_url` 把包体从 HTTP 拉下来写进 AsterFS（144 字节 git.ase 远程装成功）；通用命令 `fetch <url> <名字>` 同时落地
+- **AsterFS 多块 ✅**：`write_file` 按 `NDIRECT=10` 循环写（单文件 4 KiB → 40 KiB），`vfs` 打开缓冲 4 KiB → 16 KiB；内置 4499 字节 logo 拉进磁盘实测
+- **APK-23x ✅ 核对完毕**：AOSP 格式表 `AA|op CC|BB` 说明 unit2 低字节是 vB、高字节是 vC，与内核读法一致；fixture `0x0201` 与 `[DEX] 30` 反证，之前的"字节序反了"疑点作废
+- **WIFI-1 🚧 骨架**：`board.emmc` + `sdhci.rs`（探测/复位/时钟/CMD5）+ `wifi.rs`（后端/探测/扫描/四步进度）；QEMU 如实报"无控制器"
 - **NET-4 ✅ DHCP + DNS**：`net.rs` 补 UDP（`send_udp`/`handle_udp`），手写 BOOTP 跑 DISCOVER→OFFER→REQUEST→ACK（1–2 ms 拿到 10.0.2.15/网关/DNS），DNS 查 A 记录（4 ms），`web neverssl.com` 拉公网页面；顺带修了 TX 描述符从不 free_chain 的泄漏
 - **P6-5 ✅ 内置浏览器**：`html.rs` 自研分词与块级排版（h1/h2/hr/列表/段落折行/行内链接），`web.rs` 页面状态 + 行到像素 + 滚动 + 命中；第四窗口「浏览器」、dock 第四格、侧栏"浏览"；`web` 系列命令；首页内置可离线开，`web 10.0.2.2:8000/home.html` 走真 TCP 拉取，点链接跳转、拖动滚动均已实测
 - **P6-5+ ✅ 图片解码落进浏览器**：`img.rs` 自解 BMP/PNG（RGBA 反滤波 + 复用 inflate），内置星芒徽标真画出来；表格、`https`、历史栈仍是下一刀

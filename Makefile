@@ -218,7 +218,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\npkg list\npkg info git\ntz\nwifi\nweb\nweb scroll down\ndhcp\ndns example.com\nwhoami\nusers\npasswd\nsu root\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
+	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\npkg list\npkg info git\ntz\nwifi\nwifi scan\nweb\nweb scroll down\ndhcp\ndns example.com\nwhoami\nusers\npasswd\nsu root\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -265,8 +265,11 @@ test: image
 	    echo "[TEST] PASS 包管理器索引（80 包 / 10 类 / git 2.44.0）" || (echo "[TEST] FAIL 包索引" && exit 1)
 	@grep -q "Asia/Shanghai (CST)" $(B)/test.log && grep -q "UTC 偏移  : +8" $(B)/test.log && \
 	    echo "[TEST] PASS 时区固定上海（UTC+8，无夏令时）" || (echo "[TEST] FAIL 时区" && exit 1)
-	@grep -q "WIFI-1 未开工" $(B)/test.log && \
-	    echo "[TEST] PASS 无线网现状说明（不假装有驱动）" || (echo "[TEST] FAIL wifi" && exit 1)
+	@grep -q "没有 SDHCI 控制器" $(B)/test.log && grep -q "0 个 AP" $(B)/test.log && \
+	    echo "[TEST] PASS 无线骨架（SDHCI 探测如实报无控制器 / 不编造热点）" || (echo "[TEST] FAIL wifi" && exit 1)
+	# 23x 字节序：AOSP 表 AA|op CC|BB（unit2 低字节 vB、高字节 vC）；数组求和 30 与 2096128 是反证
+	@grep -q "\[DEX\] 30" $(B)/test.log && grep -q "\[DEX\] 2096128" $(B)/test.log && \
+	    echo "[TEST] PASS 23x 字节序（B 低 C 高，数组 30 / 长度 2096128）" || (echo "[TEST] FAIL 23x" && exit 1)
 	@grep -q "页帧池 778 / 32768 页已用" $(B)/test.log && \
 	    echo "[TEST] PASS 页帧分配器" || (echo "[TEST] FAIL 页帧计数不对" && exit 1)
 	@grep -q "已打开内置起始页" $(B)/test.log && grep -q "行数: 30" $(B)/test.log && \

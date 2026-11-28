@@ -609,6 +609,42 @@ fn self_ip() -> [u8; 4] {
 /// 发一个 GET，把响应整段收进 CLI_BUF。返回响应字节数，负数表示失败。
 ///
 /// -1 网络不可用　-2 ARP 拿不到 MAC　-3 连不上（超时/RST）　-4 收满缓冲
+/// 解析 `host[:port][/path]` 并取一次 GET，返回 (body 起点, body 长度)；负数是错误码
+pub fn fetch_url(url: &str, timeout_ms: u64) -> Result<(usize, usize), i32> {
+    let a = if let Some(p) = url.find("://") { &url[p + 3..] } else { url };
+    let mut host = a;
+    let mut port: u16 = 80;
+    let mut path = "/";
+    if let Some(p) = a.find('/') {
+        host = &a[..p];
+        path = &a[p..];
+    }
+    if let Some(p) = host.find(':') {
+        port = host[p + 1..].parse().unwrap_or(80);
+        host = &host[..p];
+    }
+    let ip = match parse_ip(host) {
+        Some(x) => x,
+        None => match resolve(host, 900) {
+            Some(x) => x,
+            None => return Err(-5),
+        },
+    };
+    let r = http_get(ip, port, path, timeout_ms);
+    if r < 0 {
+        return Err(r);
+    }
+    let raw = cli_data();
+    let mut i = 0usize;
+    while i + 3 < raw.len() {
+        if raw[i] == b'\r' && raw[i + 1] == b'\n' && raw[i + 2] == b'\r' && raw[i + 3] == b'\n' {
+            return Ok((i + 4, raw.len() - (i + 4)));
+        }
+        i += 1;
+    }
+    Err(-6)
+}
+
 pub fn http_get(ip: [u8; 4], port: u16, path: &str, timeout_ms: u64) -> i32 {
     if !available() {
         return -1;

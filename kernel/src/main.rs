@@ -38,6 +38,8 @@ pub static XCE_DEMO: &[u8] = include_bytes!("../../assets/xce/demo.xce");
 /// 更新包样例（AUP）：`update check` 默认校验这一份
 pub static UPD_DEMO: &[u8] = include_bytes!("../../assets/upd/update.aup");
 mod net;
+mod sdhci;
+mod wifi;
 mod pkgidx;
 mod html;
 mod auth;

@@ -637,13 +637,15 @@ fn cmd_help() {
     println!("  sched     任务调度统计");
     println!("  gfx       重绘图形界面（ramfb / VNC 远程可见）");
     println!("  net       网络状态（virtio-net / IP / DNS / 收发计数）");
+    println!("  wifi     无线状态（后端 / SDHCI / SDIO），wifi scan 扫 AP");
+    println!("  fetch    从网络取一个文件落到 AsterFS，例: fetch 10.0.2.2:8088/a.txt a.txt");
     println!("  dhcp      DHCP 自动取地址（DISCOVER→OFFER→REQUEST→ACK）");
     println!("  dns <名>  查 A 记录，例: dns example.com");
     println!("  wifi      无线网现状（无 802.11 硬件，WIFI-1 未开工）");
     println!("  web       内置浏览器：web / web home / web <ip:port/path> / web scroll up|down|top");
     println!("  date      当前时间（固定 Asia/Shanghai）");
     println!("  tz        时区详情（UTC+8 / 无夏令时）");
-    println!("  pkg       包管理：list [分类] | search <词> | info <名> | install <名> | remove <名>");
+    println!("  pkg       包管理：list [分类] | search <词> | info <名> | install <名> [url] | remove <名>");
     println!("  http      HTTP 客户端：http get <ip> <port> <path> [保存名]");
     println!("  perf      绘制耗时（整桌 / 壁纸 / 侧栏 / 窗口 / 帧）");
     println!("  uptime    运行时长");
@@ -901,12 +903,29 @@ pub fn run() -> ! {
                     }
                 }
             },
-            "wifi" => {
-                println!("  无线      : 硬件层没有 802.11 适配器，WIFI-1 未开工");
-                println!("  QEMU virt : 没有 SDIO / PCIe 无线网卡可枚举");
-                println!("  树莓派    : BCM43438 挂在 SDIO 上，需要先做 SDHCI(EMMC) 驱动");
-                println!("  现实路径  : SDHCI → SDIO 枚举 → 固件上传 → WPA2 握手（四步，都是硬骨头）");
-                println!("  眼下替代  : virtio-net 当有线用，QEMU 的 -netdev user 自带上游 NAT");
+            "wifi" | "wifi scan" | "wifi status" => {
+                let st = crate::wifi::probe();
+                println!("  后端      : {}", crate::wifi::backend_name(st.backend));
+                println!("  SDHCI     : {}", crate::sdhci::status_text());
+                println!("  SDIO 卡   : {}", if st.sdio_card { "CMD5 有应答" } else { "无应答（没有卡/没有控制器）" });
+                println!("  进度      : {}", crate::wifi::phase_text(crate::wifi::phase()));
+                if line == "wifi scan" {
+                    let mut buf: [(&str, i16); 8] = [("", 0); 8];
+                    let n = crate::wifi::scan(&mut buf);
+                    if n == 0 {
+                        println!("  扫描      : 0 个 AP（没有驱动，不编造热点）");
+                    } else {
+                        for i in 0..n {
+                            println!("  AP        : {:<16} {} dBm", buf[i].0, buf[i].1);
+                        }
+                    }
+                }
+                if crate::board::ACTIVE.emmc.is_none() {
+                    println!("  QEMU virt : 没有 EMMC / SDIO，无线只能等真机验证");
+                    println!("  眼下替代  : virtio-net 当有线用，-netdev user 自带上游 NAT");
+                } else {
+                    println!("  真机路径  : SDHCI 复位 → CMD5 → CMD3/CMD7 → 读 CIS → 固件 → WPA2");
+                }
             },
             l if l == "tz" => {
                 println!("  时区      : {}", crate::rtc::TZ_NAME);
@@ -1210,6 +1229,52 @@ pub fn run() -> ! {
                     println!("  没拿到租约（slirp 没回？确认 -netdev user,id=n0 已挂）");
                 }
             }
+            l if l.starts_with("fetch ") => {
+                // fetch <host[:port]/path> <磁盘上的名字>  —— 真下载 + 落 AsterFS
+                let rest = l[6..].trim();
+                let (url, name) = match rest.split_once(' ') {
+                    Some(x) => (x.0.trim(), x.1.trim()),
+                    None => ("", ""),
+                };
+                if url.is_empty() || name.is_empty() {
+                    println!("  用法: fetch 10.0.2.2:8088/pkg-git.ase pkg-git.ase");
+                    continue;
+                }
+                if crate::disk::probe().is_none() {
+                    println!("  没有 AsterFS（先 fmt + mkfs）");
+                    continue;
+                }
+                let t0 = crate::timer::now_ms();
+                match crate::net::fetch_url(url, 4000) {
+                    Ok((off, len)) => {
+                        let body = &crate::net::cli_data()[off..off + len];
+                        match crate::vfs::open(name, true) {
+                            Ok(fd) => {
+                                let n = crate::vfs::write(fd, body);
+                                crate::vfs::close(fd);
+                                println!(
+                                    "  下载 {} → {}（{} 字节，{} ms）",
+                                    url, name, n,
+                                    crate::timer::now_ms().saturating_sub(t0)
+                                );
+                            }
+                            Err(e) => println!("  写 {} 失败（{}）", name, e),
+                        }
+                    }
+                    Err(code) => {
+                        let why = match code {
+                            -1 => "网络不可用",
+                            -2 => "ARP 拿不到 MAC",
+                            -3 => "连不上",
+                            -4 => "超过 16 KiB",
+                            -5 => "DNS 解析失败",
+                            -6 => "响应没有头体分隔",
+                            _ => "未知错误",
+                        };
+                        println!("  下载失败: {}（{}）", why, code);
+                    }
+                }
+            }
             l if l.starts_with("dns ") => {
                 let name = l[4..].trim();
                 if name.is_empty() {
@@ -1497,7 +1562,35 @@ fn cmd_pkg(a: &str) {
                 println!("  {} 已经装好了", name);
                 return;
             }
-            // 真的写盘：AsterFS 单文件 4 KiB，144 字节的包放得下
+            // pkg install <名> <url>：给了 URL 就真的从网络取包体（PKG-3）
+            if let Some(url) = it.next() {
+                if crate::disk::probe().is_none() {
+                    println!("  没有 AsterFS（先 fmt + mkfs）");
+                    return;
+                }
+                let t0 = crate::timer::now_ms();
+                match crate::net::fetch_url(url, 5000) {
+                    Ok((off, len)) => {
+                        let body = &crate::net::cli_data()[off..off + len];
+                        match crate::vfs::open(PKGS[idx].path, true) {
+                            Ok(fd) => {
+                                let n = crate::vfs::write(fd, body);
+                                crate::vfs::close(fd);
+                                unsafe { PKG_ON[idx] = true };
+                                println!(
+                                    "  远程安装 {} → {}（{} 字节，{} ms）",
+                                    name, PKGS[idx].path, n,
+                                    crate::timer::now_ms().saturating_sub(t0)
+                                );
+                            }
+                            Err(e) => println!("  写 {} 失败（{}）", PKGS[idx].path, e),
+                        }
+                    }
+                    Err(c) => println!("  下载失败（错误码 {}）", c),
+                }
+                return;
+            }
+            // 本地索引里的 144 字节占位包
             if !crate::blk::available() {
                 println!("  没有 virtio-blk（先挂盘再 pkg install）");
                 return;
