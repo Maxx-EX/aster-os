@@ -100,6 +100,8 @@
 make run-gfx     # VNC 画面 :5901，串口终端 :4444（键盘此时还不可用，需带 virtio-keyboard）
 make run-net     # 带网卡 + 键盘 + 桌面：浏览器开 http://127.0.0.1:18088/
 make test-net    # 端到端断言：宿主 curl 必须拿到 200
+make img         # 生成 8 MiB 磁盘镜像（AsterDisk + AsterFS，用户程序打进去）
+make test-fs     # 从盘加载：load hello 真的读盘、EL0 跑起来、跑完回 shell
 make shot        # 掉一张 PNG 到 build/screen.png
 ```
 

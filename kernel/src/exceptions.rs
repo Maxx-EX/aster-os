@@ -370,8 +370,13 @@ pub extern "C" fn svc_handler(esr: u64, frame: *mut u64) -> u64 {
                     -14
                 } else {
                     let s = core::slice::from_raw_parts(a1 as *const u8, a2 as usize);
+                    // 用户程序写 stdout：串口一份、桌面终端窗口一份。
+                    // 只走 putc 的话，界面上跑 `load` 会"什么都没打印"，其实全到串口去了。
                     for &b in s {
                         crate::uart::putc(b);
+                    }
+                    if let Ok(t) = core::str::from_utf8(s) {
+                        crate::term::write(t);
                     }
                     a2 as i64
                 }

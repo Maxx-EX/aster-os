@@ -8,6 +8,31 @@ use crate::{exceptions, mmu, sched, timer};
 
 include!(concat!(env!("OUT_DIR"), "/user_image.rs"));
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// 用户程序优先从 AsterFS 读（`tools/mkafs.py` 把 build/user/*.bin 打进镜像根目录），
+/// 盘不在/文件没了才退回内核里那份内嵌副本 —— 这样 QEMU 不带盘也照样能跑测试。
+static FROM_DISK: AtomicBool = AtomicBool::new(false);
+
+struct PBuf(core::cell::UnsafeCell<[u8; 4096]>);
+unsafe impl Sync for PBuf {}
+static PBUF: PBuf = PBuf(core::cell::UnsafeCell::new([0u8; 4096]));
+
+fn pick(disk: &str, emb: &'static [u8], emb_size: usize) -> (&'static [u8], usize) {
+    let buf = unsafe { &mut *PBUF.0.get() };
+    if emb_size != 0 {
+        if let Ok(n) = crate::afs::read_file(disk, buf) {
+            if n > 0 {
+                FROM_DISK.store(true, Ordering::Relaxed);
+                crate::println!("[TASK] 程序来源：磁盘 {}（{} 字节）", disk, n);
+                return (&buf[..n], n);
+            }
+        }
+        crate::println!("[TASK] 程序来源：内核内嵌 {}（盘上没有）", disk);
+    }
+    (emb, emb_size)
+}
+
 /// 新建地址空间并把程序装进去
 fn make_space(bin: &[u8], size: usize) -> Result<mmu::Space, &'static str> {
     if size == 0 {
@@ -21,8 +46,8 @@ fn make_space(bin: &[u8], size: usize) -> Result<mmu::Space, &'static str> {
 /// 两个任务 + 定时器抢占
 pub fn run_two() -> Result<u64, &'static str> {
     sched::reset();
-    let sa = make_space(USER_HELLO, USER_HELLO_SIZE)?;
-    let sb = make_space(USER_HELLO, USER_HELLO_SIZE)?;
+    let sa = { let (b, n) = pick("hello", USER_HELLO, USER_HELLO_SIZE); make_space(b, n)? };
+    let sb = { let (b, n) = pick("hello", USER_HELLO, USER_HELLO_SIZE); make_space(b, n)? };
 
     if sched::spawn(sa).is_none() || sched::spawn(sb).is_none() {
         return Err("任务表已满");
@@ -50,8 +75,8 @@ pub fn run_two() -> Result<u64, &'static str> {
 /// 如果 B 的钱印落在 A 的 BUSY start / BUSY end 之间，说明抢占真的在发生。
 pub fn run_preempt_test() -> Result<u64, &'static str> {
     sched::reset();
-    let sa = make_space(USER_BUSY, USER_BUSY_SIZE)?;
-    let sb = make_space(USER_HELLO, USER_HELLO_SIZE)?;
+    let sa = { let (b, n) = pick("busy", USER_BUSY, USER_BUSY_SIZE); make_space(b, n)? };
+    let sb = { let (b, n) = pick("hello", USER_HELLO, USER_HELLO_SIZE); make_space(b, n)? };
 
     if sched::spawn(sa).is_none() || sched::spawn(sb).is_none() {
         return Err("任务表已满");
@@ -66,7 +91,7 @@ pub fn run_preempt_test() -> Result<u64, &'static str> {
 /// 单任务越权演示
 pub fn run_fault() -> Result<u64, &'static str> {
     sched::reset();
-    let sa = make_space(USER_FAULT, USER_FAULT_SIZE)?;
+    let sa = { let (b, n) = pick("fault", USER_FAULT, USER_FAULT_SIZE); make_space(b, n)? };
     if sched::spawn(sa).is_none() {
         return Err("任务表已满");
     }
@@ -81,8 +106,8 @@ pub fn run_fault() -> Result<u64, &'static str> {
 /// 地址空间隔离验证：两个任务写同一个虚拟地址，看会不会互相覆盖
 pub fn run_iso() -> Result<u64, &'static str> {
     sched::reset();
-    let sa = make_space(USER_ISO, USER_ISO_SIZE)?;
-    let sb = make_space(USER_ISO, USER_ISO_SIZE)?;
+    let sa = { let (b, n) = pick("iso", USER_ISO, USER_ISO_SIZE); make_space(b, n)? };
+    let sb = { let (b, n) = pick("iso", USER_ISO, USER_ISO_SIZE); make_space(b, n)? };
     if sched::spawn(sa).is_none() || sched::spawn(sb).is_none() {
         return Err("任务表已满");
     }
@@ -97,8 +122,8 @@ pub fn run_iso() -> Result<u64, &'static str> {
 /// 浮点上下文验证：两个任务各持一个 d0，被抢占后看是否仍属于自己
 pub fn run_fp() -> Result<u64, &'static str> {
     sched::reset();
-    let sa = make_space(USER_FP, USER_FP_SIZE)?;
-    let sb = make_space(USER_FP, USER_FP_SIZE)?;
+    let sa = { let (b, n) = pick("fp", USER_FP, USER_FP_SIZE); make_space(b, n)? };
+    let sb = { let (b, n) = pick("fp", USER_FP, USER_FP_SIZE); make_space(b, n)? };
     if sched::spawn(sa).is_none() || sched::spawn(sb).is_none() {
         return Err("任务表已满");
     }
@@ -113,7 +138,7 @@ pub fn run_fp() -> Result<u64, &'static str> {
 /// W^X 验证：从 EL0 写自己的代码页，应当被页表权限拦下
 pub fn run_wx() -> Result<u64, &'static str> {
     sched::reset();
-    let sa = make_space(USER_WX, USER_WX_SIZE)?;
+    let sa = { let (b, n) = pick("wx", USER_WX, USER_WX_SIZE); make_space(b, n)? };
     if sched::spawn(sa).is_none() {
         return Err("任务表已满");
     }
@@ -128,8 +153,8 @@ pub fn run_wx() -> Result<u64, &'static str> {
 /// sched_yield 验证：两个任务每打印一行就让出，输出应严格交替
 pub fn run_yield() -> Result<u64, &'static str> {
     sched::reset();
-    let sa = make_space(USER_YIELD, USER_YIELD_SIZE)?;
-    let sb = make_space(USER_YIELD, USER_YIELD_SIZE)?;
+    let sa = { let (b, n) = pick("yield", USER_YIELD, USER_YIELD_SIZE); make_space(b, n)? };
+    let sb = { let (b, n) = pick("yield", USER_YIELD, USER_YIELD_SIZE); make_space(b, n)? };
     if sched::spawn(sa).is_none() || sched::spawn(sb).is_none() {
         return Err("任务表已满");
     }
@@ -143,7 +168,7 @@ pub fn run_yield() -> Result<u64, &'static str> {
 /// 单任务：走 fd 系统调用读文件，验证 VFS 的 open/read/close
 pub fn run_file() -> Result<u64, &'static str> {
     sched::reset();
-    let s = make_space(USER_FILE, USER_FILE_SIZE)?;
+    let s = { let (b, n) = pick("file", USER_FILE, USER_FILE_SIZE); make_space(b, n)? };
     if sched::spawn(s).is_none() {
         return Err("任务表已满");
     }
@@ -154,6 +179,28 @@ pub fn run_file() -> Result<u64, &'static str> {
     );
     timer::arm();
     mmu::activate(&s);
+    let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
+    Ok(code)
+}
+
+/// 从内存里的用户程序镜像直接起一个任务（`load` 用它把盘上的 .bin 跑起来）。
+/// 与 run_xxx 的区别只有一个：字节从文件系统来，不再来自 include_bytes!。
+pub fn run_from(bytes: &[u8]) -> Result<u64, &'static str> {
+    if bytes.is_empty() {
+        return Err("文件是空的");
+    }
+    sched::reset();
+    let sp = make_space(bytes, bytes.len())?;
+    if sched::spawn(sp).is_none() {
+        return Err("任务表已满");
+    }
+    crate::println!(
+        "[LOAD] {} 字节装入新地址空间（code {:#x}），切 EL0",
+        bytes.len(),
+        mmu::user_va::CODE
+    );
+    timer::arm();
+    mmu::activate(&sp);
     let code = exceptions::enter_user_state(mmu::user_va::CODE, mmu::user_va::STACK_TOP);
     Ok(code)
 }

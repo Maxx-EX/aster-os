@@ -153,10 +153,14 @@ run: image
 	$(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF)
 
 # 图形 + 远程：画面走 VNC（默认 5901），命令行走 TCP（默认 4444）
-img:
+# 磁盘镜像：AsterDisk 头 + AsterFS 根目录，顺手把用户程序打进根目录，
+# 开机后 `load hello` 直接读盘装载（不再靠内核里的 include_bytes!）
+img: $(USER_BIN) $(FAULT_BIN) $(BUSY_BIN) $(ISO_BIN) $(FP_BIN) $(WX_BIN) $(YL_BIN) $(FILE_BIN)
 	@mkdir -p build
-	@dd if=/dev/zero of=$(IMG) bs=1M count=$(IMG_MB) status=none
-	@echo "[IMG] $(IMG) $(IMG_MB) MiB"
+	@python3 tools/mkafs.py $(IMG) $(IMG_MB) \
+	    hello=$(USER_BIN) fault=$(FAULT_BIN) busy=$(BUSY_BIN) \
+	    iso=$(ISO_BIN) fp=$(FP_BIN) wx=$(WX_BIN) yield=$(YL_BIN) \
+	    note=docs/asterfs.md
 
 run-disk: image img
 	@echo "  磁盘: $(IMG) ($(IMG_MB) MiB)   控制台: nc 0.0.0.0 4455"
@@ -187,6 +191,22 @@ run-net: image
 	    -device ramfb -display vnc=0.0.0.0:1 \
 	    -serial tcp:0.0.0.0:4448,server,nowait \
 	    -monitor unix:/tmp/aster-mon.sock,server,nowait -kernel $(BOOT_ELF)
+
+# 从盘加载冒烟：带 virtio-blk 起内核，盘里是 mkafs 打进去的用户程序，
+# `load hello` 必须真的从 AsterFS 读出字节并在 EL0 跑完回到 shell
+test-fs: image img
+	@printf '\nls\ndf\nload hello\nload nope\nrun\nhalt\n' | timeout 45 \
+	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic \
+	    -global virtio-mmio.force-legacy=false \
+	    -drive if=none,file=$(IMG),format=raw,id=d0,file.locking=off,cache=writethrough \
+	    -device virtio-blk-device,drive=d0 -kernel $(BOOT_ELF) > $(B)/test-fs.log 2>&1 || true
+	@grep -qF "[BLK] virtio-blk 已就绪" $(B)/test-fs.log && echo "[TEST] PASS virtio-blk 上线" || (echo "[TEST] FAIL 磁盘没认到" && exit 1)
+	@grep -qF "142" $(B)/test-fs.log && echo "[TEST] PASS 根目录里有 hello" || (echo "[TEST] FAIL 目录空" && exit 1)
+	@grep -qF "[LOAD] 从盘读入 hello" $(B)/test-fs.log && echo "[TEST] PASS load 真的读了盘" || (echo "[TEST] FAIL 没走文件系统" && exit 1)
+	@grep -qF "TASK 1" $(B)/test-fs.log && echo "[TEST] PASS 盘上程序在 EL0 跑起来了" || (echo "[TEST] FAIL 程序没跑" && exit 1)
+	@grep -qF "[LOAD] 任务结束" $(B)/test-fs.log && echo "[TEST] PASS 跑完回到 shell" || (echo "[TEST] FAIL 没回 shell" && exit 1)
+	@grep -q "nope" $(B)/test-fs.log && echo "[TEST] PASS 不存在的名字有提示" || (echo "[TEST] FAIL 无提示" && exit 1)
+	@grep -qF "[TASK] 程序来源：磁盘 hello" $(B)/test-fs.log && echo "[TEST] PASS run 也走磁盘（不再吃内嵌）" || (echo "[TEST] FAIL 仍在用内嵌" && exit 1)
 
 # 网络端到端冒烟：起 QEMU，等内核起 HTTP，宿主 curl 应拿到 200 和页面
 test-net: image

@@ -127,8 +127,8 @@
 | AF-4 | 块缓存 | 32 个 4 KiB 缓冲 + LRU，读命中直接返回，写标脏，`sync` 刷盘。内存从页帧池要（`alloc_pages`） |
 | AF-5 🔶 | VFS 薄层 | **已做**：内核一份 fd 表 16 槽（0/1/2 留标准流），每 fd 4 KiB 页缓冲，路径逐段解析（24 字节段名）。**待做**：每任务一份、`readdir`、`lseek`、>4 KiB 长文件 |
 | AF-6 🔶 | syscall 接上 | **已做**：56 openat（O_WRONLY/O_CREAT）、57 close、63 read，64 write 扩到 fd≥3。**待做**：62 lseek、80 fstat |
-| AF-7 | shell 命令 | `ls / cat / load / sync / df`。`load <名字>` 把盘上程序读进新地址空间并跑起来 |
-| AF-8 | 用户程序脱离内嵌 | 删掉 `build.rs` 里的 `include_bytes!`，六个测试程序改为 `mkdisk.py` 打包进镜像；`iso / fp / wx / yield` 全部改成从盘加载，**这一条是"从盘加载"的真正验收点** |
+| AF-7 ✅ | shell 命令 | `ls / cat / load / sync / df` 全部到位。`load <名字>` 把盘上程序读进新地址空间并跑起来，跑完自动回 shell |
+| AF-8 ✅ | 用户程序脱离内嵌 | 新增 `tools/mkafs.py`：主机侧直接写 AsterDisk 头 + AsterFS 根目录，`build/user/*.bin` 由 `make img` 打进镜像。`task::pick()` 先读盘、盘上没有才退回内嵌副本，`run / runp / runf / iso / fp / wx / yield / load` 全部走磁盘；串口会打印「程序来源：磁盘 xxx」。`make test-fs` 7 项断言把这条链路钉住 |
 
 ### B. 引导器从盘加载内核
 
@@ -403,3 +403,5 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **CRASH-1 ✅ 崩溃屏**：`kernel/src/crash.rs` 收口两条致命路径——Rust `panic_handler` 与 `exceptions::exception_report`（EL1 同步异常）。串口按 `{:#018x}` 打全寄存器再停机；有 framebuffer 时画一张 1024x768 的 `KERNEL PANIC` 屏：定宽寄存器区（SP/LR/ESR/FAR/SPSR/TTBR0）、`文件:行  原因` 的 NOTE 行、底部"串口已留下完整现场 · 复位后可再次开机"。用户态任务崩了仍走原来的"杀任务、内核继续"。`panic` 自检命令可在现场复现；`make test` 新增 4 条断言（统一上报 / 位置带出 / 寄存器完整 / ramfb 上真的画出 1024x768）
 
 - **UI-12 ✅ 桌面秩序与手感**：浏览窗改成默认收起（`WINS[3].open=false`），开局桌面只剩终端，点 dock「网页」或侧栏「浏览」才开；`dock_hit` 跳过 `win_state(i)==0` 的格子，关掉的窗口不再留隐形热区；侧栏第 4 个图标从 info 圆点换成地球（`tools/genfont.py` 加 globe 分支，前三个图标字节不变）；浏览器首开时 `url_str()` 为空就自动 `open_home()`，地址栏不再空白；系统窗 380×330、网络窗 372×216，body 首行提到 `TITLE_H+16`、行距 24，底部行不再被裁；滚动条换成 4px 淡轨 + 6px 半透明滑块（`rounded_rect_alpha`，ACCENT alpha=120）；删掉 dock 那条与焦点无关的固定强调线；`cursor::invalidate()` 先 `restore()` 再标不可见，拖动时一串光标残影消失；浏览器链接改成"按下记目标、松手位移 <12px 才跳"，压着链接也能拖滚动；地址栏左侧加「首页」按钮，点一下回内置起始页。`make test` 50 PASS、`make test-gfx` 3 PASS
+
+- **FS-1 ✅ 从盘加载用户程序闭环**：`tools/mkafs.py` 在主机上按 `kernel/src/disk.rs` / `afs.rs` 的布局写镜像（磁盘头 ADSK + 分区表 64 B 项 + 4 KiB 块 AFS1 超级块 + inode 位图/块位图/inode 表/根目录项），`build/user/*.bin` 一次打进去；`make img` 自动调用。内核侧 `load <名字>` 读文件 → `task::run_from()` 装新地址空间 → 切 EL0 → 任务 exit 自动回 shell；`task::pick()` 让原有 `run/runp/runf/iso/fp/wx/yield` 也优先吃盘，盘不在才用内嵌副本（树莓派无盘路径不断）。新增 `make test-fs`：virtio-blk 上线、根目录有 hello、`load` 真读盘、EL0 跑起来、跑完回 shell、错名字有提示、`run` 也走磁盘 —— 7 项全 PASS

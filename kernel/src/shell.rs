@@ -599,6 +599,30 @@ fn cmd_cache() {
     println!("  命中 {}/{}  = {}%   写回 {} 块", h, total, pct, crate::cache::writes());
 }
 
+/// `load <名字>`：从 AsterFS 读一个用户程序镜像，装进新地址空间并切 EL0。
+/// 这条命令是"用户程序脱离内嵌"的验收点 —— 字节确实来自磁盘。
+fn cmd_load(a: &str) {
+    struct B(core::cell::UnsafeCell<[u8; 4096]>);
+    unsafe impl Sync for B {}
+    static BUF: B = B(core::cell::UnsafeCell::new([0u8; 4096]));
+
+    let name = if a.is_empty() { "hello" } else { a };
+    let buf = unsafe { &mut *BUF.0.get() };
+    let n = match crate::afs::read_file(name, buf) {
+        Ok(n) => n,
+        Err(e) => {
+            println!("  {} → {}", name, e);
+            println!("  盘上有：{}", if crate::blk::available() { "（ls 看一下）" } else { "没有磁盘，先 ip 一条 -device virtio-blk-device / make run-disk" });
+            return;
+        }
+    };
+    println!("[LOAD] 从盘读入 {}（{} 字节）", name, n);
+    match crate::task::run_from(&buf[..n]) {
+        Ok(code) => println!("[LOAD] 任务结束，退出码 {}", code),
+        Err(e) => println!("[LOAD] 装载失败：{}", e),
+    }
+}
+
 fn cmd_sync() {
     let n = crate::afs::sync();
     println!("  写回 {} 个脏块", n);
@@ -1173,6 +1197,8 @@ pub fn run() -> ! {
                 Ok(code) => println!("[VFS] 任务结束，退出码 {}", code),
                 Err(e) => println!("[TASK] 无法运行: {}", e),
             },
+            "load" => cmd_load("hello"),
+            l if l.starts_with("load ") => cmd_load(l[5..].trim()),
             "sync" => cmd_sync(),
             "info" => cmd_info(),
             "ex3" => cmd_ex3(),
