@@ -7,7 +7,20 @@
 const RTC_BASE: usize = 0x0901_0000;
 const RTC_DR: usize = 0x00;
 const RTC_CR: usize = 0x0c;
-const CST_OFFSET: u64 = 8 * 3600;
+/// 固定上海时区（不跟随宿主机、不看 QEMU 的 -rtc 参数）
+pub const TZ_NAME: &str = "Asia/Shanghai (CST)";
+pub const TZ_OFFSET_HOURS: u32 = 8;
+const CST_OFFSET: u64 = (TZ_OFFSET_HOURS as u64) * 3600;
+
+pub fn offset_hours() -> u32 {
+    TZ_OFFSET_HOURS
+}
+
+/// 顶栏日期：MM-DD
+pub fn md() -> Option<(u32, u32)> {
+    let t = local()?;
+    Some((t.1, t.2))
+}
 
 pub fn read_utc() -> Option<u64> {
     unsafe {

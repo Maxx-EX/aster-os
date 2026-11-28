@@ -141,9 +141,11 @@ def icon_mask(name):
 
 def main():
     term_path = pick(TERM_FONT)
-    term_font = ImageFont.truetype(term_path, 13)
+    # 13px 时 JetBrains Mono 的双层 g 在 8x16 里糊成一个 9；降到 12px 让
+    # g/p/q/y 的下伸环有足够像素，字形才认得出。
+    term_font = ImageFont.truetype(term_path, 12)
     ascent = term_font.getmetrics()[0]
-    baseline = min(ASCII_H - 3, max(ascent, 11))
+    baseline = min(ASCII_H - 4, max(ascent, 10))
 
     ui_path = pick(UI_FONT)
     ui_font = ImageFont.truetype(ui_path, 13)
@@ -206,7 +208,7 @@ def main():
     ic.append("];")
     (ROOT / "kernel/src/icons.rs").write_text("\n".join(ic) + "\n", encoding="utf-8")
 
-    print(f"font.rs   ASCII 95（{term_path.split('/')[-1]} 13px） + 汉字 {len(cjk)}（Noto SC Medium）")
+    print(f"font.rs   ASCII 95（{term_path.split('/')[-1]} 12px） + 汉字 {len(cjk)}（Noto SC Medium）")
     print("font_ui.rs ASCII 95（Inter 13px / 10x16）")
     print(f"icons.rs  {len(ICONS)} 个 32x32 线性图标")
 

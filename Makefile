@@ -173,6 +173,7 @@ run-gfx: image
 	@echo "  终端: TCP  nc <本机IP> 4444"
 	$(QEMU) -M virt -cpu cortex-a72 -m 512M -global virtio-mmio.force-legacy=false \
 	    -device virtio-gpu-device \
+	    -netdev user,id=n0,hostfwd=tcp::8088-:80 -device virtio-net-device,netdev=n0 \
 	    -device virtio-keyboard-device -device virtio-mouse-device \
 	    -display vnc=0.0.0.0:1 -serial tcp:0.0.0.0:4444,server,nowait \
 	    -monitor unix:/tmp/aster-mon.sock,server,nowait -kernel $(BOOT_ELF)
@@ -217,7 +218,7 @@ run-sock: image
 
 # 非交互冒烟测试：跳过 3 秒菜单，进内核跑命令，逐项断言
 test: image
-	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
+	@printf '\nhelp\nex3\ndl\nrun\nrunp\nrunf\nsched\nhash\niso\napk2 dex\ndex hello\ndex run\ndex big\ndex str\ndex poly\nxce\nxce run\nupdate check\npkg list\npkg info git\ntz\nwifi\napp start\napp step\napp step\napp stop\nhalt\n' | timeout 60 \
 	    $(QEMU) -M virt -cpu cortex-a72 -m 512M -nographic -kernel $(BOOT_ELF) \
 	    | tee $(B)/test.log
 	@grep -q "Aster 内核已接管" $(B)/test.log && echo "[TEST] PASS 内核接管" || (echo "[TEST] FAIL 内核未接管" && exit 1)
@@ -260,6 +261,12 @@ test: image
 	    grep -q "FAR     = 0x0000000044400" $(B)/test-wx.log && \
 	    echo "[TEST] PASS W^X（EL0 写代码页被拦）" || (echo "[TEST] FAIL W^X 未生效" && exit 1)
 	# 页帧分配器：两个任务各 5 页 + 内核页表 10 页 + 双缓冲 768 页（3 MiB 后台帧缓冲）
+	@grep -q "Aster 包索引" $(B)/test.log && grep -q "3.12.4" $(B)/test.log && \
+	    echo "[TEST] PASS 包管理器索引（python3/gcc/git/gh）" || (echo "[TEST] FAIL 包索引" && exit 1)
+	@grep -q "Asia/Shanghai (CST)" $(B)/test.log && grep -q "UTC 偏移  : +8" $(B)/test.log && \
+	    echo "[TEST] PASS 时区固定上海（UTC+8，无夏令时）" || (echo "[TEST] FAIL 时区" && exit 1)
+	@grep -q "WIFI-1 未开工" $(B)/test.log && \
+	    echo "[TEST] PASS 无线网现状说明（不假装有驱动）" || (echo "[TEST] FAIL wifi" && exit 1)
 	@grep -q "页帧池 778 / 32768 页已用" $(B)/test.log && \
 	    echo "[TEST] PASS 页帧分配器" || (echo "[TEST] FAIL 页帧计数不对" && exit 1)
 

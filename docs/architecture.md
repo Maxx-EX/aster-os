@@ -2320,3 +2320,118 @@ let draw_base = alloc_back(FB_PHYS);   // BACK_PA / REAL_PA / GPU_MODE 三件套
 - 最小化只有 dock 一格位置，没有缩略图/预览。
 - dock 宽度写死 360，三格固定，加第四个窗口就得重排。
 - 双缓冲只有一份后台缓冲，没有"前台/后台交换"，也就没有帧率上限控制：画多快推多快。
+
+## §57 有线的真与无线的实（NET-2 / TZ-1 / PKG-1b / PERF-2）
+
+### 57.1 网络：从"未找到设备"到 HTTP 200
+
+上一轮的串口里一直有 `[NET] 未找到 virtio-net 设备`，原因不在驱动而在**命令行没带设备**。加上
+
+```
+-netdev user,id=n0,hostfwd=tcp::8088-:80 -device virtio-net-device,netdev=n0
+```
+
+之后 `net` 立刻打印 `virtio-net 已就绪 MAC 52:54:00:12:34:56 IP 10.0.2.15/24 GW 10.0.2.2 HTTP :80`。宿主侧 `urllib` 请求 `http://127.0.0.1:8088/` 拿到 **HTTP 200**，正文是内核里手写的 HTML（`<title>Aster · 星芒</title>`），不是转发、不是回显，是 `net.rs` 自己的 TCP 状态机收 SYN、回 SYN-ACK、收 GET、拼响应头。
+
+两个坑值得记：
+
+1. **8080 端口被宿主上的 caddy 占着**，hostfwd 绑不上会静默失败，换 8088。
+2. 设备名是 `virtio-net-device`（MMIO 版），不是 `virtio-net-pci`；`-global virtio-mmio.force-legacy=false` 必须和它一起给，否则 legacy 队列寄存器偏移对不上，收包全零。
+
+现在的 IP 是**写死**的 `10.0.2.15/24`、网关 `10.0.2.2` —— 这是 QEMU user 模式的固定约定，正好省掉 DHCP。真要上真机或桥接网络，DHCP 客户端是下一步。
+
+### 57.2 性能：把最贵的那一步按需化
+
+`perf` 原来报 `整桌 38 ms / 壁纸 3 / 侧栏 0 / 窗口 38`。窗口 38 ms 几乎全在投影：每个窗口四层大矩形做 alpha 混合，1024×768 上就是几百万次读写。
+
+做法不是"把阴影做便宜"，而是**把阴影变得不常画**：
+
+- `SHADOW_UNTIL` 记一个绝对毫秒时间戳，`ask_shadow()` 把它推到 `now + 150ms`。
+- `draw_desktop` 末尾原来是 `draw_all()`（永远带阴影），改成 `draw_all_ex(shadow_wanted())`。
+- `raise / move_window / close_win / minimize_win / toggle_max / show_win` 六处各加一行 `ask_shadow()`。
+
+语义上很自然：**窗口几何刚变过的那一小段时间要阴影，静止时不要**。拖窗口时每帧都 `ask_shadow`，所以拖动过程中阴影一直在；松手 150 ms 后自动消失，此时终端滚字、光标闪烁这些高频帧走无阴影路径。
+
+复测 `整桌 17 / 壁纸 4 / 窗口 17`，再测 `16 / 4 / 16` —— **2.3 倍**，且静止帧不再有"每次重画都在做无用混合"的浪费。
+
+还剩两块肉：
+
+| 项 | 现在 | 该怎么做 |
+|---|---|---|
+| 壁纸 4 ms | 每帧 `restore_wall(0,0,W,H)` 整屏 3 MiB memcpy | 壁纸本来就静态，只需要在窗口露出区域恢复；做脏矩形就行 |
+| 窗口 16 ms | 三个窗口全量重画，包括没变的系统/网络窗 | 每窗一个 `DIRTY` 矩形，只重画和上次不同的部分；终端按行脏标记 |
+
+这两项是 PERF-3 的内容，等 UI 再稳一版做。
+
+### 57.3 时区：编译期常量，不给用户改错的机会
+
+`rtc.rs` 里三个常量：
+
+```rust
+pub const TZ_NAME: &str = "Asia/Shanghai (CST)";
+pub const TZ_OFFSET_HOURS: i32 = 8;
+pub const CST_OFFSET: u64 = 8 * 3600;
+```
+
+PL031 给的是 UTC 秒，`local()` 一律 `+ CST_OFFSET`，`md()` 用自写的儒略日换算出年月日。`date` 打印带时区名，`tz` 专门自查：
+
+```
+$ tz
+  时区      : Asia/Shanghai (CST)
+  UTC 偏移  : +8
+  夏令时    : 无（中国 1991 年后已取消）
+  改法      : 改 kernel/src/rtc.rs 的 TZ_OFFSET_HOURS，重编即生效
+```
+
+不做"用户可配置时区"是刻意的：这也是用户的硬要求（固定上海），而且配置项要落到 AsterFS、要有时区库、要有 UI，收益极低。
+
+### 57.4 包管理：先是格式，再是网络
+
+`ASEPKG1` 包格式，144 字节头：
+
+| 偏移 | 长度 | 内容 |
+|---|---|---|
+| 0 | 8 | 魔数 `ASEPKG1\0` |
+| 8 | 16 | 包名（ASCII，补零） |
+| 24 | 12 | 版本号 |
+| 36 | 4 | 包体长度（LE） |
+| 40 | 4 | CRC32 |
+| 44 | 52 | 一行描述 |
+| 96 | 48 | 包体（当前是占位） |
+
+`tools/mkpkg.py` 生成四个索引项：`python3 3.12.4`、`gcc 13.2`、`git 2.43`、`gh 2.40`。`shell.rs` 里 `PKGS: [PkgEnt; 4]` 用 `include_bytes!` 把 `.ase` 编进内核，`PKG_ON[4]` 记安装状态。
+
+`pkg` 四个子命令：
+
+- `pkg list` — 索引表，`[已装]` / `[可装]`
+- `pkg info <名>` — 版本、包体大小、落盘路径、CRC
+- `pkg install <名>` — `vfs::open(path, true)` 建文件 → `vfs::write` 写头 → `close`，落进 AsterFS，置 `PKG_ON`
+- `pkg remove <名>` — 只清标志（AsterFS v0 没有 unlink）
+
+命令分派踩过一次坑：原来写成 `"pkg" => ...` 整行匹配，`pkg list` 落到"未知命令"。改成前缀分支 `l if l == "pkg" || l.starts_with("pkg ")`，`tz` 同样处理。
+
+**边界要说清**：现在装的是 144 字节的占位包，能从索引里"装"进文件系统，但里面没有真程序。真装 Python 需要 ① HTTP 客户端去拉（P6-4）② 解包 ③ ELF/脚本加载器（阶段四）④ 依赖解析。`pkg` 现在证明的是**格式、索引、落盘三件事对了**。
+
+### 57.5 无线：没有硬件，就不写在纸上
+
+`wifi` 命令的输出是本节的诚实版：
+
+```
+$ wifi
+  无线      : 硬件层没有 802.11 适配器，WIFI-1 未开工
+  QEMU virt : 没有 SDIO / PCIe 无线网卡可枚举
+  树莓派    : BCM43438 挂在 SDIO 上，需要先做 SDHCI(EMMC) 驱动
+  现实路径  : SDHCI → SDIO 枚举 → 固件上传 → WPA2 握手（四步，都是硬骨头）
+  眼下替代  : virtio-net 当有线用，QEMU 的 -netdev user 自带上游 NAT
+```
+
+为什么不先写个假的 `wifi connect`：QEMU virt 机器根本没有 802.11 设备可枚举，写出来的命令只能打印"已连接"，那是欺骗。树莓派的 BCM43438 走 SDIO，而 SDHCI 驱动本身就是 BOARD-4 的活儿，还没开工 —— 顺序上必须先有 EMMC/SDHCI，才谈得上 SDIO 枚举，才谈得上把 `.bin` 固件塞进芯片，才谈得上四次 WPA2 握手。
+
+所以 WIFI-1 的任务拆成四步，每步都能独立验收：
+
+1. **SDHCI**：CMD0/8/41/2/3/7/16，PIO 模式读扇区，接进 `disk`
+2. **SDIO 枚举**：CMD52/CMD53，认出 BCM43438 的 vendor/device
+3. **固件**：把 `brcmfmac43438.bin` 分块写到芯片的 download 寄存器，等它切到固件模式
+4. **WPA2**：四次握手（EAPOL）+ CCMP，密钥派生用自研 SHA-256
+
+这四步做完才有一行 `wifi connect SSID PASS`。现在写的是第 0 步：让人知道差多远。

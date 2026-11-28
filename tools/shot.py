@@ -35,7 +35,10 @@ gpu_arg = (
     if GPU == "virtio"
     else ["-device", "ramfb"]
 )
-Q = ["qemu-system-aarch64", "-M", "virt", "-cpu", "cortex-a72", "-m", "512M"] + gpu_arg + img_arg + [
+net_arg = []
+if os.environ.get("NET"):
+    net_arg = ["-netdev", "user,id=n0,hostfwd=tcp::8088-:80", "-device", "virtio-net-device,netdev=n0"]
+Q = ["qemu-system-aarch64", "-M", "virt", "-cpu", "cortex-a72", "-m", "512M"] + gpu_arg + net_arg + img_arg + [
     "-device", "virtio-keyboard-device", "-device", "virtio-mouse-device",
     "-display", "none",
     "-serial", f"tcp:127.0.0.1:{SPORT},server,nowait",

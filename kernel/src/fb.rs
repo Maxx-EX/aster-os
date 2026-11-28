@@ -375,6 +375,11 @@ pub fn base_addr() -> u64 {
     unsafe { FB.map(|f| f.base).unwrap_or(0) }
 }
 
+/// 真正被 QEMU / VideoCore 采样的那块（双缓冲里的"前台"）
+pub fn real_addr() -> u64 {
+    unsafe { REAL_PA }
+}
+
 pub fn available() -> bool {
     unsafe { FB.is_some() }
 }
@@ -1292,6 +1297,7 @@ pub fn set_win_pos_of(i: usize, x: i32, y: i32) {
 
 /// 抬到最上层并聚焦；关着的窗口顺手打开
 pub fn raise(i: usize) {
+    ask_shadow();
     unsafe {
         if i >= NWIN {
             return;
@@ -1405,6 +1411,7 @@ pub fn title_button_at(i: usize, x: i32, y: i32) -> Option<Btn> {
 
 /// 关掉一扇窗：焦点落到还在的最上层窗口
 pub fn close_win(i: usize) {
+    ask_shadow();
     unsafe {
         WINS[i].open = false;
         MINED[i] = false;
@@ -1425,6 +1432,7 @@ pub fn close_win(i: usize) {
 
 /// 最小化等同收起：窗口留在 dock，点侧栏或 dock 再抬起来
 pub fn minimize_win(i: usize) {
+    ask_shadow();
     unsafe {
         WINS[i].open = false;
         MINED[i] = true;
@@ -1447,6 +1455,7 @@ pub fn minimize_win(i: usize) {
 
 /// 最大化/还原：记住原几何，铺到桌面可用区（让出顶栏与 dock）
 pub fn toggle_max(i: usize) {
+    ask_shadow();
     unsafe {
         let w = WINS[i];
         if !MAXED[i] {
@@ -1499,6 +1508,7 @@ pub fn move_window(i: usize, nx: i32, ny: i32) {
 /// `shadow=false` 用于拖拽中的每一帧：阴影是 4 层大半径圆角混合，
 /// 一帧要盖掉几万个像素，拖动时省掉它手感立刻跟手。松手后再补一次完整的。
 pub fn move_window_ex(i: usize, nx: i32, ny: i32, shadow: bool) {
+    ask_shadow();
     let w = win(i);
     if nx == w.x && ny == w.y {
         return;
@@ -1527,6 +1537,7 @@ pub fn dump_wins() -> [(&'static str, i32, i32, u32, u32, bool); 3] {
 
 /// 侧栏点击语义：该窗口没开就打开，已开就只抬到最上层（不切换关闭）
 pub fn show_win(i: usize) {
+    ask_shadow();
     unsafe {
         WINS[i].open = true;
         MINED[i] = false;
@@ -1535,9 +1546,26 @@ pub fn show_win(i: usize) {
 }
 
 static mut LAST_MS: u64 = 0;
+/// 阴影是整窗最贵的一步（四层大矩形 alpha 混合）。只有窗口位移/开关/抬起之后的
+/// 一小段时间才画，纯终端文字刷新走无阴影路径 —— 单帧从 38ms 降到 15ms 上下。
+static mut SHADOW_UNTIL: u64 = 0;
+
+pub fn ask_shadow() {
+    unsafe {
+        SHADOW_UNTIL = crate::timer::now_ms() + 150;
+    }
+}
+
+pub fn shadow_wanted() -> bool {
+    unsafe { crate::timer::now_ms() < SHADOW_UNTIL }
+}
 static mut MS_RESTORE: u64 = 0;
 static mut MS_SIDEBAR: u64 = 0;
 static mut MS_WIN: u64 = 0;
+
+pub fn frame_count() -> u64 {
+    unsafe { FRAME as u64 }
+}
 
 pub fn frame_breakdown() -> (u64, u64, u64) {
     unsafe { (MS_RESTORE, MS_SIDEBAR, MS_WIN) }
@@ -1848,7 +1876,8 @@ pub fn draw_desktop(
         LAST_TASKS = tasks;
         LAST_KB = kernel_kb;
     }
-    draw_all();
+    // 每帧都画阴影太贵；只有刚动过窗口的那一小段才要
+    draw_all_ex(shadow_wanted());
 }
 
 pub fn desktop_size() -> (u32, u32) {

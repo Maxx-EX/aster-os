@@ -216,7 +216,13 @@ pub extern "C" fn kernel_main(bi: *const BootInfo) -> ! {
     );
 
     if fb::init() {
-        println!("[KERNEL] 图形输出已就绪：ramfb {}x{} XRGB8888 @ {:#x}", fb::width(), fb::height(), fb::base_addr());
+        println!(
+            "[KERNEL] 图形输出已就绪：{}x{} XRGB8888  绘制缓冲 @{:#x}  上屏 {:#x}",
+            fb::width(),
+            fb::height(),
+            fb::base_addr(),
+            fb::real_addr()
+        );
         println!("[BOOT] 开机动画 2.4s（星芒生长 → 归位），shell 里 bootanim 可重播");
         if crate::board::ACTIVE.usb.is_some() {
             match crate::usb::init() {

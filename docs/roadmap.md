@@ -14,10 +14,10 @@
 | 一 | 启动与信任根 | v0.1–v0.2 | ✅ | `boot/`、AVP 三级校验、EX3、AFP 刷写、底层 shell |
 | 二 | 内核基础 | v0.3–v0.5 | 🔄 | 内核、MMU/EL0/调度、图形、键盘、网络 |
 | 2.5 | 界面精修 | v0.6 | 🔄 | 抗锯齿渲染、圆角与投影、鼠标、窗口管理 |
-| 三 | 存储与文件系统 | v0.6.5–v0.7 | ⬜ | virtio-blk、AsterFS、VFS、从盘加载内核与程序 |
+| 三 | 存储与文件系统 | v0.6.5–v0.7 | 🔄 | virtio-blk、AsterFS、VFS、从盘加载内核与程序 |
 | 四 | 进程与用户态生态 | v0.7 | ⬜ | ELF 加载器、fork/exec、AsterLibc、动态链接 |
 | 五 | 桌面成熟 | v0.8 | ⬜ | 鼠标、窗口管理、应用框架、内置应用 |
-| 六 | 网络应用 | v0.8.5 | ⬜ | DNS、TLS、HTTP、浏览器、包管理 |
+| 六 | 网络应用 | v0.8.5 | 🔄 | DNS、TLS、HTTP、浏览器、包管理 |
 | 七 | 跑 APK | v0.9 | ⬜ | DEX 解释器、JNI、资源、装包、沙箱 |
 | 八 | 转译跑 EXE | v0.9.5 | ⬜ | PE 加载、Win32 翻译层、x86→ARM64 转译 |
 | 九 | 真机与发布 | v1.0 | ⬜ | 树莓派 4、安装镜像、硬件信任根、CI、发行 |
@@ -216,7 +216,12 @@ A 只碰内核，出错最多是"读不出来"，回退一行代码就能恢复�
 | P6-3 | **TLS** | 引入可审计实现（BearSSL / mbedTLS 精简）或自研，证书链校验 |
 | P6-4 | HTTP 客户端 | GET/POST、分块、重定向、最小 Cookie |
 | P6-5 | 浏览器 | HTML 子集解析 + 布局 + 文本/图片渲染，无 JS；够看文档与本站页面 |
-| P6-6 | 包管理雏形 | `aster-pkg`：网络拉 `.apkg`，校验签名后落盘安装 |
+| P6-6 | 包管理雏形 | `aster-pkg`：网络拉 `.apkg`，校验签名后落盘安装（PKG-1 骨架已落地，见下） |
+| NET-2 | ✅ 有线真的通了 | `-device virtio-net-device` 挂进 QEMU virt，MAC/IP/网关自配，自研 TCP 收包 → HTTP 服务器 `:80`；宿主 `curl 127.0.0.1:8088` 回 **HTTP 200** 与内核自写 HTML |
+| NET-3 | ⬜ 无线（WIFI-1） | QEMU virt 无 802.11 设备；树莓派 BCM43438 在 SDIO 上，需 SDHCI → SDIO 枚举 → 固件上传 → WPA2 四步，暂无代码，`wifi` 命令如实说明 |
+| TZ-1 | ✅ 时区固定上海 | `rtc.rs` 编译期常量 `Asia/Shanghai +8`、无夏令时；`date` 带时区名，`tz` 命令自查 |
+| PKG-1b | ✅ 包管理器骨架 | `ASEPKG1` 索引（python3/gcc/git/gh）+ `pkg list/info/install/remove`；`install` 走 VFS 落 AsterFS，真包下载待 P6-4 |
+| PERF-2 | ✅ 阴影按需 | 投影四层 alpha 是最大开销；只在窗口位移/开关后 150 ms 内画，静态帧 38 ms → 16 ms |
 
 **验收**：DNS 解析正确；`https://` 页面能拉下来；TLS 拒绝过期证书。
 
@@ -369,3 +374,8 @@ Windows PE + x86-64 指令，在 ARM64 上必须过两关：
 - **UI-9 ✅ GPU 真实呈现（virtio-gpu 2D + 整帧 flush）、终端置顶、屏幕软键盘、标题栏热区放大、输入回显上屏**：ramfb 撕裂（闪/空白）、z 序（点不着）、`uart::putc` 回显（打不了字）三个根因逐个收掉；`make test` 28 PASS
 - **UI-10 ✅ 软键盘一键命令 chip + 历史键（UP/DN 伪键 0x90/0x91）**：手机上 `dex big` 从八次点击变成一次；`make test` 28 PASS
 - **UI-11 ✅ 窗口三态闭环（关闭/最小化/最大化 + dock 任务栏格子 + 侧栏开关）、双缓冲（GPU 零拷贝挂载 3 MiB 后台帧缓冲）**：关掉的窗口能重开，最小化的能点回，最大化让出侧栏；`make test` 28 PASS
+- **NET-2 ✅ 网络驱动真的通了**：`virtio-net` 从"未找到设备"到收到 DHCP 前就自配 10.0.2.15/24，自研 TCP 收 SYN → 回 HTTP 200 + 内核自写页面（`<title>Aster · 星芒</title>`）；QEMU 侧 `hostfwd=tcp::8088-:80`（8080 被宿主 caddy 占用）
+- **PERF-2 ✅ 阴影按需**：`perf` 从 `整桌 38 壁纸 3 窗口 38` 降到 `整桌 16-17 壁纸 4 窗口 16`，2.3 倍；壁纸 4 ms 的整屏 memcpy 与窗口局部重绘仍是下一步
+- **TZ-1 ✅ 时区固定上海**：`Asia/Shanghai (CST)`、`+8`、无夏令时写进 `rtc.rs` 常量，`date`/`tz` 双入口可查
+- **PKG-1b ✅ 包管理器骨架**：`ASEPKG1\0` 包格式 + 4 个索引项 + `list/info/install/remove`；`pkg install` 经 VFS 落到 AsterFS，真包还得等 HTTP 客户端
+- **WIFI-1 ⬜ 无线未开工**：不假装有驱动，`wifi` 命令把四步路径和现状写在屏幕上；`make test` 现有 31 项断言

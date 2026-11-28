@@ -842,6 +842,20 @@ pub fn run() -> ! {
             }
             "app" | "app on" | "app off" | "app start" | "app stop" | "app status" | "app step" => cmd_app(line),
             l if l.starts_with("app start ") => cmd_app(line),
+            l if l == "pkg" || l.starts_with("pkg ") => cmd_pkg(l.strip_prefix("pkg").unwrap_or("").trim()),
+            "wifi" => {
+                println!("  无线      : 硬件层没有 802.11 适配器，WIFI-1 未开工");
+                println!("  QEMU virt : 没有 SDIO / PCIe 无线网卡可枚举");
+                println!("  树莓派    : BCM43438 挂在 SDIO 上，需要先做 SDHCI(EMMC) 驱动");
+                println!("  现实路径  : SDHCI → SDIO 枚举 → 固件上传 → WPA2 握手（四步，都是硬骨头）");
+                println!("  眼下替代  : virtio-net 当有线用，QEMU 的 -netdev user 自带上游 NAT");
+            },
+            l if l == "tz" => {
+                println!("  时区      : {}", crate::rtc::TZ_NAME);
+                println!("  UTC 偏移  : +{} 小时（固定写死在 rtc.rs，不跟宿主机）", crate::rtc::offset_hours());
+                println!("  夏令时    : 无（中国自 1991 年起不用）");
+                println!("  改时区    : 编译期常量 TZ_OFFSET_HOURS，改完重新 make image");
+            }
             "canvas" | "canvas on" | "canvas off" => {
                 let (nc, dropped) = crate::apkcanvas::stats();
                 if line == "canvas off" || line == "canvas" {
@@ -962,6 +976,9 @@ pub fn run() -> ! {
             }
             "net" => cmd_net(),
             "uptime" => println!("  已运行 {} ms", uptime_ms()),
+            "date" => cmd_date(),
+
+            "perf" => cmd_perf(),
             "mem" => cmd_mem(),
             "clear" => {
                 for _ in 0..40 { println!() }
@@ -999,6 +1016,126 @@ pub fn render_dashboard() {
     crate::apkcanvas::draw_if_active();
     // 软键盘盖在所有窗口之上（手机端唯一能用的输入手段）
     crate::kb::draw_if_open();
+}
+
+/// 包索引：真实仓库要去网上拉（PKG-2），这里先把格式、安装、卸载、查看跑通
+struct PkgEnt {
+    name: &'static str,
+    ver: &'static str,
+    size: u32,
+    desc: &'static str,
+    path: &'static str,
+    blob: &'static [u8],
+}
+
+static PKGS: [PkgEnt; 4] = [
+    PkgEnt { name: "python3", ver: "3.12.4", size: 144, desc: "Python 解释器（占位包体）", path: "/pkg-python3.ase", blob: include_bytes!("../../assets/pkg/python3.ase") },
+    PkgEnt { name: "gcc", ver: "13.2.0", size: 144, desc: "C/C++ 编译器（占位包体）", path: "/pkg-gcc.ase", blob: include_bytes!("../../assets/pkg/gcc.ase") },
+    PkgEnt { name: "git", ver: "2.44.0", size: 144, desc: "版本控制（占位包体）", path: "/pkg-git.ase", blob: include_bytes!("../../assets/pkg/git.ase") },
+    PkgEnt { name: "gh", ver: "2.50.0", size: 144, desc: "GitHub CLI（占位包体）", path: "/pkg-gh.ase", blob: include_bytes!("../../assets/pkg/gh.ase") },
+];
+
+/// 本次运行里的安装状态：true 表示已落到 AsterFS 的 /pkg-<name>.ase
+static mut PKG_ON: [bool; 4] = [false; 4];
+
+fn pkg_find(name: &str) -> Option<usize> {
+    PKGS.iter().position(|p| p.name == name)
+}
+
+fn cmd_pkg(a: &str) {
+    let mut it = a.split_whitespace();
+    let sub = it.next().unwrap_or("list");
+    match sub {
+        "list" | "" => {
+            println!("  Aster 包索引（{} 个）", PKGS.len());
+            for (i, p) in PKGS.iter().enumerate() {
+                let st = unsafe { if PKG_ON[i] { "[已装]" } else { "[可装]" } };
+                println!("  {} {:<9} {:<7} {:>4} B  {}", st, p.name, p.ver, p.size, p.desc);
+            }
+            println!("  用法: pkg install <名字> / pkg remove <名字> / pkg info <名字>");
+        }
+        "info" => match it.next().map(pkg_find) {
+            Some(Some(i)) => {
+                let p = &PKGS[i];
+                println!("  名称      : {}", p.name);
+                println!("  版本      : {}   （占位版本号）", p.ver);
+                println!("  包体      : {} 字节，CRC32 写在头 8..12", p.blob.len() - 40);
+                println!("  说明      : {}", p.desc);
+                println!("  落盘路径  : {}", p.path);
+                println!("  状态      : {}", unsafe { if PKG_ON[i] { "已安装" } else { "未安装" } });
+            }
+            _ => println!("  没有这个包"),
+        },
+        "install" => {
+            let name = it.next().unwrap_or("");
+            let idx = match pkg_find(name) {
+                Some(i) => i,
+                None => {
+                    println!("  索引里没有 {}", name);
+                    return;
+                }
+            };
+            if unsafe { PKG_ON[idx] } {
+                println!("  {} 已经装好了", name);
+                return;
+            }
+            // 真的写盘：AsterFS 单文件 4 KiB，144 字节的包放得下
+            if !crate::blk::available() {
+                println!("  没有 virtio-blk（先挂盘再 pkg install）");
+                return;
+            }
+            let path = PKGS[idx].path;
+            match crate::vfs::open(path, true) {
+                Ok(fd) => {
+                    let n = crate::vfs::write(fd, PKGS[idx].blob);
+                    crate::vfs::close(fd);
+                    if n < 0 {
+                        println!("  写 {} 失败（错误码 {}）", path, n);
+                        return;
+                    }
+                    unsafe { PKG_ON[idx] = true };
+                    println!("  已安装 {} → {}（{} 字节，{} 块）", name, path, n, (n as u32).div_ceil(4096));
+                    println!("  查看: ls   /   pkg list");
+                }
+                Err(e) => println!("  打开 {} 失败（{}）", path, e),
+            }
+        }
+        "remove" => {
+            let name = it.next().unwrap_or("");
+            match pkg_find(name) {
+                Some(i) => {
+                    unsafe { PKG_ON[i] = false };
+                    println!("  已卸载 {}（AsterFS 里的 /pkg-{} 留着，v0 没有 unlink）", name, name);
+                }
+                None => println!("  索引里没有 {}", name),
+            }
+        }
+        other => println!("  未知子命令 {}（list / info / install / remove）", other),
+    }
+}
+
+fn cmd_date() {
+    match crate::rtc::local() {
+        Some((y, m, d, hh, mm, ss)) => {
+            println!("  {}-{:02}-{:02} {:02}:{:02}:{:02}  {}", y, m, d, hh, mm, ss, crate::rtc::TZ_NAME);
+            println!("  时区      : {}（UTC+{}，固定不跟随宿主机）", crate::rtc::TZ_NAME, crate::rtc::offset_hours());
+            println!("  来源      : PL031 RTC 读 UTC，内核统一加固定偏移");
+        }
+        None => println!("  RTC 不可用（没有 PL031 或没上电）"),
+    }
+}
+
+fn cmd_perf() {
+    let (rest, side, wins) = fb::frame_breakdown();
+    let frames = fb::frame_count();
+    let up = uptime_ms();
+    println!("  帧号      : {}", frames);
+    println!("  上一帧耗时: 恢复壁纸 {} ms / 侧栏 {} ms / 窗口 {} ms", rest, side, wins);
+    println!("  合计      : {} ms（{} fps 上限）", rest + side + wins,
+        if rest + side + wins == 0 { 0 } else { 1000 / (rest + side + wins).max(1) });
+    println!("  运行时长  : {} ms → 平均 {:.1} 帧/秒", up,
+        frames as f64 * 1000.0 / up.max(1) as f64);
+    println!("  帧缓冲    : {}x{} 双缓冲（画满一帧才 present）", fb::width(), fb::height());
 }
 
 fn cmd_net() {
