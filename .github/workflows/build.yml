@@ -34,11 +34,7 @@ jobs:
       - name: 产物
         run: |
           ls -lh build/aster-boot.elf build/aster-kernel.ast
-          python3 - <<'PY'
-          import re
-          log = open('build/test.log').read()
-          print('PASS', log.count('[TEST] PASS'), 'FAIL', log.count('[TEST] FAIL'))
-          PY
+          echo "PASS 数：$(grep -c '\[TEST\] PASS' build/test.log || true)"
 
       - uses: actions/upload-artifact@v4
         with:
